@@ -243,3 +243,58 @@ def get_repo_status(entry: RepoEntry, root: Path) -> RepoStatus:
         ahead=ahead,
         behind=behind,
     )
+
+
+def get_self_status(root: Path) -> RepoStatus | None:
+    """Get status of the repository that contains .gitscale.
+
+    Returns None if root is not a git repository.
+    """
+    result = _run_git(
+        ["rev-parse", "--is-inside-work-tree"],
+        cwd=root,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+
+    # Current branch/ref
+    ref_result = _run_git(
+        ["symbolic-ref", "--short", "HEAD"],
+        cwd=root,
+        check=False,
+    )
+    if ref_result.returncode == 0:
+        current_ref = ref_result.stdout.strip()
+        detached = False
+    else:
+        rev_result = _run_git(["rev-parse", "--short", "HEAD"], cwd=root)
+        current_ref = rev_result.stdout.strip()
+        detached = True
+
+    # Clean?
+    clean_result = _run_git(["status", "--porcelain"], cwd=root)
+    clean = clean_result.stdout.strip() == ""
+
+    # Ahead/behind
+    ab_result = _run_git(
+        ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+        cwd=root,
+        check=False,
+    )
+    ahead, behind = 0, 0
+    if ab_result.returncode == 0:
+        parts = ab_result.stdout.strip().split()
+        if len(parts) == 2:
+            ahead, behind = int(parts[0]), int(parts[1])
+
+    return RepoStatus(
+        directory=".",
+        exists=True,
+        current_ref=current_ref,
+        expected_ref="",
+        is_clean=clean,
+        is_detached=detached,
+        ahead=ahead,
+        behind=behind,
+    )

@@ -6,7 +6,7 @@ from pathlib import Path
 import click
 
 from gitscale.config import ConfigError, find_config, parse_config
-from gitscale.git import RepoStatus, fetch_repo, get_repo_status
+from gitscale.git import RepoStatus, fetch_repo, get_repo_status, get_self_status
 
 
 @click.command()
@@ -60,7 +60,13 @@ def status(
                     click.echo(f"Fetching {entry.directory}...")
                 fetch_repo(entry, config_root)
 
-    statuses = [get_repo_status(e, config_root) for e in entries]
+    statuses: list[RepoStatus] = []
+
+    self_status = get_self_status(config_root)
+    if self_status is not None:
+        statuses.append(self_status)
+
+    statuses.extend(get_repo_status(e, config_root) for e in entries)
 
     if output_format == "json":
         _print_json(statuses)
@@ -96,7 +102,11 @@ def _print_table(statuses: list[RepoStatus]) -> None:
             flags.append(f"+{s.ahead}")
         if s.behind:
             flags.append(f"-{s.behind}")
-        if s.current_ref != s.expected_ref and not s.is_detached:
+        if (
+            s.expected_ref
+            and s.current_ref != s.expected_ref
+            and not s.is_detached
+        ):
             flags.append("ref-mismatch")
 
         status_str = ", ".join(flags) if flags else "ok"
