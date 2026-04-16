@@ -10,13 +10,15 @@ from gitscale import __version__
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose output.")
 @click.pass_context
 def cli(ctx: click.Context, verbose: bool) -> None:
-    """GitScale — Git operations at scale."""
+    """GitScale — manage multiple sub-repositories from a .gitscale config."""
     ctx.ensure_object(dict)
     ctx.obj["verbose"] = verbose
 
 
 # Import and register subcommands
-from gitscale.commands import clone, status  # noqa: E402
+from gitscale.commands import add, clone, status, sync  # noqa: E402
 
 cli.add_command(clone.clone)
 cli.add_command(status.status)
+cli.add_command(sync.sync)
+cli.add_command(add.add)

@@ -1,50 +1,82 @@
-"""Clone repositories at scale."""
+"""Clone all sub-repositories declared in .gitscale."""
 
 from pathlib import Path
 
 import click
 
+from gitscale.config import ConfigError, RepoEntry, find_config, parse_config
+from gitscale.git import GitError, clone_repo
+
 
 @click.command()
-@click.argument("repos", nargs=-1, required=True)
 @click.option(
-    "-d",
-    "--dest",
-    type=click.Path(path_type=Path),
-    default=Path("."),
-    help="Destination directory for cloned repos.",
-)
-@click.option(
-    "--depth",
-    type=int,
+    "-C",
+    "--root",
+    type=click.Path(exists=True, path_type=Path),
     default=None,
-    help="Create a shallow clone with the given depth.",
+    help="Root directory containing .gitscale (default: auto-detect).",
 )
-@click.option(
-    "--branch",
-    "-b",
-    type=str,
-    default=None,
-    help="Branch to clone.",
-)
+@click.argument("names", nargs=-1)
 @click.pass_context
 def clone(
     ctx: click.Context,
-    repos: tuple[str, ...],
-    dest: Path,
-    depth: int | None,
-    branch: str | None,
+    root: Path | None,
+    names: tuple[str, ...],
 ) -> None:
-    """Clone one or more repositories into DEST."""
+    """Clone sub-repositories from .gitscale config.
+
+    If NAMES are given, clone only those entries. Otherwise clone all.
+    """
     verbose: bool = ctx.obj["verbose"]
-    dest = dest.resolve()
 
-    for repo in repos:
-        if verbose:
-            click.echo(f"Cloning {repo} → {dest}")
+    try:
+        config_path = find_config(root)
+    except ConfigError as e:
+        raise click.ClickException(str(e)) from None
 
-        # TODO: implement actual git clone logic
-        opts = ""
-        if branch or depth:
-            opts = f" (branch={branch}, depth={depth})"
-        click.echo(f"Would clone {repo} into {dest}{opts}")
+    config_root = config_path.parent
+    entries = parse_config(config_path)
+    selected = _filter_entries(entries, names)
+
+    if not selected:
+        click.echo("Nothing to clone.")
+        return
+
+    failed = 0
+    for entry in selected:
+        dest = config_root / entry.directory
+        if dest.exists():
+            click.echo(f"  skip  {entry.directory} (already exists)")
+            continue
+        try:
+            if verbose:
+                click.echo(
+                    f"  clone {entry.repo_url} → "
+                    f"{entry.directory} @ {entry.revision}"
+                )
+            clone_repo(entry, config_root, verbose=verbose)
+            click.echo(f"  ok    {entry.directory}")
+        except GitError as e:
+            click.echo(f"  FAIL  {entry.directory}: {e}", err=True)
+            failed += 1
+
+    if failed:
+        raise click.ClickException(
+            f"{failed} repo(s) failed to clone"
+        )
+
+
+def _filter_entries(
+    entries: list[RepoEntry], names: tuple[str, ...]
+) -> list[RepoEntry]:
+    """Filter entries by name, or return all if names is empty."""
+    if not names:
+        return entries
+    name_set = set(names)
+    matched = [e for e in entries if e.directory in name_set]
+    unknown = name_set - {e.directory for e in matched}
+    if unknown:
+        raise click.ClickException(
+            f"Unknown repos: {', '.join(sorted(unknown))}"
+        )
+    return matched

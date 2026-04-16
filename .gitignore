@@ -23,6 +23,9 @@ build/
 .vscode/
 .idea/
 
+# Playground cloned repos
+playground/libs/
+
 # OS
 .DS_Store
 Thumbs.db

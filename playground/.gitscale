@@ -1,0 +1,3 @@
+# Small public repos for testing — revision can be branch, tag, or commit
+libs/markupsafe https://github.com/pallets/markupsafe.git main readonly
+libs/humanize   https://github.com/python-humanize/humanize.git main readwrite
