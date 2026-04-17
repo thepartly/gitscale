@@ -50,11 +50,13 @@ def add(
     REVISION is the branch, tag, or commit to checkout.
     """
     hosts: dict[str, str] = {}
+    storage_url = ""
     try:
         config_path = find_config(root)
         config = load_config(config_path)
         entries = list(config.repos)
         hosts = config.hosts
+        storage_url = config.storage_url
     except ConfigError:
         # No config yet — create one
         config_path = (root or Path.cwd()).resolve() / CONFIG_FILENAME
@@ -75,7 +77,7 @@ def add(
         mode=RepoMode(mode),
     )
     entries.append(new_entry)
-    write_config(config_path, entries, hosts=hosts)
+    write_config(config_path, entries, hosts=hosts, storage_url=storage_url)
     click.echo(
         f"Added {directory} → {repo_url} @ {revision} [{mode}]"
     )

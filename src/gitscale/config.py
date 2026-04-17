@@ -37,6 +37,7 @@ class GitScaleConfig:
 
     repos: list[RepoEntry]
     hosts: dict[str, str] = field(default_factory=dict)
+    storage_url: str = ""
 
 
 class ConfigError(Exception):
@@ -78,8 +79,9 @@ def load_config(config_path: Path) -> GitScaleConfig:
 
     hosts = _parse_hosts(data.get("hosts", {}), config_path)
     repos = _parse_repos(data.get("repos", {}), config_path)
+    storage_url = _parse_storage(data.get("storage", {}), config_path)
 
-    return GitScaleConfig(repos=repos, hosts=hosts)
+    return GitScaleConfig(repos=repos, hosts=hosts, storage_url=storage_url)
 
 
 def _parse_hosts(
@@ -104,6 +106,24 @@ def _parse_hosts(
             )
         hosts[hostname] = platform
     return hosts
+
+
+def _parse_storage(
+    raw: Any, config_path: Path
+) -> str:
+    """Parse the [storage] table. Returns the URL or empty string."""
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            f"{config_path}: [storage] must be a table"
+        )
+    if not raw:
+        return ""
+    url = raw.get("url")
+    if not isinstance(url, str) or not url:
+        raise ConfigError(
+            f"{config_path}: storage.url is required"
+        )
+    return url.rstrip("/")
 
 
 def _parse_repos(
@@ -173,6 +193,7 @@ def write_config(
     config_path: Path,
     entries: list[RepoEntry],
     hosts: dict[str, str] | None = None,
+    storage_url: str = "",
 ) -> None:
     """Write a .gitscale config file in TOML format."""
     lines: list[str] = []
@@ -180,7 +201,12 @@ def write_config(
     if hosts:
         lines.append("[hosts]")
         for hostname, platform in sorted(hosts.items()):
-            lines.append(f'"{hostname}" = "{platform}"')
+            lines.append(f'"{ hostname}" = "{platform}"')
+        lines.append("")
+
+    if storage_url:
+        lines.append("[storage]")
+        lines.append(f'url = "{storage_url}"')
         lines.append("")
 
     if entries:

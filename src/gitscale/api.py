@@ -157,6 +157,8 @@ def _fetch_github(
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
+    authenticated = token is not None
+
     with httpx.Client(
         base_url=api_base, headers=headers, timeout=30
     ) as client:
@@ -164,7 +166,7 @@ def _fetch_github(
         commit_resp = client.get(
             f"/repos/{owner}/{repo}/commits/{revision}"
         )
-        _check_response(commit_resp, "commit")
+        _check_response(commit_resp, "commit", authenticated=authenticated)
         commit_data: dict[str, Any] = commit_resp.json()
 
         # Combined status
@@ -218,7 +220,7 @@ def _fetch_gitlab(
         commit_resp = client.get(
             f"/projects/{project_path}/repository/commits/{revision}"
         )
-        _check_response(commit_resp, "commit")
+        _check_response(commit_resp, "commit", authenticated=True)
         commit_data: dict[str, Any] = commit_resp.json()
 
         # Pipeline statuses
@@ -243,17 +245,28 @@ def _fetch_gitlab(
     return result
 
 
-def _check_response(resp: httpx.Response, label: str) -> None:
+def _check_response(
+    resp: httpx.Response, label: str, *, authenticated: bool
+) -> None:
     """Raise ApiError if the response is not successful."""
+    no_token_hint = (
+        "" if authenticated
+        else " (no token configured — set GITHUB_TOKEN or GH_TOKEN"
+        " for private repos)"
+    )
     if resp.status_code == 401:
-        raise ApiError(f"Authentication failed fetching {label} (401)")
+        raise ApiError(
+            f"Authentication failed fetching {label} (401){no_token_hint}"
+        )
     if resp.status_code == 403:
         raise ApiError(
             f"Access denied fetching {label} (403) — "
-            f"check token permissions"
+            f"check token permissions{no_token_hint}"
         )
     if resp.status_code == 404:
-        raise ApiError(f"{label.capitalize()} not found (404)")
+        raise ApiError(
+            f"{label.capitalize()} not found (404){no_token_hint}"
+        )
     if resp.status_code >= 400:
         raise ApiError(
             f"API error fetching {label}: "

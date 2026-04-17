@@ -369,3 +369,162 @@ def test_detect_platform_unknown_host() -> None:
 
     with pytest.raises(ApiError, match="Cannot detect platform"):
         detect_platform("https://unknown.example.com/org/repo.git", {})
+
+
+# ---------------------------------------------------------------------------
+# Config: storage section
+# ---------------------------------------------------------------------------
+
+
+def test_parse_config_with_storage(tmp_path: Path) -> None:
+    cfg = tmp_path / ".gitscale.toml"
+    cfg.write_text(
+        '[storage]\n'
+        'url = "https://my-bucket.s3.us-east-1.amazonaws.com/gitscale"\n\n'
+        '[repos]\n'
+        '"libs/a" = { url = "https://a.git", revision = "main" }\n'
+    )
+    config = load_config(cfg)
+    assert config.storage_url == (
+        "https://my-bucket.s3.us-east-1.amazonaws.com/gitscale"
+    )
+    assert len(config.repos) == 1
+
+
+def test_parse_config_no_storage(tmp_path: Path) -> None:
+    cfg = tmp_path / ".gitscale.toml"
+    cfg.write_text(
+        '[repos]\n'
+        '"libs/a" = { url = "https://a.git", revision = "main" }\n'
+    )
+    config = load_config(cfg)
+    assert config.storage_url == ""
+
+
+def test_write_config_preserves_storage(tmp_path: Path) -> None:
+    cfg = tmp_path / ".gitscale.toml"
+    entries = [
+        RepoEntry("libs/a", "https://a.git", "main", RepoMode.READONLY),
+    ]
+    write_config(
+        cfg, entries,
+        storage_url="https://bucket.s3.amazonaws.com/gs",
+    )
+    config = load_config(cfg)
+    assert config.storage_url == "https://bucket.s3.amazonaws.com/gs"
+    assert len(config.repos) == 1
+
+
+# ---------------------------------------------------------------------------
+# Storage module unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_object_url_construction() -> None:
+    from gitscale.storage import _object_url
+
+    url = _object_url(
+        "https://bucket.s3.amazonaws.com/meta",
+        "https://github.com/org/repo.git",
+        "main",
+    )
+    assert url == (
+        "https://bucket.s3.amazonaws.com/meta"
+        "/github.com/org/repo/main.json"
+    )
+
+
+def test_object_url_slash_in_revision() -> None:
+    from gitscale.storage import _object_url
+
+    url = _object_url(
+        "https://bucket.s3.amazonaws.com/meta",
+        "https://github.com/org/repo.git",
+        "feature/foo",
+    )
+    assert url.endswith("/feature_foo.json")
+
+
+def test_is_gcs() -> None:
+    from gitscale.storage import _is_gcs
+
+    assert _is_gcs("https://storage.googleapis.com/bucket/key")
+    assert not _is_gcs("https://bucket.s3.amazonaws.com/key")
+    assert not _is_gcs("https://minio.corp.com/bucket/key")
+
+
+def test_s3_region_from_url() -> None:
+    from gitscale.storage import _s3_region
+
+    assert _s3_region(
+        "https://bucket.s3.eu-west-1.amazonaws.com/key"
+    ) == "eu-west-1"
+
+
+def test_s3_region_default() -> None:
+    import os
+
+    from gitscale.storage import _s3_region
+
+    # Ensure env var doesn't interfere
+    old = os.environ.pop("AWS_DEFAULT_REGION", None)
+    try:
+        assert _s3_region("https://minio.local/bucket/key") == "us-east-1"
+    finally:
+        if old is not None:
+            os.environ["AWS_DEFAULT_REGION"] = old
+
+
+# ---------------------------------------------------------------------------
+# Metadata CLI (no storage configured)
+# ---------------------------------------------------------------------------
+
+
+def test_metadata_help() -> None:
+    runner = CliRunner()
+    result = runner.invoke(cli, ["metadata", "--help"])
+    assert result.exit_code == 0
+    assert "Manage custom metadata" in result.output
+
+
+def test_metadata_push_help() -> None:
+    runner = CliRunner()
+    result = runner.invoke(cli, ["metadata", "push", "--help"])
+    assert result.exit_code == 0
+    assert "Upload metadata" in result.output
+
+
+def test_metadata_push_no_storage(tmp_path: Path) -> None:
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path) as td:
+        cfg = Path(td) / ".gitscale.toml"
+        cfg.write_text(
+            '[repos]\n'
+            '"libs/a" = { url = "https://a.git", revision = "main" }\n'
+        )
+        json_file = Path(td) / "data.json"
+        json_file.write_text('{"key": "value"}')
+        result = runner.invoke(
+            cli, ["metadata", "push", "libs/a", str(json_file)]
+        )
+        assert result.exit_code != 0
+        assert "No [storage] configured" in result.output
+
+
+def test_metadata_push_unknown_entry(tmp_path: Path) -> None:
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path) as td:
+        cfg = Path(td) / ".gitscale.toml"
+        cfg.write_text(
+            '[storage]\n'
+            'url = "https://bucket.s3.amazonaws.com/gs"\n\n'
+            '[repos]\n'
+            '"libs/a" = { url = "https://a.git", revision = "main" }\n'
+        )
+        json_file = Path(td) / "data.json"
+        json_file.write_text('{"key": "value"}')
+        result = runner.invoke(
+            cli, ["metadata", "push", "nonexistent", str(json_file)]
+        )
+        assert result.exit_code != 0
+        assert "not found" in result.output
