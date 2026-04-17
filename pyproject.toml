@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "click>=8.1",
+    "rich>=13.0",
 ]
 
 [project.scripts]
@@ -43,3 +44,5 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "TCH"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+norecursedirs = ["playground", ".git", ".venv"]
+addopts = "--ignore=playground"

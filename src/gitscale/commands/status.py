@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 
 import click
+from rich.console import Console
+from rich.table import Table
 
 from gitscale.config import ConfigError, find_config, parse_config
 from gitscale.git import RepoStatus, fetch_repo, get_repo_status, get_self_status
@@ -74,46 +76,61 @@ def status(
         _print_table(statuses)
 
 
+def _get_status_flags(s: RepoStatus) -> str:
+    """Compute status flags string for a repo."""
+    if not s.exists:
+        return "NOT CLONED"
+
+    flags: list[str] = []
+    if not s.is_clean:
+        flags.append("dirty")
+    if s.is_detached:
+        flags.append("detached")
+    if s.ahead:
+        flags.append(f"+{s.ahead}")
+    if s.behind:
+        flags.append(f"-{s.behind}")
+    if (
+        s.expected_ref
+        and s.current_ref != s.expected_ref
+        and not s.is_detached
+    ):
+        flags.append("ref-mismatch")
+
+    return ", ".join(flags) if flags else "ok"
+
+
+def _status_style(flags: str) -> str:
+    """Return a rich style string based on status flags."""
+    if flags == "ok":
+        return "green"
+    if "NOT CLONED" in flags:
+        return "red"
+    if "dirty" in flags or "ref-mismatch" in flags:
+        return "yellow"
+    return "cyan"
+
+
 def _print_table(statuses: list[RepoStatus]) -> None:
     """Print status in a human-readable table."""
     if not statuses:
         return
 
-    # Header
-    click.echo(
-        f"{'REPO':<25} {'REF':<20} {'EXPECTED':<20} {'STATUS'}"
-    )
-    click.echo("-" * 80)
+    console = Console()
+    table = Table(show_edge=False, pad_edge=False, expand=False)
+
+    table.add_column("Repo", style="bold")
+    table.add_column("Ref")
+    table.add_column("Expected")
+    table.add_column("Status")
 
     for s in statuses:
-        if not s.exists:
-            click.echo(
-                f"{s.directory:<25} {'—':<20} "
-                f"{s.expected_ref:<20} NOT CLONED"
-            )
-            continue
+        flags = _get_status_flags(s)
+        style = _status_style(flags)
+        ref = s.current_ref if s.exists else "—"
+        table.add_row(s.directory, ref, s.expected_ref, f"[{style}]{flags}[/]")
 
-        flags: list[str] = []
-        if not s.is_clean:
-            flags.append("dirty")
-        if s.is_detached:
-            flags.append("detached")
-        if s.ahead:
-            flags.append(f"+{s.ahead}")
-        if s.behind:
-            flags.append(f"-{s.behind}")
-        if (
-            s.expected_ref
-            and s.current_ref != s.expected_ref
-            and not s.is_detached
-        ):
-            flags.append("ref-mismatch")
-
-        status_str = ", ".join(flags) if flags else "ok"
-        click.echo(
-            f"{s.directory:<25} {s.current_ref:<20} "
-            f"{s.expected_ref:<20} {status_str}"
-        )
+    console.print(table)
 
 
 def _print_json(statuses: list[RepoStatus]) -> None:
