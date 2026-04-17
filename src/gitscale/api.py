@@ -87,12 +87,12 @@ def extract_owner_repo(repo_url: str) -> tuple[str, str]:
 
 def resolve_token(
     hostname: str, platform: str
-) -> str:
+) -> str | None:
     """Resolve API token from environment.
 
     Checks platform-specific env vars, then falls back to
     host-specific vars.
-    Raises ApiError if no token is found.
+    Returns None if no token is found (public repos may still work).
     """
     # Platform-wide env vars
     if platform == "github":
@@ -112,10 +112,7 @@ def resolve_token(
         if token:
             return token
 
-    raise ApiError(
-        f"No API token found for {hostname} ({platform}). "
-        f"Set one of: {', '.join(candidates)}"
-    )
+    return None
 
 
 def fetch_metadata(
@@ -135,6 +132,11 @@ def fetch_metadata(
     if platform == "github":
         return _fetch_github(api_base, owner, repo, revision, token)
     if platform == "gitlab":
+        if token is None:
+            raise ApiError(
+                f"No API token found for {hostname} (gitlab). "
+                f"GitLab requires authentication."
+            )
         return _fetch_gitlab(api_base, owner, repo, revision, token)
 
     raise ApiError(f"Unsupported platform: {platform}")
@@ -145,14 +147,15 @@ def _fetch_github(
     owner: str,
     repo: str,
     revision: str,
-    token: str,
+    token: str | None,
 ) -> dict[str, Any]:
     """Fetch commit metadata from GitHub API."""
-    headers = {
-        "Authorization": f"Bearer {token}",
+    headers: dict[str, str] = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
 
     with httpx.Client(
         base_url=api_base, headers=headers, timeout=30

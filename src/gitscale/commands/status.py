@@ -106,6 +106,7 @@ def _get_status_flags(s: RepoStatus) -> str:
         s.expected_ref
         and s.current_ref != s.expected_ref
         and not s.is_detached
+        and s.current_ref != "metadata"
     ):
         flags.append("ref-mismatch")
 
