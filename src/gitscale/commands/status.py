@@ -7,8 +7,14 @@ import click
 from rich.console import Console
 from rich.table import Table
 
-from gitscale.config import ConfigError, find_config, parse_config
-from gitscale.git import RepoStatus, fetch_repo, get_repo_status, get_self_status
+from gitscale.config import ConfigError, find_config, load_config
+from gitscale.git import (
+    RepoStatus,
+    fetch_repo,
+    get_metadata_status,
+    get_repo_status,
+    get_self_status,
+)
 
 
 @click.command()
@@ -17,7 +23,7 @@ from gitscale.git import RepoStatus, fetch_repo, get_repo_status, get_self_statu
     "--root",
     type=click.Path(exists=True, path_type=Path),
     default=None,
-    help="Root directory containing .gitscale (default: auto-detect).",
+    help="Root directory containing .gitscale.toml (default: auto-detect).",
 )
 @click.option(
     "--fetch/--no-fetch",
@@ -39,7 +45,7 @@ def status(
     fetch: bool,
     output_format: str,
 ) -> None:
-    """Show status of repos declared in .gitscale."""
+    """Show status of repos declared in .gitscale.toml."""
     verbose: bool = ctx.obj["verbose"]
 
     try:
@@ -48,14 +54,16 @@ def status(
         raise click.ClickException(str(e)) from None
 
     config_root = config_path.parent
-    entries = parse_config(config_path)
+    config = load_config(config_path)
 
-    if not entries:
-        click.echo("No repos declared in .gitscale")
+    if not config.repos:
+        click.echo("No repos declared in .gitscale.toml")
         return
 
     if fetch:
-        for entry in entries:
+        for entry in config.repos:
+            if entry.is_metadata:
+                continue
             dest = config_root / entry.directory
             if dest.exists():
                 if verbose:
@@ -68,7 +76,11 @@ def status(
     if self_status is not None:
         statuses.append(self_status)
 
-    statuses.extend(get_repo_status(e, config_root) for e in entries)
+    for entry in config.repos:
+        if entry.is_metadata:
+            statuses.append(get_metadata_status(entry, config_root))
+        else:
+            statuses.append(get_repo_status(entry, config_root))
 
     if output_format == "json":
         _print_json(statuses)

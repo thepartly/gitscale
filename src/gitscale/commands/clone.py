@@ -4,7 +4,7 @@ from pathlib import Path
 
 import click
 
-from gitscale.config import ConfigError, RepoEntry, find_config, parse_config
+from gitscale.config import ConfigError, RepoEntry, find_config, load_config
 from gitscale.git import GitError, clone_repo
 
 
@@ -14,7 +14,7 @@ from gitscale.git import GitError, clone_repo
     "--root",
     type=click.Path(exists=True, path_type=Path),
     default=None,
-    help="Root directory containing .gitscale (default: auto-detect).",
+    help="Root directory containing .gitscale.toml (default: auto-detect).",
 )
 @click.argument("names", nargs=-1)
 @click.pass_context
@@ -26,6 +26,7 @@ def clone(
     """Clone sub-repositories from .gitscale config.
 
     If NAMES are given, clone only those entries. Otherwise clone all.
+    Metadata-only entries are skipped.
     """
     verbose: bool = ctx.obj["verbose"]
 
@@ -35,8 +36,8 @@ def clone(
         raise click.ClickException(str(e)) from None
 
     config_root = config_path.parent
-    entries = parse_config(config_path)
-    selected = _filter_entries(entries, names)
+    config = load_config(config_path)
+    selected = _filter_entries(config.repos, names)
 
     if not selected:
         click.echo("Nothing to clone.")
@@ -44,6 +45,9 @@ def clone(
 
     failed = 0
     for entry in selected:
+        if entry.is_metadata:
+            click.echo(f"  skip  {entry.directory} (metadata-only)")
+            continue
         dest = config_root / entry.directory
         if dest.exists():
             click.echo(f"  skip  {entry.directory} (already exists)")

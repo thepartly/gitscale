@@ -1,13 +1,16 @@
-"""Config parser for .gitscale files."""
+"""Config parser for .gitscale TOML files."""
 
-from dataclasses import dataclass
+import tomllib
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 
 class RepoMode(Enum):
     READONLY = "readonly"
     READWRITE = "readwrite"
+    METADATA = "metadata"
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,14 +24,28 @@ class RepoEntry:
 
     @property
     def is_readonly(self) -> bool:
-        return self.mode == RepoMode.READONLY
+        return self.mode in (RepoMode.READONLY, RepoMode.METADATA)
+
+    @property
+    def is_metadata(self) -> bool:
+        return self.mode == RepoMode.METADATA
+
+
+@dataclass(frozen=True, slots=True)
+class GitScaleConfig:
+    """Parsed .gitscale configuration."""
+
+    repos: list[RepoEntry]
+    hosts: dict[str, str] = field(default_factory=dict)
 
 
 class ConfigError(Exception):
     """Raised when .gitscale config is malformed."""
 
 
-CONFIG_FILENAME = ".gitscale"
+CONFIG_FILENAME = ".gitscale.toml"
+
+_VALID_PLATFORMS = {"github", "gitlab"}
 
 
 def find_config(start: Path | None = None) -> Path:
@@ -51,57 +68,131 @@ def find_config(start: Path | None = None) -> Path:
     )
 
 
-def parse_config(config_path: Path) -> list[RepoEntry]:
-    """Parse a .gitscale config file into a list of RepoEntry objects."""
-    entries: list[RepoEntry] = []
+def load_config(config_path: Path) -> GitScaleConfig:
+    """Load and parse a .gitscale TOML config file."""
     text = config_path.read_text(encoding="utf-8")
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(f"{config_path}: invalid TOML: {e}") from None
 
-    for line_num, raw_line in enumerate(text.splitlines(), start=1):
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
+    hosts = _parse_hosts(data.get("hosts", {}), config_path)
+    repos = _parse_repos(data.get("repos", {}), config_path)
 
-        parts = line.split()
-        if len(parts) < 3:
+    return GitScaleConfig(repos=repos, hosts=hosts)
+
+
+def _parse_hosts(
+    raw: Any, config_path: Path
+) -> dict[str, str]:
+    """Parse the [hosts] table."""
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            f"{config_path}: [hosts] must be a table"
+        )
+    hosts: dict[str, str] = {}
+    for hostname, platform in raw.items():
+        if not isinstance(platform, str):
             raise ConfigError(
-                f"{config_path}:{line_num}: expected at least 3 fields "
-                f"(directory repo revision [mode]), got {len(parts)}"
+                f"{config_path}: hosts.{hostname} must be a string"
             )
-        if len(parts) > 4:
+        if platform not in _VALID_PLATFORMS:
             raise ConfigError(
-                f"{config_path}:{line_num}: expected at most 4 fields, "
-                f"got {len(parts)}"
+                f"{config_path}: hosts.{hostname}: "
+                f"unknown platform '{platform}', "
+                f"expected one of: {', '.join(sorted(_VALID_PLATFORMS))}"
+            )
+        hosts[hostname] = platform
+    return hosts
+
+
+def _parse_repos(
+    raw: Any, config_path: Path
+) -> list[RepoEntry]:
+    """Parse the [repos] table."""
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            f"{config_path}: [repos] must be a table"
+        )
+    entries: list[RepoEntry] = []
+    for directory, spec in raw.items():
+        if not isinstance(spec, dict):
+            raise ConfigError(
+                f"{config_path}: repos.{directory} must be "
+                f"an inline table with 'url' field"
             )
 
-        directory, repo_url, revision = parts[0], parts[1], parts[2]
-        mode_str = parts[3] if len(parts) == 4 else "readwrite"
+        url = spec.get("url")
+        if not isinstance(url, str) or not url:
+            raise ConfigError(
+                f"{config_path}: repos.{directory}.url is required"
+            )
 
+        revision = spec.get("revision", "")
+        if not isinstance(revision, str):
+            raise ConfigError(
+                f"{config_path}: repos.{directory}.revision "
+                f"must be a string"
+            )
+
+        mode_str = spec.get("mode", "readwrite")
+        if not isinstance(mode_str, str):
+            raise ConfigError(
+                f"{config_path}: repos.{directory}.mode "
+                f"must be a string"
+            )
         try:
             mode = RepoMode(mode_str)
         except ValueError:
             raise ConfigError(
-                f"{config_path}:{line_num}: invalid mode '{mode_str}', "
-                f"expected 'readonly' or 'readwrite'"
+                f"{config_path}: repos.{directory}.mode: "
+                f"invalid mode '{mode_str}', expected one of: "
+                f"{', '.join(m.value for m in RepoMode)}"
             ) from None
 
         entries.append(
             RepoEntry(
                 directory=directory,
-                repo_url=repo_url,
+                repo_url=url,
                 revision=revision,
                 mode=mode,
             )
         )
-
     return entries
 
 
-def write_config(config_path: Path, entries: list[RepoEntry]) -> None:
-    """Write a list of RepoEntry objects to a .gitscale config file."""
+# --- Legacy helpers kept for write support (add command) ---
+
+
+def parse_config(config_path: Path) -> list[RepoEntry]:
+    """Parse a .gitscale TOML config and return repo entries."""
+    return load_config(config_path).repos
+
+
+def write_config(
+    config_path: Path,
+    entries: list[RepoEntry],
+    hosts: dict[str, str] | None = None,
+) -> None:
+    """Write a .gitscale config file in TOML format."""
     lines: list[str] = []
-    for entry in entries:
-        lines.append(
-            f"{entry.directory} {entry.repo_url} "
-            f"{entry.revision} {entry.mode.value}"
-        )
-    config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    if hosts:
+        lines.append("[hosts]")
+        for hostname, platform in sorted(hosts.items()):
+            lines.append(f'"{hostname}" = "{platform}"')
+        lines.append("")
+
+    if entries:
+        lines.append("[repos]")
+        for entry in entries:
+            parts = [f'url = "{entry.repo_url}"']
+            if entry.revision:
+                parts.append(f'revision = "{entry.revision}"')
+            if entry.mode != RepoMode.READWRITE:
+                parts.append(f'mode = "{entry.mode.value}"')
+            inline = ", ".join(parts)
+            lines.append(f'"{entry.directory}" = {{ {inline} }}')
+
+    lines.append("")  # trailing newline
+    config_path.write_text("\n".join(lines), encoding="utf-8")

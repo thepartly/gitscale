@@ -1,12 +1,17 @@
 """Git operations for managing sub-repositories."""
 
+from __future__ import annotations
+
+import json
 import os
 import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-from gitscale.config import RepoEntry
+if TYPE_CHECKING:
+    from gitscale.config import RepoEntry
 
 
 class GitError(Exception):
@@ -41,7 +46,13 @@ def clone_repo(
     *,
     verbose: bool = False,
 ) -> None:
-    """Clone a repository into root/entry.directory."""
+    """Clone a repository into root/entry.directory.
+
+    Metadata-only entries are skipped (handled by sync_metadata).
+    """
+    if entry.is_metadata:
+        return
+
     dest = root / entry.directory
     if dest.exists():
         raise GitError(f"Directory already exists: {dest}")
@@ -121,7 +132,11 @@ def sync_repo(
     """Fetch and checkout declared revision for a repo.
 
     If the directory doesn't exist yet, clone it.
+    Metadata-only entries are skipped (handled by sync_metadata).
     """
+    if entry.is_metadata:
+        return
+
     dest = root / entry.directory
     if not dest.exists():
         clone_repo(entry, root, verbose=verbose)
@@ -246,7 +261,7 @@ def get_repo_status(entry: RepoEntry, root: Path) -> RepoStatus:
 
 
 def get_self_status(root: Path) -> RepoStatus | None:
-    """Get status of the repository that contains .gitscale.
+    """Get status of the repository that contains .gitscale.toml.
 
     Returns None if root is not a git repository.
     """
@@ -297,4 +312,53 @@ def get_self_status(root: Path) -> RepoStatus | None:
         is_detached=detached,
         ahead=ahead,
         behind=behind,
+    )
+
+
+def sync_metadata(
+    entry: RepoEntry,
+    root: Path,
+    hosts: dict[str, str],
+) -> dict[str, Any]:
+    """Fetch metadata from platform API and cache it.
+
+    Creates the subdirectory with a metadata.json file.
+    Returns the metadata dict.
+    """
+    from gitscale.api import fetch_metadata
+    from gitscale.cache import write_cache
+
+    data = fetch_metadata(entry.repo_url, entry.revision, hosts)
+
+    # Write to local directory
+    dest = root / entry.directory
+    dest.mkdir(parents=True, exist_ok=True)
+    meta_file = dest / "metadata.json"
+    meta_file.write_text(
+        json.dumps(data, indent=2), encoding="utf-8"
+    )
+
+    # Write to global cache
+    write_cache(entry.repo_url, entry.revision, data)
+
+    return data
+
+
+def get_metadata_status(
+    entry: RepoEntry, root: Path
+) -> RepoStatus:
+    """Get status for a metadata-only entry."""
+    dest = root / entry.directory
+    meta_file = dest / "metadata.json"
+    exists = meta_file.is_file()
+
+    return RepoStatus(
+        directory=entry.directory,
+        exists=exists,
+        current_ref="metadata" if exists else "",
+        expected_ref=entry.revision,
+        is_clean=True,
+        is_detached=False,
+        ahead=0,
+        behind=0,
     )

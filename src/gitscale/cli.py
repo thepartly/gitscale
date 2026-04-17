@@ -10,7 +10,7 @@ from gitscale import __version__
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose output.")
 @click.pass_context
 def cli(ctx: click.Context, verbose: bool) -> None:
-    """GitScale — manage multiple sub-repositories from a .gitscale config."""
+    """GitScale — manage multiple sub-repositories from a .gitscale.toml config."""
     ctx.ensure_object(dict)
     ctx.obj["verbose"] = verbose
 

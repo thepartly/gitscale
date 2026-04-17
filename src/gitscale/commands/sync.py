@@ -4,8 +4,8 @@ from pathlib import Path
 
 import click
 
-from gitscale.config import ConfigError, find_config, parse_config
-from gitscale.git import GitError, sync_repo
+from gitscale.config import ConfigError, find_config, load_config
+from gitscale.git import GitError, sync_metadata, sync_repo
 
 
 @click.command()
@@ -14,7 +14,7 @@ from gitscale.git import GitError, sync_repo
     "--root",
     type=click.Path(exists=True, path_type=Path),
     default=None,
-    help="Root directory containing .gitscale (default: auto-detect).",
+    help="Root directory containing .gitscale.toml (default: auto-detect).",
 )
 @click.argument("names", nargs=-1)
 @click.pass_context
@@ -26,6 +26,7 @@ def sync(
     """Fetch and checkout declared revisions for sub-repositories.
 
     Clones repos that don't exist locally yet.
+    Metadata-only entries fetch from the platform API.
     If NAMES are given, sync only those entries. Otherwise sync all.
     """
     verbose: bool = ctx.obj["verbose"]
@@ -36,7 +37,8 @@ def sync(
         raise click.ClickException(str(e)) from None
 
     config_root = config_path.parent
-    entries = parse_config(config_path)
+    config = load_config(config_path)
+    entries = config.repos
 
     if names:
         name_set = set(names)
@@ -54,13 +56,21 @@ def sync(
     failed = 0
     for entry in entries:
         try:
-            if verbose:
-                click.echo(
-                    f"  sync  {entry.directory} → {entry.revision}"
-                )
-            sync_repo(entry, config_root, verbose=verbose)
-            click.echo(f"  ok    {entry.directory}")
-        except GitError as e:
+            if entry.is_metadata:
+                if verbose:
+                    click.echo(
+                        f"  meta  {entry.directory} → {entry.revision}"
+                    )
+                sync_metadata(entry, config_root, config.hosts)
+                click.echo(f"  ok    {entry.directory} (metadata)")
+            else:
+                if verbose:
+                    click.echo(
+                        f"  sync  {entry.directory} → {entry.revision}"
+                    )
+                sync_repo(entry, config_root, verbose=verbose)
+                click.echo(f"  ok    {entry.directory}")
+        except (GitError, Exception) as e:
             click.echo(f"  FAIL  {entry.directory}: {e}", err=True)
             failed += 1
 
