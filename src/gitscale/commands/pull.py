@@ -6,7 +6,7 @@ import click
 
 from gitscale.config import ConfigError, RepoEntry, find_config, load_config
 from gitscale.git import GitError, is_ci, pull_repo
-from gitscale.storage import StorageError, pull_manifest
+from gitscale.storage import StorageError, pull_artefact
 
 
 @click.command()
@@ -27,7 +27,7 @@ def pull(
     """Pull latest changes for sub-repositories.
 
     For git repos: runs git pull --ff-only. Clones if not yet cloned.
-    For manifests: downloads from cloud storage if remote is newer.
+    For artefacts: downloads from cloud storage if remote is newer.
     If NAMES are given, pull only those entries. Otherwise pull all.
     """
     verbose: bool = ctx.obj["verbose"]
@@ -48,7 +48,7 @@ def pull(
     failed = 0
     for entry in selected:
         try:
-            if entry.is_manifest:
+            if entry.is_artefact:
                 if not config.storage_url:
                     click.echo(
                         f"  FAIL  {entry.directory}: no [storage] configured",
@@ -58,14 +58,14 @@ def pull(
                     continue
                 dest = config_root / entry.directory
                 revision = entry.revision or "HEAD"
-                found = pull_manifest(
+                found = pull_artefact(
                     config.storage_url, entry.repo_url, revision, dest
                 )
                 if found:
-                    click.echo(f"  ok    {entry.directory} (manifest)")
+                    click.echo(f"  ok    {entry.directory} (artefact)")
                 else:
                     click.echo(
-                        f"  skip  {entry.directory} (no remote manifest)"
+                        f"  skip  {entry.directory} (no remote artefact)"
                     )
                 continue
 

@@ -6,7 +6,7 @@ import click
 
 from gitscale.config import ConfigError, RepoEntry, find_config, load_config
 from gitscale.git import GitError, push_repo
-from gitscale.storage import StorageError, push_manifest
+from gitscale.storage import StorageError
 
 
 @click.command()
@@ -27,7 +27,7 @@ def push(
     """Push local changes for sub-repositories.
 
     For git repos: runs git push. Readonly entries are skipped.
-    For manifests: uploads to cloud storage if local differs from remote.
+    For artefacts: skipped (artefacts are published by CI).
     If NAMES are given, push only those entries. Otherwise push all.
     """
     verbose: bool = ctx.obj["verbose"]
@@ -48,23 +48,8 @@ def push(
     failed = 0
     for entry in selected:
         try:
-            if entry.is_manifest:
-                if not config.storage_url:
-                    click.echo(
-                        f"  FAIL  {entry.directory}: no [storage] configured",
-                        err=True,
-                    )
-                    failed += 1
-                    continue
-                dest = config_root / entry.directory
-                revision = entry.revision or "HEAD"
-                uploaded = push_manifest(
-                    config.storage_url, entry.repo_url, revision, dest
-                )
-                if uploaded:
-                    click.echo(f"  ok    {entry.directory} (pushed)")
-                else:
-                    click.echo(f"  skip  {entry.directory} (up to date)")
+            if entry.is_artefact:
+                click.echo(f"  skip  {entry.directory} (artefact)")
                 continue
 
             if entry.is_readonly:

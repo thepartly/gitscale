@@ -9,11 +9,11 @@ from gitscale.config import ConfigError, find_config, load_config
 from gitscale.git import (
     RepoStatus,
     fetch_repo,
-    get_manifest_status,
+    get_artefact_status,
     get_repo_status,
     get_self_status,
 )
-from gitscale.storage import fetch_manifest
+from gitscale.storage import fetch_artefact
 
 
 @click.command()
@@ -62,12 +62,12 @@ def status(
     if fetch:
         for entry in config.repos:
             dest = config_root / entry.directory
-            if entry.is_manifest:
+            if entry.is_artefact:
                 if config.storage_url:
                     revision = entry.revision or "HEAD"
                     if verbose:
                         click.echo(f"Fetching {entry.directory}...")
-                    fetch_manifest(
+                    fetch_artefact(
                         config.storage_url, entry.repo_url, revision, dest
                     )
                 continue
@@ -83,8 +83,8 @@ def status(
         statuses.append(self_status)
 
     for entry in config.repos:
-        if entry.is_manifest:
-            statuses.append(get_manifest_status(entry, config_root))
+        if entry.is_artefact:
+            statuses.append(get_artefact_status(entry, config_root))
         else:
             statuses.append(get_repo_status(entry, config_root))
 
@@ -114,7 +114,7 @@ def _get_status_flags(s: RepoStatus) -> str:
         s.expected_ref
         and s.current_ref != s.expected_ref
         and not s.is_detached
-        and s.current_ref != "manifest"
+        and s.current_ref != "artefact"
     ):
         flags.append("ref-mismatch")
 

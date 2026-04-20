@@ -6,7 +6,7 @@ import click
 
 from gitscale.config import ConfigError, RepoEntry, find_config, load_config
 from gitscale.git import GitError, clone_repo, is_ci
-from gitscale.storage import StorageError, clone_manifest
+from gitscale.storage import StorageError, clone_artefact
 
 
 @click.command()
@@ -47,7 +47,7 @@ def clone(
     failed = 0
     for entry in selected:
         dest = config_root / entry.directory
-        if entry.is_manifest:
+        if entry.is_artefact:
             if dest.exists():
                 click.echo(f"  skip  {entry.directory} (already exists)")
                 continue
@@ -60,13 +60,13 @@ def clone(
                 continue
             try:
                 revision = entry.revision or "HEAD"
-                found = clone_manifest(
+                found = clone_artefact(
                     config.storage_url, entry.repo_url, revision, dest
                 )
                 if found:
-                    click.echo(f"  ok    {entry.directory} (manifest)")
+                    click.echo(f"  ok    {entry.directory} (artefact)")
                 else:
-                    click.echo(f"  skip  {entry.directory} (no manifest data)")
+                    click.echo(f"  skip  {entry.directory} (no artefact data)")
             except StorageError as e:
                 click.echo(f"  FAIL  {entry.directory}: {e}", err=True)
                 failed += 1

@@ -53,10 +53,10 @@ def clone_repo(
 ) -> None:
     """Clone a repository into root/entry.directory.
 
-    Manifest-only entries are skipped.
+    Artefact-only entries are skipped.
     When *shallow* is True, clones with ``--depth 1 --branch <revision>``.
     """
-    if entry.is_manifest:
+    if entry.is_artefact:
         return
 
     dest = root / entry.directory
@@ -158,9 +158,9 @@ def sync_repo(
     """Fetch and checkout declared revision for a repo.
 
     If the directory doesn't exist yet, clone it.
-    Manifest-only entries are skipped.
+    Artefact-only entries are skipped.
     """
-    if entry.is_manifest:
+    if entry.is_artefact:
         return
 
     dest = root / entry.directory
@@ -206,9 +206,9 @@ def pull_repo(
 
     If the directory doesn't exist yet, clone it.
     For shallow clones: fetch --depth 1 + reset --hard.
-    Manifest-only entries are skipped.
+    Artefact-only entries are skipped.
     """
-    if entry.is_manifest:
+    if entry.is_artefact:
         return
 
     dest = root / entry.directory
@@ -244,9 +244,9 @@ def push_repo(
 ) -> None:
     """Push local commits to remote.
 
-    Manifest-only and readonly entries are skipped.
+    Artefact-only and readonly entries are skipped.
     """
-    if entry.is_manifest or entry.is_readonly:
+    if entry.is_artefact or entry.is_readonly:
         return
 
     dest = root / entry.directory
@@ -443,16 +443,15 @@ def get_self_status(root: Path) -> RepoStatus | None:
     )
 
 
-def get_manifest_status(
+def get_artefact_status(
     entry: RepoEntry, root: Path
 ) -> RepoStatus:
-    """Get status for a manifest-only entry.
+    """Get status for an artefact-only entry.
 
     Compares .etag and .etag-remote to detect behind state.
     """
     dest = root / entry.directory
-    manifest_file = dest / "manifest.json"
-    exists = manifest_file.is_file()
+    exists = dest.is_dir() and (dest / ".etag").is_file()
 
     # Check if behind remote
     behind = 0
@@ -467,7 +466,7 @@ def get_manifest_status(
     return RepoStatus(
         directory=entry.directory,
         exists=exists,
-        current_ref="manifest" if exists else "",
+        current_ref="artefact" if exists else "",
         expected_ref=entry.revision,
         is_clean=True,
         is_detached=False,

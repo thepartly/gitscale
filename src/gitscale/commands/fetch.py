@@ -6,7 +6,7 @@ import click
 
 from gitscale.config import ConfigError, RepoEntry, find_config, load_config
 from gitscale.git import GitError, fetch_repo
-from gitscale.storage import StorageError, fetch_manifest
+from gitscale.storage import StorageError, fetch_artefact
 
 
 @click.command()
@@ -27,7 +27,7 @@ def fetch(
     """Fetch latest remote state for sub-repositories.
 
     For git repos: runs git fetch.
-    For manifests: checks remote ETag via HEAD request.
+    For artefacts: checks remote ETag via HEAD request.
     If NAMES are given, fetch only those entries. Otherwise fetch all.
     """
     verbose: bool = ctx.obj["verbose"]
@@ -48,7 +48,7 @@ def fetch(
     failed = 0
     for entry in selected:
         try:
-            if entry.is_manifest:
+            if entry.is_artefact:
                 if not config.storage_url:
                     click.echo(
                         f"  FAIL  {entry.directory}: no [storage] configured",
@@ -58,14 +58,14 @@ def fetch(
                     continue
                 dest = config_root / entry.directory
                 revision = entry.revision or "HEAD"
-                result = fetch_manifest(
+                result = fetch_artefact(
                     config.storage_url, entry.repo_url, revision, dest
                 )
                 if result.exists:
-                    click.echo(f"  ok    {entry.directory} (manifest)")
+                    click.echo(f"  ok    {entry.directory} (artefact)")
                 else:
                     click.echo(
-                        f"  skip  {entry.directory} (no remote manifest)"
+                        f"  skip  {entry.directory} (no remote artefact)"
                     )
                 continue
 

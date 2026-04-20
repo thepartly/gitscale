@@ -121,17 +121,17 @@ def test_parse_config_default_mode(tmp_path: Path) -> None:
     assert entries[0].mode == RepoMode.READWRITE
 
 
-def test_parse_config_manifest_mode(tmp_path: Path) -> None:
+def test_parse_config_artefact_mode(tmp_path: Path) -> None:
     cfg = tmp_path / ".gitscale.toml"
     cfg.write_text(
         '[repos]\n'
         '"meta/svc" = { url = "https://github.com/org/svc.git", '
-        'revision = "main", mode = "manifest" }\n'
+        'revision = "main", mode = "artefact" }\n'
     )
     entries = parse_config(cfg)
     assert len(entries) == 1
-    assert entries[0].mode == RepoMode.MANIFEST
-    assert entries[0].is_manifest
+    assert entries[0].mode == RepoMode.ARTEFACT
+    assert entries[0].is_artefact
     assert entries[0].is_readonly
 
 
@@ -176,18 +176,18 @@ def test_write_config_roundtrip(tmp_path: Path) -> None:
     assert parsed == entries
 
 
-def test_write_config_manifest_roundtrip(tmp_path: Path) -> None:
+def test_write_config_artefact_roundtrip(tmp_path: Path) -> None:
     cfg = tmp_path / ".gitscale.toml"
     entries = [
         RepoEntry(
             "meta/svc", "https://github.com/org/svc.git",
-            "main", RepoMode.MANIFEST,
+            "main", RepoMode.ARTEFACT,
         ),
     ]
     write_config(cfg, entries)
     parsed = parse_config(cfg)
     assert parsed == entries
-    assert parsed[0].is_manifest
+    assert parsed[0].is_artefact
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +227,7 @@ def test_add_duplicate_fails(tmp_path: Path) -> None:
         assert "already declared" in result.output
 
 
-def test_add_manifest_mode(tmp_path: Path) -> None:
+def test_add_artefact_mode(tmp_path: Path) -> None:
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path) as td:
         result = runner.invoke(
@@ -235,15 +235,15 @@ def test_add_manifest_mode(tmp_path: Path) -> None:
             [
                 "add", "meta/svc",
                 "https://github.com/org/svc.git", "main",
-                "--mode", "manifest",
+                "--mode", "artefact",
             ],
         )
         assert result.exit_code == 0
         assert "Added meta/svc" in result.output
-        assert "[manifest]" in result.output
+        assert "[artefact]" in result.output
 
         entries = parse_config(Path(td) / ".gitscale.toml")
-        assert entries[0].mode == RepoMode.MANIFEST
+        assert entries[0].mode == RepoMode.ARTEFACT
 
 
 # ---------------------------------------------------------------------------
@@ -419,7 +419,7 @@ def test_object_url_construction() -> None:
     )
     assert url == (
         "https://bucket.s3.amazonaws.com/meta"
-        "/github.com/org/repo/main.json"
+        "/github.com/org/repo/main.tar.gz"
     )
 
 
@@ -431,7 +431,7 @@ def test_object_url_slash_in_revision() -> None:
         "https://github.com/org/repo.git",
         "feature/foo",
     )
-    assert url.endswith("/feature_foo.json")
+    assert url.endswith("/feature_foo.tar.gz")
 
 
 def test_is_gcs() -> None:

@@ -1,11 +1,11 @@
-"""Cloud storage backends for manifests (S3-compatible + GCS).
+"""Cloud storage backends for artefacts (S3-compatible + GCS).
 
 Uses raw httpx — no SDK dependencies. Auth is detected from the URL:
 - *.s3.amazonaws.com, *.r2.cloudflarestorage.com, or anything else → AWS Sig V4
 - storage.googleapis.com → GCS Bearer token
 
 Object paths follow the layout:
-  {base_url}/{host}/{owner}/{repo}/{revision}.json
+  {base_url}/{host}/{owner}/{repo}/{revision}.tar.gz
 """
 
 from __future__ import annotations
@@ -13,11 +13,13 @@ from __future__ import annotations
 import datetime
 import hashlib
 import hmac
-import json
 import os
 import re
+import stat
+import tarfile
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from io import BytesIO
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 import httpx
@@ -53,7 +55,7 @@ def object_url(
     owner, repo = extract_owner_repo(repo_url)
     safe_rev = revision.replace("/", "_") if revision else "_default"
     base = storage_url.rstrip("/")
-    return f"{base}/{hostname}/{owner}/{repo}/{safe_rev}.json"
+    return f"{base}/{hostname}/{owner}/{repo}/{safe_rev}.tar.gz"
 
 
 def head_object(url: str) -> HeadResult:
@@ -77,47 +79,15 @@ def put_object(url: str, body: bytes) -> str:
     return _s3_put(url, body)
 
 
-def upload_metadata(
-    storage_url: str,
-    repo_url: str,
-    revision: str,
-    data: dict[str, Any],
-) -> str:
-    """Upload metadata JSON to cloud storage.
-
-    Returns the full object URL.
-    """
-    url = object_url(storage_url, repo_url, revision)
-    body = json.dumps(data, indent=2).encode()
-    put_object(url, body)
-    return url
 
 
-def download_metadata(
-    storage_url: str,
-    repo_url: str,
-    revision: str,
-) -> dict[str, Any] | None:
-    """Download metadata JSON from cloud storage.
-
-    Returns None if the object doesn't exist (404).
-    """
-    url = object_url(storage_url, repo_url, revision)
-    result = get_object(url)
-    if result is None:
-        return None
-    body, _etag = result
-    data: dict[str, Any] = json.loads(body)
-    return data
-
-
-def clone_manifest(
+def clone_artefact(
     storage_url: str,
     repo_url: str,
     revision: str,
     dest: Path,
 ) -> bool:
-    """Download manifest and save to dest/manifest.json with ETags.
+    """Download artefact archive and extract to dest with ETags.
 
     Only downloads if the directory doesn't exist yet.
     Returns True if found and downloaded.
@@ -128,20 +98,20 @@ def clone_manifest(
         return False
     body, etag = result
     dest.mkdir(parents=True, exist_ok=True)
-    (dest / "manifest.json").write_bytes(body)
     (dest / ".etag").write_text(etag, encoding="utf-8")
     (dest / ".etag-remote").write_text(etag, encoding="utf-8")
-    _apply_manifest_readonly(dest)
+    _extract_artefact(body, dest)
+    _apply_artefact_readonly(dest)
     return True
 
 
-def fetch_manifest(
+def fetch_artefact(
     storage_url: str,
     repo_url: str,
     revision: str,
     dest: Path,
 ) -> HeadResult:
-    """HEAD the remote manifest and save .etag-remote."""
+    """HEAD the remote artefact and save .etag-remote."""
     url = object_url(storage_url, repo_url, revision)
     result = head_object(url)
     if result.exists:
@@ -150,16 +120,16 @@ def fetch_manifest(
     return result
 
 
-def pull_manifest(
+def pull_artefact(
     storage_url: str,
     repo_url: str,
     revision: str,
     dest: Path,
 ) -> bool:
-    """HEAD + conditional GET for a manifest.
+    """HEAD + conditional GET for an artefact archive.
 
     Downloads only if remote ETag differs from local.
-    Returns True if the manifest exists remotely.
+    Returns True if the artefact exists remotely.
     """
     url = object_url(storage_url, repo_url, revision)
     hr = head_object(url)
@@ -181,76 +151,57 @@ def pull_manifest(
     if result is None:
         return False
     body, etag = result
-    _restore_manifest_writable(dest)
-    (dest / "manifest.json").write_bytes(body)
+    _restore_artefact_writable(dest)
+    _clean_artefact_files(dest)
+    _extract_artefact(body, dest)
     (dest / ".etag").write_text(etag, encoding="utf-8")
-    _apply_manifest_readonly(dest)
+    _apply_artefact_readonly(dest)
     return True
 
 
-def push_manifest(
-    storage_url: str,
-    repo_url: str,
-    revision: str,
-    dest: Path,
-) -> bool:
-    """HEAD + conditional PUT for a manifest.
-
-    Uploads only if remote ETag differs from local.
-    Returns True if upload happened, False if already up to date.
-    """
-    manifest_file = dest / "manifest.json"
-    if not manifest_file.is_file():
-        return False
-
-    url = object_url(storage_url, repo_url, revision)
-
-    # Check remote
-    hr = head_object(url)
-    local_etag_file = dest / ".etag"
-    local_etag = ""
-    if local_etag_file.is_file():
-        local_etag = local_etag_file.read_text(encoding="utf-8").strip()
-
-    if hr.exists and hr.etag == local_etag:
-        # Remote matches local — nothing to push
-        (dest / ".etag-remote").write_text(hr.etag, encoding="utf-8")
-        return False
-
-    body = manifest_file.read_bytes()
-    etag = put_object(url, body)
-    (dest / ".etag").write_text(etag, encoding="utf-8")
-    (dest / ".etag-remote").write_text(etag, encoding="utf-8")
-    return True
 
 
-def _apply_manifest_readonly(dest: Path) -> None:
-    """Remove write permission from manifest files."""
-    import stat
 
-    for name in ("manifest.json",):
-        fpath = dest / name
-        if fpath.is_file():
+def _clean_artefact_files(dest: Path) -> None:
+    """Remove all non-dot files/dirs from dest before re-extraction."""
+    import shutil
+
+    for child in list(dest.iterdir()):
+        if child.name.startswith('.'):
+            continue
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+
+def _extract_artefact(body: bytes, dest: Path) -> None:
+    """Extract artefact tar.gz archive to dest."""
+    with tarfile.open(fileobj=BytesIO(body), mode='r:gz') as tf:
+        # Security: reject paths that escape dest
+        for member in tf.getmembers():
+            resolved = (dest / member.name).resolve()
+            if not str(resolved).startswith(str(dest.resolve())):
+                raise StorageError(
+                    f"artefact archive contains unsafe path: {member.name}"
+                )
+        tf.extractall(path=dest)  # noqa: S202
+
+
+def _apply_artefact_readonly(dest: Path) -> None:
+    """Remove write permission from all regular files in dest."""
+    for fpath in dest.iterdir():
+        if fpath.is_file() and not fpath.name.startswith('.'):
             mode = fpath.stat().st_mode
             fpath.chmod(mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
 
 
-def _restore_manifest_writable(dest: Path) -> None:
-    """Restore write permission on manifest files before update."""
-    import stat
-
-    for name in ("manifest.json",):
-        fpath = dest / name
-        if fpath.is_file():
+def _restore_artefact_writable(dest: Path) -> None:
+    """Restore write permission on all regular files in dest."""
+    for fpath in dest.iterdir():
+        if fpath.is_file() and not fpath.name.startswith('.'):
             mode = fpath.stat().st_mode
             fpath.chmod(mode | stat.S_IWUSR)
-
-
-def _object_url(
-    storage_url: str, repo_url: str, revision: str
-) -> str:
-    """Deprecated alias for object_url."""
-    return object_url(storage_url, repo_url, revision)
 
 
 # ---------------------------------------------------------------------------

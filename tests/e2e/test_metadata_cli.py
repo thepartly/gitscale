@@ -1,102 +1,120 @@
-"""E2E tests for manifest sync via ``gitscale clone/sync`` against live MinIO."""
+"""E2E tests for artefact sync via ``gitscale clone/sync`` against live MinIO."""
 
 from __future__ import annotations
 
-import json
+import io
+import tarfile
 from pathlib import Path
 
 from click.testing import CliRunner
 
 from gitscale.cli import cli
-from gitscale.storage import download_metadata, upload_metadata
+from gitscale.storage import object_url, put_object
+
+
+def _make_tar_gz(files: dict[str, bytes]) -> bytes:
+    """Create an in-memory tar.gz archive from a dict of name→content."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for name, data in files.items():
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def _upload_artefact(
+    storage_url: str, repo_url: str, revision: str, body: bytes
+) -> None:
+    """Upload a tar.gz artefact directly to storage."""
+    url = object_url(storage_url, repo_url, revision)
+    put_object(url, body)
 
 
 def _write_config(root: Path, storage_url: str) -> Path:
-    """Write a minimal .gitscale.toml with storage and manifest entries."""
+    """Write a minimal .gitscale.toml with storage and artefact entries."""
     cfg = root / ".gitscale.toml"
     cfg.write_text(
         "[storage]\n"
         f'url = "{storage_url}"\n\n'
         "[repos]\n"
         '"libs/core" = { url = "https://github.com/org/core.git", '
-        'revision = "main", mode = "manifest" }\n'
+        'revision = "main", mode = "artefact" }\n'
         '"libs/utils" = { url = "https://github.com/org/utils.git", '
-        'revision = "v2.0", mode = "manifest" }\n'
+        'revision = "v2.0", mode = "artefact" }\n'
     )
     return cfg
 
 
-class TestManifestSync:
-    """Verify clone/sync pull manifest data from MinIO to local directories."""
+class TestArtefactSync:
+    """Verify clone/sync pull artefact archives from MinIO to local dirs."""
 
-    def test_clone_pulls_manifest(
+    def test_clone_pulls_artefact(
         self, tmp_path: Path, minio_storage_url: str
     ) -> None:
         runner = CliRunner()
         _write_config(tmp_path, minio_storage_url)
 
-        payload = {"build": "ok", "sha": "deadbeef"}
-        upload_metadata(
+        body = _make_tar_gz({"data.txt": b"hello world"})
+        _upload_artefact(
             minio_storage_url,
             "https://github.com/org/core.git",
             "main",
-            payload,
+            body,
         )
 
         result = runner.invoke(cli, ["-C", str(tmp_path), "clone"])
         assert result.exit_code == 0, result.output
-        assert "ok    libs/core (manifest)" in result.output
+        assert "ok    libs/core (artefact)" in result.output
 
-        manifest_file = tmp_path / "libs" / "core" / "manifest.json"
-        assert manifest_file.exists()
-        assert json.loads(manifest_file.read_text()) == payload
+        extracted = tmp_path / "libs" / "core" / "data.txt"
+        assert extracted.exists()
+        assert extracted.read_text() == "hello world"
 
-    def test_sync_pulls_manifest(
+    def test_sync_pulls_artefact(
         self, tmp_path: Path, minio_storage_url: str
     ) -> None:
         runner = CliRunner()
         _write_config(tmp_path, minio_storage_url)
 
-        payload_v1 = {"version": 1}
-        upload_metadata(
+        body_v1 = _make_tar_gz({"version.txt": b"1"})
+        _upload_artefact(
             minio_storage_url,
             "https://github.com/org/utils.git",
             "v2.0",
-            payload_v1,
+            body_v1,
         )
 
         result = runner.invoke(cli, ["-C", str(tmp_path), "sync"])
         assert result.exit_code == 0, result.output
-        assert "ok    libs/utils (manifest)" in result.output
+        assert "ok    libs/utils (artefact)" in result.output
 
-        manifest_file = tmp_path / "libs" / "utils" / "manifest.json"
-        assert manifest_file.exists()
-        assert json.loads(manifest_file.read_text()) == payload_v1
+        dest = tmp_path / "libs" / "utils" / "version.txt"
+        assert dest.exists()
+        assert dest.read_text() == "1"
 
         # Update and re-sync
-        payload_v2 = {"version": 2}
-        upload_metadata(
+        body_v2 = _make_tar_gz({"version.txt": b"2"})
+        _upload_artefact(
             minio_storage_url,
             "https://github.com/org/utils.git",
             "v2.0",
-            payload_v2,
+            body_v2,
         )
 
         result = runner.invoke(cli, ["-C", str(tmp_path), "sync"])
         assert result.exit_code == 0, result.output
-        assert json.loads(manifest_file.read_text()) == payload_v2
+        assert (tmp_path / "libs" / "utils" / "version.txt").read_text() == "2"
 
-    def test_clone_no_manifest_data(
+    def test_clone_no_artefact_data(
         self, tmp_path: Path, minio_storage_url: str
     ) -> None:
         runner = CliRunner()
         _write_config(tmp_path, minio_storage_url)
 
-        result = runner.invoke(
-            cli, ["-C", str(tmp_path), "clone"]
-        )
+        result = runner.invoke(cli, ["-C", str(tmp_path), "clone"])
         assert result.exit_code == 0, result.output
-        assert "no manifest data" in result.output
+        assert "no artefact data" in result.output
 
     def test_clone_saves_etags(
         self, tmp_path: Path, minio_storage_url: str
@@ -104,11 +122,12 @@ class TestManifestSync:
         runner = CliRunner()
         _write_config(tmp_path, minio_storage_url)
 
-        upload_metadata(
+        body = _make_tar_gz({"k.txt": b"v"})
+        _upload_artefact(
             minio_storage_url,
             "https://github.com/org/core.git",
             "main",
-            {"k": "v"},
+            body,
         )
 
         runner.invoke(cli, ["-C", str(tmp_path), "clone"])
@@ -125,20 +144,22 @@ class TestManifestSync:
         runner = CliRunner()
         _write_config(tmp_path, minio_storage_url)
 
-        upload_metadata(
+        body_v1 = _make_tar_gz({"v.txt": b"1"})
+        _upload_artefact(
             minio_storage_url,
             "https://github.com/org/core.git",
             "main",
-            {"v": 1},
+            body_v1,
         )
         runner.invoke(cli, ["-C", str(tmp_path), "clone"])
 
         # Upload a new version
-        upload_metadata(
+        body_v2 = _make_tar_gz({"v.txt": b"2"})
+        _upload_artefact(
             minio_storage_url,
             "https://github.com/org/core.git",
             "main",
-            {"v": 2},
+            body_v2,
         )
 
         result = runner.invoke(cli, ["-C", str(tmp_path), "fetch"])
@@ -156,128 +177,41 @@ class TestManifestSync:
         runner = CliRunner()
         _write_config(tmp_path, minio_storage_url)
 
-        upload_metadata(
+        body_v1 = _make_tar_gz({"v.txt": b"1"})
+        _upload_artefact(
             minio_storage_url,
             "https://github.com/org/core.git",
             "main",
-            {"v": 1},
+            body_v1,
         )
         runner.invoke(cli, ["-C", str(tmp_path), "clone"])
 
-        upload_metadata(
+        body_v2 = _make_tar_gz({"v.txt": b"2"})
+        _upload_artefact(
             minio_storage_url,
             "https://github.com/org/core.git",
             "main",
-            {"v": 2},
+            body_v2,
         )
 
         result = runner.invoke(cli, ["-C", str(tmp_path), "pull"])
         assert result.exit_code == 0, result.output
 
         dest = tmp_path / "libs" / "core"
-        data = json.loads((dest / "manifest.json").read_text())
-        assert data == {"v": 2}
+        assert (dest / "v.txt").read_text() == "2"
         # ETags should match after pull
         assert (
             (dest / ".etag").read_text().strip()
             == (dest / ".etag-remote").read_text().strip()
         )
 
-    def test_push_uploads_manifest(
+    def test_push_skips_artefact(
         self, tmp_path: Path, minio_storage_url: str
     ) -> None:
         runner = CliRunner()
         _write_config(tmp_path, minio_storage_url)
-
-        # Create manifest manually
-        dest = tmp_path / "libs" / "core"
-        dest.mkdir(parents=True)
-        (dest / "manifest.json").write_text('{"pushed": true}')
 
         result = runner.invoke(cli, ["-C", str(tmp_path), "push"])
         assert result.exit_code == 0, result.output
-        assert "pushed" in result.output
-
-        # Verify it was uploaded
-        data = download_metadata(
-            minio_storage_url,
-            "https://github.com/org/core.git",
-            "main",
-        )
-        assert data == {"pushed": True}
-
-    def test_pull_nonexistent_fails(
-        self, tmp_path: Path, minio_storage_url: str
-    ) -> None:
-        runner = CliRunner()
-        _write_config(tmp_path, minio_storage_url)
-
-        result = runner.invoke(
-            cli,
-            ["-C", str(tmp_path), "manifest", "pull", "libs/core"],
-        )
-        assert result.exit_code != 0
-        assert "No manifest data found" in result.output
-
-    def test_push_overwrite(
-        self, tmp_path: Path, minio_storage_url: str
-    ) -> None:
-        runner = CliRunner()
-        _write_config(tmp_path, minio_storage_url)
-
-        v1 = tmp_path / "v1.json"
-        v1.write_text(json.dumps({"v": 1}))
-        runner.invoke(
-            cli,
-            ["-C", str(tmp_path), "manifest", "push", "libs/core", str(v1)],
-        )
-
-        v2 = tmp_path / "v2.json"
-        v2.write_text(json.dumps({"v": 2}))
-        runner.invoke(
-            cli,
-            ["-C", str(tmp_path), "manifest", "push", "libs/core", str(v2)],
-        )
-
-        pull_result = runner.invoke(
-            cli,
-            ["-C", str(tmp_path), "manifest", "pull", "libs/core"],
-        )
-        assert pull_result.exit_code == 0
-        assert json.loads(pull_result.output) == {"v": 2}
-
-    def test_push_invalid_json_fails(
-        self, tmp_path: Path, minio_storage_url: str
-    ) -> None:
-        runner = CliRunner()
-        _write_config(tmp_path, minio_storage_url)
-
-        bad = tmp_path / "bad.json"
-        bad.write_text("not json at all")
-        result = runner.invoke(
-            cli,
-            [
-                "-C", str(tmp_path),
-                "manifest", "push", "libs/core", str(bad),
-            ],
-        )
-        assert result.exit_code != 0
-        assert "Invalid JSON" in result.output
-
-    def test_push_unknown_entry_fails(
-        self, tmp_path: Path, minio_storage_url: str
-    ) -> None:
-        runner = CliRunner()
-        _write_config(tmp_path, minio_storage_url)
-
-        f = tmp_path / "data.json"
-        f.write_text('{"x": 1}')
-        result = runner.invoke(
-            cli,
-            [
-                "-C", str(tmp_path),
-                "manifest", "push", "nonexistent", str(f),
-            ],
-        )
-        assert result.exit_code != 0
-        assert "not found" in result.output
+        assert "skip" in result.output
+        assert "artefact" in result.output

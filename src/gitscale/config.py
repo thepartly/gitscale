@@ -10,7 +10,7 @@ from typing import Any
 class RepoMode(Enum):
     READONLY = "readonly"
     READWRITE = "readwrite"
-    MANIFEST = "manifest"
+    ARTEFACT = "artefact"
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,11 +24,11 @@ class RepoEntry:
 
     @property
     def is_readonly(self) -> bool:
-        return self.mode in (RepoMode.READONLY, RepoMode.MANIFEST)
+        return self.mode in (RepoMode.READONLY, RepoMode.ARTEFACT)
 
     @property
-    def is_manifest(self) -> bool:
-        return self.mode == RepoMode.MANIFEST
+    def is_artefact(self) -> bool:
+        return self.mode == RepoMode.ARTEFACT
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,6 +1,6 @@
 # GitScale
 
-Manage multiple sub-repositories from a single config file. An alternative to git submodules — simpler, with readonly enforcement, manifest mode, and cloud storage for custom manifest data.
+Manage multiple sub-repositories from a single config file. An alternative to git submodules — simpler, with readonly enforcement, artefact mode, and cloud storage for pre-built archives.
 
 ## Install
 
@@ -33,10 +33,10 @@ gitscale status
 ```
 
 ```
-    REPO          REF    EXPECTED   STATUS
-✔   .             main              ok
-✔   libs/core     main   main       ok
-✔   libs/utils    v2.1   v2.1.0     ok
+    REPO          MODE        REF    EXPECTED   STATUS
+✔   .                         main              ok
+✔   libs/core     readonly    main   main       ok
+✔   libs/utils    readwrite   v2.1   v2.1.0     ok
 ```
 
 ## Config file
@@ -49,7 +49,7 @@ The `.gitscale.toml` file lives at the root of your project. GitScale searches u
 [repos]
 "libs/core" = { url = "git@github.com:org/core.git", revision = "main", mode = "readonly" }
 "libs/utils" = { url = "https://github.com/org/utils.git", revision = "v2.1.0" }
-"meta/frontend" = { url = "https://github.com/org/frontend.git", revision = "main", mode = "manifest" }
+"meta/frontend" = { url = "https://github.com/org/frontend.git", revision = "main", mode = "artefact" }
 ```
 
 Each entry maps a local directory to a git repo:
@@ -59,24 +59,24 @@ Each entry maps a local directory to a git repo:
 - **mode** — Access mode:
   - `readwrite` (default) — Normal clone, full access
   - `readonly` — Cloned, but all files have write permissions removed
-  - `manifest` — No git clone. Manifest data synced via cloud storage
+  - `artefact` — No git clone. Artefact archive synced via cloud storage
 
 ### Storage
 
-Configure cloud storage for manifest data:
+Configure cloud storage for artefact data:
 
 ```toml
 [storage]
 url = "https://my-bucket.s3.us-east-1.amazonaws.com/gitscale"
 ```
 
-See [Manifest storage](#manifest-storage) below.
+See [Artefact storage](#artefact-storage) below.
 
 ## Commands
 
 ### `gitscale clone [NAMES...]`
 
-Clone sub-repositories that don't exist locally yet. Manifest entries are downloaded from cloud storage.
+Clone sub-repositories that don't exist locally yet. Artefact entries are downloaded from cloud storage.
 
 ```
 gitscale clone                  # clone all
@@ -85,7 +85,7 @@ gitscale clone libs/core        # clone one
 
 ### `gitscale fetch [NAMES...]`
 
-Fetch latest remote state without modifying local files. For git repos: `git fetch`. For manifests: HEAD request to check remote ETag.
+Fetch latest remote state without modifying local files. For git repos: `git fetch`. For artefacts: HEAD request to check remote ETag.
 
 ```
 gitscale fetch                  # fetch all
@@ -94,7 +94,7 @@ gitscale fetch libs/core        # fetch one
 
 ### `gitscale pull [NAMES...]`
 
-Pull latest changes. For git repos: `git pull --ff-only`. For manifests: downloads from cloud storage if remote is newer. Clones repos that don't exist yet.
+Pull latest changes. For git repos: `git pull --ff-only`. For artefacts: downloads from cloud storage if remote is newer. Clones repos that don't exist yet.
 
 ```
 gitscale pull                   # pull all
@@ -103,7 +103,7 @@ gitscale pull libs/core         # pull one
 
 ### `gitscale push [NAMES...]`
 
-Push local changes. For git repos: `git push`. Readonly entries are skipped. For manifests: uploads to cloud storage if local differs from remote.
+Push local changes. For git repos: `git push`. Readonly and artefact entries are skipped.
 
 ```
 gitscale push                   # push all
@@ -138,7 +138,7 @@ Status icons and flags:
 | `≠` | orange | **ref-mismatch** | On a different branch than declared |
 | `≠` | orange | **stale** | Shallow clone: local differs from upstream |
 | `⇑` | yellow | **+N** | Commits ahead of upstream |
-| `⇓` | yellow | **-N** | Commits behind upstream / manifest remote is newer |
+| `⇓` | yellow | **-N** | Commits behind upstream / artefact remote is newer |
 | `⇅` | yellow | **+N, -N** | Diverged (ahead and behind) |
 | `◆` | cyan | **detached** | HEAD is detached |
 | `✘` | red | **missed** | Directory doesn't exist yet |
@@ -150,7 +150,7 @@ Add a new entry to `.gitscale.toml`.
 ```
 gitscale add libs/core https://github.com/org/core.git main
 gitscale add libs/core https://github.com/org/core.git main --mode readonly
-gitscale add meta/svc https://github.com/org/svc.git main --mode manifest
+gitscale add meta/svc https://github.com/org/svc.git main --mode artefact
 ```
 
 ### `gitscale remove DIRECTORY`
@@ -185,11 +185,11 @@ Shallow-cloned (`--depth 1`) locally, then all file write permissions are stripp
 
 Useful for vendored dependencies you shouldn't modify.
 
-### manifest
+### artefact
 
-No git clone. Manifest data is stored as `manifest.json` in the entry's directory. Cloud storage is used for push/pull — `clone` and `pull` download the file, `push` uploads it. The file is kept readonly locally. ETag-based change detection avoids unnecessary transfers.
+No git clone. An artefact archive (`<revision>.tar.gz`) is downloaded from cloud storage and extracted into the entry's directory on `clone` and `pull`. All extracted files are kept readonly. ETag-based change detection avoids unnecessary transfers. Push is not supported (artefacts are published by CI).
 
-The content is opaque to gitscale — it can be anything.
+The archive content is opaque to gitscale — it can contain anything.
 
 ## Shallow clones
 
@@ -197,14 +197,14 @@ Readonly repos are always shallow-cloned (`--depth 1 --branch <revision>`). This
 
 When the `CI` environment variable is set to `1` or `true` (as done by GitHub Actions, GitLab CI, etc.), **all** git repos are shallow-cloned, regardless of mode.
 
-| Context | readwrite | readonly | manifest |
+| Context | readwrite | readonly | artefact |
 |---------|-----------|----------|----------|
 | Local | full clone | shallow | no git |
 | CI (`CI=1`) | shallow | shallow | no git |
 
 Shallow repos show `≠ stale` in status when the local commit differs from upstream (exact behind count is unavailable).
 
-## Manifest storage
+## Artefact storage
 
 ### Setup
 
@@ -246,12 +246,12 @@ export GOOGLE_TOKEN=$(gcloud auth print-access-token)
 
 ### Object layout
 
-Objects are stored at: `{storage_url}/{host}/{owner}/{repo}/{revision}.json`
+Artefact archives are stored at: `{storage_url}/{host}/{owner}/{repo}/{revision}.tar.gz`
 
 For example, with `url = "https://bucket.s3.amazonaws.com/meta"` and a repo at `https://github.com/org/app.git` on revision `main`:
 
 ```
-https://bucket.s3.amazonaws.com/meta/github.com/org/app/main.json
+https://bucket.s3.amazonaws.com/meta/github.com/org/app/main.tar.gz
 ```
 
 ## License

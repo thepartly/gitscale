@@ -22,7 +22,7 @@ from gitscale.config import (
 @click.option(
     "--mode",
     type=click.Choice(
-        ["readonly", "readwrite", "manifest"], case_sensitive=False
+        ["readonly", "readwrite", "artefact"], case_sensitive=False
     ),
     default="readwrite",
     help="Access mode for the sub-repository.",
