@@ -4,17 +4,16 @@ import json
 from pathlib import Path
 
 import click
-from rich.console import Console
-from rich.table import Table
 
 from gitscale.config import ConfigError, find_config, load_config
 from gitscale.git import (
     RepoStatus,
     fetch_repo,
-    get_metadata_status,
+    get_manifest_status,
     get_repo_status,
     get_self_status,
 )
+from gitscale.storage import fetch_manifest
 
 
 @click.command()
@@ -62,9 +61,16 @@ def status(
 
     if fetch:
         for entry in config.repos:
-            if entry.is_metadata:
-                continue
             dest = config_root / entry.directory
+            if entry.is_manifest:
+                if config.storage_url:
+                    revision = entry.revision or "HEAD"
+                    if verbose:
+                        click.echo(f"Fetching {entry.directory}...")
+                    fetch_manifest(
+                        config.storage_url, entry.repo_url, revision, dest
+                    )
+                continue
             if dest.exists():
                 if verbose:
                     click.echo(f"Fetching {entry.directory}...")
@@ -77,8 +83,8 @@ def status(
         statuses.append(self_status)
 
     for entry in config.repos:
-        if entry.is_metadata:
-            statuses.append(get_metadata_status(entry, config_root))
+        if entry.is_manifest:
+            statuses.append(get_manifest_status(entry, config_root))
         else:
             statuses.append(get_repo_status(entry, config_root))
 
@@ -91,11 +97,13 @@ def status(
 def _get_status_flags(s: RepoStatus) -> str:
     """Compute status flags string for a repo."""
     if not s.exists:
-        return "NOT CLONED"
+        return "missed"
 
     flags: list[str] = []
     if not s.is_clean:
         flags.append("dirty")
+    if s.is_stale:
+        flags.append("stale")
     if s.is_detached:
         flags.append("detached")
     if s.ahead:
@@ -106,44 +114,90 @@ def _get_status_flags(s: RepoStatus) -> str:
         s.expected_ref
         and s.current_ref != s.expected_ref
         and not s.is_detached
-        and s.current_ref != "metadata"
+        and s.current_ref != "manifest"
     ):
         flags.append("ref-mismatch")
 
     return ", ".join(flags) if flags else "ok"
 
 
-def _status_style(flags: str) -> str:
-    """Return a rich style string based on status flags."""
+def _status_icon(flags: str) -> str:
+    """Return a UTF-8 status icon for the given flags."""
+    if flags == "ok":
+        return "✔"
+    if "missed" in flags:
+        return "✘"
+    if "dirty" in flags:
+        return "!"
+    if "stale" in flags or "ref-mismatch" in flags:
+        return "≠"
+    has_ahead = "+" in flags
+    has_behind = "-" in flags
+    if has_ahead and has_behind:
+        return "⇅"
+    if has_ahead:
+        return "⇑"
+    if has_behind:
+        return "⇓"
+    return "◆"
+
+
+def _status_color(flags: str) -> str:
+    """Return an ANSI color name for the given flags."""
     if flags == "ok":
         return "green"
-    if "NOT CLONED" in flags:
+    if "missed" in flags:
         return "red"
-    if "dirty" in flags or "ref-mismatch" in flags:
+    if "dirty" in flags or "ref-mismatch" in flags or "stale" in flags:
+        return "bright_red"  # renders as orange in most terminals
+    if "+" in flags or "-" in flags:
         return "yellow"
     return "cyan"
 
 
 def _print_table(statuses: list[RepoStatus]) -> None:
-    """Print status in a human-readable table."""
+    """Print status in a docker ps style borderless table with colors."""
     if not statuses:
         return
 
-    console = Console()
-    table = Table(show_edge=False, pad_edge=False, expand=False)
-
-    table.add_column("Repo", style="bold")
-    table.add_column("Ref")
-    table.add_column("Expected")
-    table.add_column("Status")
-
+    headers = ("", "REPO", "REF", "EXPECTED", "STATUS")
+    rows: list[tuple[str, str, str, str, str]] = []
     for s in statuses:
         flags = _get_status_flags(s)
-        style = _status_style(flags)
+        icon = _status_icon(flags)
         ref = s.current_ref if s.exists else "—"
-        table.add_row(s.directory, ref, s.expected_ref, f"[{style}]{flags}[/]")
+        rows.append((icon, s.directory, ref, s.expected_ref, flags))
 
-    console.print(table)
+    # Compute column widths (minimum = header width)
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+    # Icon column is always 1 char wide
+    widths[0] = max(widths[0], 1)
+
+    gap = "   "
+    fmt = gap.join(f"{{:<{w}}}" for w in widths)
+
+    click.echo(fmt.format(*headers))
+    for row in rows:
+        flags = row[4]
+        color = _status_color(flags)
+        plain = fmt.format(*row)
+        # Colorize the icon and status columns
+        icon_plain = row[0].ljust(widths[0])
+        status_plain = row[4].ljust(widths[4])
+        icon_bold = "missed" not in flags
+        plain = plain.replace(
+            icon_plain, click.style(icon_plain, fg=color, bold=icon_bold), 1
+        )
+        # Replace the last occurrence of status text with colored version
+        idx = plain.rfind(status_plain)
+        if idx >= 0:
+            end = idx + len(status_plain)
+            colored = click.style(status_plain, fg=color)
+            plain = plain[:idx] + colored + plain[end:]
+        click.echo(plain)
 
 
 def _print_json(statuses: list[RepoStatus]) -> None:
@@ -158,6 +212,7 @@ def _print_json(statuses: list[RepoStatus]) -> None:
             "detached": s.is_detached,
             "ahead": s.ahead,
             "behind": s.behind,
+            "stale": s.is_stale,
         }
         for s in statuses
     ]

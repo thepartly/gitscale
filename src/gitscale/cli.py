@@ -16,10 +16,22 @@ def cli(ctx: click.Context, verbose: bool) -> None:
 
 
 # Import and register subcommands
-from gitscale.commands import add, clone, metadata, status, sync  # noqa: E402
+from gitscale.commands import (  # noqa: E402
+    add,
+    clone,
+    fetch,
+    pull,
+    push,
+    remove,
+    status,
+    sync,
+)
 
 cli.add_command(clone.clone)
-cli.add_command(status.status)
+cli.add_command(fetch.fetch)
+cli.add_command(pull.pull)
+cli.add_command(push.push)
 cli.add_command(sync.sync)
+cli.add_command(status.status)
 cli.add_command(add.add)
-cli.add_command(metadata.metadata)
+cli.add_command(remove.remove)

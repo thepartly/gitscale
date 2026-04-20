@@ -1,12 +1,12 @@
-"""Clone all sub-repositories declared in .gitscale."""
+"""Pull latest changes from remote."""
 
 from pathlib import Path
 
 import click
 
 from gitscale.config import ConfigError, RepoEntry, find_config, load_config
-from gitscale.git import GitError, clone_repo, is_ci
-from gitscale.storage import StorageError, clone_manifest
+from gitscale.git import GitError, is_ci, pull_repo
+from gitscale.storage import StorageError, pull_manifest
 
 
 @click.command()
@@ -19,15 +19,16 @@ from gitscale.storage import StorageError, clone_manifest
 )
 @click.argument("names", nargs=-1)
 @click.pass_context
-def clone(
+def pull(
     ctx: click.Context,
     root: Path | None,
     names: tuple[str, ...],
 ) -> None:
-    """Clone sub-repositories from .gitscale config.
+    """Pull latest changes for sub-repositories.
 
-    If NAMES are given, clone only those entries. Otherwise clone all.
-    Metadata-only entries are skipped.
+    For git repos: runs git pull --ff-only. Clones if not yet cloned.
+    For manifests: downloads from cloud storage if remote is newer.
+    If NAMES are given, pull only those entries. Otherwise pull all.
     """
     verbose: bool = ctx.obj["verbose"]
 
@@ -41,65 +42,52 @@ def clone(
     selected = _filter_entries(config.repos, names)
 
     if not selected:
-        click.echo("Nothing to clone.")
+        click.echo("Nothing to pull.")
         return
 
     failed = 0
     for entry in selected:
-        dest = config_root / entry.directory
-        if entry.is_manifest:
-            if dest.exists():
-                click.echo(f"  skip  {entry.directory} (already exists)")
-                continue
-            if not config.storage_url:
-                click.echo(
-                    f"  FAIL  {entry.directory}: no [storage] configured",
-                    err=True,
-                )
-                failed += 1
-                continue
-            try:
+        try:
+            if entry.is_manifest:
+                if not config.storage_url:
+                    click.echo(
+                        f"  FAIL  {entry.directory}: no [storage] configured",
+                        err=True,
+                    )
+                    failed += 1
+                    continue
+                dest = config_root / entry.directory
                 revision = entry.revision or "HEAD"
-                found = clone_manifest(
+                found = pull_manifest(
                     config.storage_url, entry.repo_url, revision, dest
                 )
                 if found:
                     click.echo(f"  ok    {entry.directory} (manifest)")
                 else:
-                    click.echo(f"  skip  {entry.directory} (no manifest data)")
-            except StorageError as e:
-                click.echo(f"  FAIL  {entry.directory}: {e}", err=True)
-                failed += 1
-            continue
-        if dest.exists():
-            click.echo(f"  skip  {entry.directory} (already exists)")
-            continue
-        try:
+                    click.echo(
+                        f"  skip  {entry.directory} (no remote manifest)"
+                    )
+                continue
+
             if verbose:
-                click.echo(
-                    f"  clone {entry.repo_url} → "
-                    f"{entry.directory} @ {entry.revision}"
-                )
+                click.echo(f"  pull  {entry.directory}")
             ci = is_ci()
             shallow = ci or entry.is_readonly
-            clone_repo(
+            pull_repo(
                 entry, config_root, verbose=verbose, shallow=shallow
             )
             click.echo(f"  ok    {entry.directory}")
-        except GitError as e:
+        except (GitError, StorageError) as e:
             click.echo(f"  FAIL  {entry.directory}: {e}", err=True)
             failed += 1
 
     if failed:
-        raise click.ClickException(
-            f"{failed} repo(s) failed to clone"
-        )
+        raise click.ClickException(f"{failed} repo(s) failed to pull")
 
 
 def _filter_entries(
     entries: list[RepoEntry], names: tuple[str, ...]
 ) -> list[RepoEntry]:
-    """Filter entries by name, or return all if names is empty."""
     if not names:
         return entries
     name_set = set(names)

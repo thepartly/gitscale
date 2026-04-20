@@ -1,4 +1,4 @@
-"""Upload and download custom metadata for repo revisions."""
+"""Upload and download custom manifest data for repo revisions."""
 
 from __future__ import annotations
 
@@ -17,11 +17,11 @@ if TYPE_CHECKING:
 
 
 @click.group()
-def metadata() -> None:
-    """Manage custom metadata for repo revisions."""
+def manifest() -> None:
+    """Manage custom manifest data for repo revisions."""
 
 
-@metadata.command()
+@manifest.command()
 @click.argument("directory")
 @click.argument("file", type=click.Path(exists=True), required=False)
 @click.option(
@@ -38,14 +38,14 @@ def push(
     file: str | None,
     root: Path | None,
 ) -> None:
-    """Upload metadata JSON for a repo's current revision.
+    """Upload manifest JSON for a repo's current revision.
 
     DIRECTORY is the repo entry name from .gitscale.toml.
     FILE is a JSON file to upload. Reads from stdin if omitted.
 
     Example:
-        gitscale metadata push fe/app checksums.json
-        echo '{"build": "ok"}' | gitscale metadata push fe/app
+        gitscale manifest push fe/app checksums.json
+        echo '{"build": "ok"}' | gitscale manifest push fe/app
     """
     config, config_root = _load(root)
     entry = _find_entry(config, directory)
@@ -83,7 +83,7 @@ def push(
     click.echo(f"Uploaded {directory} @ {revision} → {url}")
 
 
-@metadata.command()
+@manifest.command()
 @click.argument("directory")
 @click.option(
     "-C",
@@ -98,7 +98,7 @@ def pull(
     directory: str,
     root: Path | None,
 ) -> None:
-    """Download metadata JSON for a repo's current revision.
+    """Download manifest JSON for a repo's current revision.
 
     Prints the JSON to stdout.
 
@@ -118,7 +118,7 @@ def pull(
 
     if data is None:
         raise click.ClickException(
-            f"No metadata found for {directory} @ {revision}"
+            f"No manifest data found for {directory} @ {revision}"
         )
 
     click.echo(json.dumps(data, indent=2))

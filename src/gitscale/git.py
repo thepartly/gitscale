@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
-import json
 import os
 import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from gitscale.config import RepoEntry
+
+
+def is_ci() -> bool:
+    """Return True when running inside a CI environment."""
+    return os.environ.get("CI", "").lower() in ("1", "true")
 
 
 class GitError(Exception):
@@ -45,12 +49,14 @@ def clone_repo(
     root: Path,
     *,
     verbose: bool = False,
+    shallow: bool = False,
 ) -> None:
     """Clone a repository into root/entry.directory.
 
-    Metadata-only entries are skipped (handled by sync_metadata).
+    Manifest-only entries are skipped.
+    When *shallow* is True, clones with ``--depth 1 --branch <revision>``.
     """
-    if entry.is_metadata:
+    if entry.is_manifest:
         return
 
     dest = root / entry.directory
@@ -58,13 +64,16 @@ def clone_repo(
         raise GitError(f"Directory already exists: {dest}")
 
     args = ["clone", entry.repo_url, str(dest)]
+    if shallow:
+        args.extend(["--depth", "1", "--branch", entry.revision])
     if verbose:
         args.append("--progress")
     else:
         args.append("--quiet")
 
     _run_git(args)
-    checkout_revision(entry, root)
+    if not shallow:
+        checkout_revision(entry, root)
     if entry.is_readonly:
         apply_readonly(dest)
 
@@ -83,10 +92,26 @@ def checkout_revision(entry: RepoEntry, root: Path) -> None:
         _run_git(["checkout", "--detach", entry.revision], cwd=dest)
 
 
+def is_shallow(dest: Path) -> bool:
+    """Return True if the repo at *dest* is a shallow clone."""
+    result = _run_git(
+        ["rev-parse", "--is-shallow-repository"],
+        cwd=dest,
+        check=False,
+    )
+    return result.stdout.strip() == "true"
+
+
 def fetch_repo(entry: RepoEntry, root: Path) -> None:
-    """Fetch latest from remote for a repo."""
+    """Fetch latest from remote for a repo.
+
+    Uses ``--depth 1`` for shallow clones.
+    """
     dest = root / entry.directory
-    _run_git(["fetch", "--all", "--quiet"], cwd=dest)
+    if is_shallow(dest):
+        _run_git(["fetch", "--depth", "1", "--quiet"], cwd=dest)
+    else:
+        _run_git(["fetch", "--all", "--quiet"], cwd=dest)
 
 
 def apply_readonly(dest: Path) -> None:
@@ -128,18 +153,19 @@ def sync_repo(
     root: Path,
     *,
     verbose: bool = False,
+    shallow: bool = False,
 ) -> None:
     """Fetch and checkout declared revision for a repo.
 
     If the directory doesn't exist yet, clone it.
-    Metadata-only entries are skipped (handled by sync_metadata).
+    Manifest-only entries are skipped.
     """
-    if entry.is_metadata:
+    if entry.is_manifest:
         return
 
     dest = root / entry.directory
     if not dest.exists():
-        clone_repo(entry, root, verbose=verbose)
+        clone_repo(entry, root, verbose=verbose, shallow=shallow)
         return
 
     # Temporarily restore write so git can modify working tree
@@ -148,15 +174,86 @@ def sync_repo(
 
     try:
         fetch_repo(entry, root)
-        checkout_revision(entry, root)
-
-        # For branches, also pull to fast-forward
-        head_ref = get_current_ref(entry, root)
-        if head_ref and not is_detached(entry, root):
-            _run_git(["pull", "--ff-only", "--quiet"], cwd=dest, check=False)
+        if is_shallow(dest):
+            _run_git(
+                ["reset", "--hard", "@{upstream}"],
+                cwd=dest,
+                check=False,
+            )
+        else:
+            checkout_revision(entry, root)
+            # For branches, also pull to fast-forward
+            head_ref = get_current_ref(entry, root)
+            if head_ref and not is_detached(entry, root):
+                _run_git(
+                    ["pull", "--ff-only", "--quiet"],
+                    cwd=dest,
+                    check=False,
+                )
     finally:
         if entry.is_readonly:
             apply_readonly(dest)
+
+
+def pull_repo(
+    entry: RepoEntry,
+    root: Path,
+    *,
+    verbose: bool = False,
+    shallow: bool = False,
+) -> None:
+    """Pull (fetch + fast-forward) a repo.
+
+    If the directory doesn't exist yet, clone it.
+    For shallow clones: fetch --depth 1 + reset --hard.
+    Manifest-only entries are skipped.
+    """
+    if entry.is_manifest:
+        return
+
+    dest = root / entry.directory
+    if not dest.exists():
+        clone_repo(entry, root, verbose=verbose, shallow=shallow)
+        return
+
+    if entry.is_readonly:
+        restore_writable(dest)
+
+    try:
+        if is_shallow(dest):
+            _run_git(["fetch", "--depth", "1", "--quiet"], cwd=dest)
+            _run_git(
+                ["reset", "--hard", "@{upstream}"],
+                cwd=dest,
+                check=False,
+            )
+        else:
+            _run_git(
+                ["pull", "--ff-only", "--quiet"], cwd=dest, check=False
+            )
+    finally:
+        if entry.is_readonly:
+            apply_readonly(dest)
+
+
+def push_repo(
+    entry: RepoEntry,
+    root: Path,
+    *,
+    verbose: bool = False,
+) -> None:
+    """Push local commits to remote.
+
+    Manifest-only and readonly entries are skipped.
+    """
+    if entry.is_manifest or entry.is_readonly:
+        return
+
+    dest = root / entry.directory
+    if not dest.exists():
+        return
+
+    _run_git(["push", "--quiet"], cwd=dest)
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +268,7 @@ class RepoStatus:
     is_detached: bool
     ahead: int
     behind: int
+    is_stale: bool = False
 
 
 def get_current_ref(entry: RepoEntry, root: Path) -> str:
@@ -228,6 +326,17 @@ def get_ahead_behind(
     return 0, 0
 
 
+def _is_stale(dest: Path) -> bool:
+    """For shallow repos: check if HEAD differs from upstream hash."""
+    local = _run_git(["rev-parse", "HEAD"], cwd=dest, check=False)
+    remote = _run_git(
+        ["rev-parse", "@{upstream}"], cwd=dest, check=False
+    )
+    if local.returncode != 0 or remote.returncode != 0:
+        return False
+    return local.stdout.strip() != remote.stdout.strip()
+
+
 def get_repo_status(entry: RepoEntry, root: Path) -> RepoStatus:
     """Get full status for a managed repo."""
     dest = root / entry.directory
@@ -246,8 +355,23 @@ def get_repo_status(entry: RepoEntry, root: Path) -> RepoStatus:
     current = get_current_ref(entry, root)
     detached = is_detached(entry, root)
     clean = is_clean(entry, root)
-    ahead, behind = get_ahead_behind(entry, root)
+    shallow = is_shallow(dest)
 
+    if shallow:
+        stale = _is_stale(dest)
+        return RepoStatus(
+            directory=entry.directory,
+            exists=True,
+            current_ref=current,
+            expected_ref=entry.revision,
+            is_clean=clean,
+            is_detached=detached,
+            ahead=0,
+            behind=0,
+            is_stale=stale,
+        )
+
+    ahead, behind = get_ahead_behind(entry, root)
     return RepoStatus(
         directory=entry.directory,
         exists=True,
@@ -315,50 +439,34 @@ def get_self_status(root: Path) -> RepoStatus | None:
     )
 
 
-def sync_metadata(
-    entry: RepoEntry,
-    root: Path,
-    hosts: dict[str, str],
-) -> dict[str, Any]:
-    """Fetch metadata from platform API and cache it.
-
-    Creates the subdirectory with a metadata.json file.
-    Returns the metadata dict.
-    """
-    from gitscale.api import fetch_metadata
-    from gitscale.cache import write_cache
-
-    data = fetch_metadata(entry.repo_url, entry.revision, hosts)
-
-    # Write to local directory
-    dest = root / entry.directory
-    dest.mkdir(parents=True, exist_ok=True)
-    meta_file = dest / "metadata.json"
-    meta_file.write_text(
-        json.dumps(data, indent=2), encoding="utf-8"
-    )
-
-    # Write to global cache
-    write_cache(entry.repo_url, entry.revision, data)
-
-    return data
-
-
-def get_metadata_status(
+def get_manifest_status(
     entry: RepoEntry, root: Path
 ) -> RepoStatus:
-    """Get status for a metadata-only entry."""
+    """Get status for a manifest-only entry.
+
+    Compares .etag and .etag-remote to detect behind state.
+    """
     dest = root / entry.directory
-    meta_file = dest / "metadata.json"
-    exists = meta_file.is_file()
+    manifest_file = dest / "manifest.json"
+    exists = manifest_file.is_file()
+
+    # Check if behind remote
+    behind = 0
+    etag_file = dest / ".etag"
+    etag_remote_file = dest / ".etag-remote"
+    if etag_file.is_file() and etag_remote_file.is_file():
+        local = etag_file.read_text(encoding="utf-8").strip()
+        remote = etag_remote_file.read_text(encoding="utf-8").strip()
+        if local and remote and local != remote:
+            behind = 1
 
     return RepoStatus(
         directory=entry.directory,
         exists=exists,
-        current_ref="metadata" if exists else "",
+        current_ref="manifest" if exists else "",
         expected_ref=entry.revision,
         is_clean=True,
         is_detached=False,
         ahead=0,
-        behind=0,
+        behind=behind,
     )

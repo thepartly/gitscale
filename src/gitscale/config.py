@@ -1,7 +1,7 @@
 """Config parser for .gitscale TOML files."""
 
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -10,7 +10,7 @@ from typing import Any
 class RepoMode(Enum):
     READONLY = "readonly"
     READWRITE = "readwrite"
-    METADATA = "metadata"
+    MANIFEST = "manifest"
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,11 +24,11 @@ class RepoEntry:
 
     @property
     def is_readonly(self) -> bool:
-        return self.mode in (RepoMode.READONLY, RepoMode.METADATA)
+        return self.mode in (RepoMode.READONLY, RepoMode.MANIFEST)
 
     @property
-    def is_metadata(self) -> bool:
-        return self.mode == RepoMode.METADATA
+    def is_manifest(self) -> bool:
+        return self.mode == RepoMode.MANIFEST
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,7 +36,6 @@ class GitScaleConfig:
     """Parsed .gitscale configuration."""
 
     repos: list[RepoEntry]
-    hosts: dict[str, str] = field(default_factory=dict)
     storage_url: str = ""
 
 
@@ -45,8 +44,6 @@ class ConfigError(Exception):
 
 
 CONFIG_FILENAME = ".gitscale.toml"
-
-_VALID_PLATFORMS = {"github", "gitlab"}
 
 
 def find_config(start: Path | None = None) -> Path:
@@ -77,35 +74,10 @@ def load_config(config_path: Path) -> GitScaleConfig:
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{config_path}: invalid TOML: {e}") from None
 
-    hosts = _parse_hosts(data.get("hosts", {}), config_path)
     repos = _parse_repos(data.get("repos", {}), config_path)
     storage_url = _parse_storage(data.get("storage", {}), config_path)
 
-    return GitScaleConfig(repos=repos, hosts=hosts, storage_url=storage_url)
-
-
-def _parse_hosts(
-    raw: Any, config_path: Path
-) -> dict[str, str]:
-    """Parse the [hosts] table."""
-    if not isinstance(raw, dict):
-        raise ConfigError(
-            f"{config_path}: [hosts] must be a table"
-        )
-    hosts: dict[str, str] = {}
-    for hostname, platform in raw.items():
-        if not isinstance(platform, str):
-            raise ConfigError(
-                f"{config_path}: hosts.{hostname} must be a string"
-            )
-        if platform not in _VALID_PLATFORMS:
-            raise ConfigError(
-                f"{config_path}: hosts.{hostname}: "
-                f"unknown platform '{platform}', "
-                f"expected one of: {', '.join(sorted(_VALID_PLATFORMS))}"
-            )
-        hosts[hostname] = platform
-    return hosts
+    return GitScaleConfig(repos=repos, storage_url=storage_url)
 
 
 def _parse_storage(
@@ -192,17 +164,10 @@ def parse_config(config_path: Path) -> list[RepoEntry]:
 def write_config(
     config_path: Path,
     entries: list[RepoEntry],
-    hosts: dict[str, str] | None = None,
     storage_url: str = "",
 ) -> None:
     """Write a .gitscale config file in TOML format."""
     lines: list[str] = []
-
-    if hosts:
-        lines.append("[hosts]")
-        for hostname, platform in sorted(hosts.items()):
-            lines.append(f'"{ hostname}" = "{platform}"')
-        lines.append("")
 
     if storage_url:
         lines.append("[storage]")

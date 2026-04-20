@@ -1,0 +1,33 @@
+services:
+  minio:
+    image: minio/minio:latest
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    networks:
+      - default
+      - devbox
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  minio-data:
+
+networks:
+  devbox:
+    # Attach to the existing devcontainer network so MinIO is reachable
+    # from inside the dev container by service name ("minio").
+    # Change the 'name' below to match your devcontainer network
+    # (run `docker network ls` to find it).
+    external: true
+    name: ${DEVBOX_NETWORK:-devbox_andrey_default}
+

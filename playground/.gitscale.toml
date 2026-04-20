@@ -2,4 +2,4 @@
 [repos]
 "libs/markupsafe" = { url = "https://github.com/pallets/markupsafe.git", revision = "main", mode = "readonly" }
 "libs/humanize" = { url = "https://github.com/python-humanize/humanize.git", revision = "main" }
-"meta/gsdemo-fe" = { url = "https://github.com/avkonst/gsdemo-fe.git", revision = "main", mode = "metadata" }
+"meta/gsdemo-fe" = { url = "https://github.com/avkonst/gsdemo-fe.git", revision = "main", mode = "manifest" }

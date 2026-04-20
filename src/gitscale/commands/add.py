@@ -22,7 +22,7 @@ from gitscale.config import (
 @click.option(
     "--mode",
     type=click.Choice(
-        ["readonly", "readwrite", "metadata"], case_sensitive=False
+        ["readonly", "readwrite", "manifest"], case_sensitive=False
     ),
     default="readwrite",
     help="Access mode for the sub-repository.",
@@ -49,13 +49,11 @@ def add(
     REPO_URL is the git repository URL.
     REVISION is the branch, tag, or commit to checkout.
     """
-    hosts: dict[str, str] = {}
     storage_url = ""
     try:
         config_path = find_config(root)
         config = load_config(config_path)
         entries = list(config.repos)
-        hosts = config.hosts
         storage_url = config.storage_url
     except ConfigError:
         # No config yet — create one
@@ -77,7 +75,7 @@ def add(
         mode=RepoMode(mode),
     )
     entries.append(new_entry)
-    write_config(config_path, entries, hosts=hosts, storage_url=storage_url)
+    write_config(config_path, entries, storage_url=storage_url)
     click.echo(
         f"Added {directory} → {repo_url} @ {revision} [{mode}]"
     )

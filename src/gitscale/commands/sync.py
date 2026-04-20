@@ -1,11 +1,12 @@
-"""Sync sub-repositories to their declared revisions."""
+"""Sync sub-repositories: clone + pull + push."""
 
 from pathlib import Path
 
 import click
 
-from gitscale.config import ConfigError, find_config, load_config
-from gitscale.git import GitError, sync_metadata, sync_repo
+from gitscale.commands.clone import clone
+from gitscale.commands.pull import pull
+from gitscale.commands.push import push
 
 
 @click.command()
@@ -23,58 +24,16 @@ def sync(
     root: Path | None,
     names: tuple[str, ...],
 ) -> None:
-    """Fetch and checkout declared revisions for sub-repositories.
+    """Full sync: clone missing repos, pull updates, push local changes.
 
-    Clones repos that don't exist locally yet.
-    Metadata-only entries fetch from the platform API.
+    Equivalent to running clone + pull + push in sequence.
     If NAMES are given, sync only those entries. Otherwise sync all.
     """
-    verbose: bool = ctx.obj["verbose"]
+    common: list[str] = []
+    if root is not None:
+        common.extend(["-C", str(root)])
+    common.extend(list(names))
 
-    try:
-        config_path = find_config(root)
-    except ConfigError as e:
-        raise click.ClickException(str(e)) from None
-
-    config_root = config_path.parent
-    config = load_config(config_path)
-    entries = config.repos
-
-    if names:
-        name_set = set(names)
-        entries = [e for e in entries if e.directory in name_set]
-        unknown = name_set - {e.directory for e in entries}
-        if unknown:
-            raise click.ClickException(
-                f"Unknown repos: {', '.join(sorted(unknown))}"
-            )
-
-    if not entries:
-        click.echo("Nothing to sync.")
-        return
-
-    failed = 0
-    for entry in entries:
-        try:
-            if entry.is_metadata:
-                if verbose:
-                    click.echo(
-                        f"  meta  {entry.directory} → {entry.revision}"
-                    )
-                sync_metadata(entry, config_root, config.hosts)
-                click.echo(f"  ok    {entry.directory} (metadata)")
-            else:
-                if verbose:
-                    click.echo(
-                        f"  sync  {entry.directory} → {entry.revision}"
-                    )
-                sync_repo(entry, config_root, verbose=verbose)
-                click.echo(f"  ok    {entry.directory}")
-        except (GitError, Exception) as e:
-            click.echo(f"  FAIL  {entry.directory}: {e}", err=True)
-            failed += 1
-
-    if failed:
-        raise click.ClickException(
-            f"{failed} repo(s) failed to sync"
-        )
+    ctx.invoke(clone, root=root, names=names)
+    ctx.invoke(pull, root=root, names=names)
+    ctx.invoke(push, root=root, names=names)

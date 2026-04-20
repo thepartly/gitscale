@@ -51,7 +51,28 @@ def test_sync_help() -> None:
     runner = CliRunner()
     result = runner.invoke(cli, ["sync", "--help"])
     assert result.exit_code == 0
-    assert "Fetch and checkout" in result.output
+    assert "Full sync" in result.output
+
+
+def test_fetch_help() -> None:
+    runner = CliRunner()
+    result = runner.invoke(cli, ["fetch", "--help"])
+    assert result.exit_code == 0
+    assert "Fetch latest" in result.output
+
+
+def test_pull_help() -> None:
+    runner = CliRunner()
+    result = runner.invoke(cli, ["pull", "--help"])
+    assert result.exit_code == 0
+    assert "Pull latest" in result.output
+
+
+def test_push_help() -> None:
+    runner = CliRunner()
+    result = runner.invoke(cli, ["push", "--help"])
+    assert result.exit_code == 0
+    assert "Push local" in result.output
 
 
 def test_add_help() -> None:
@@ -100,33 +121,18 @@ def test_parse_config_default_mode(tmp_path: Path) -> None:
     assert entries[0].mode == RepoMode.READWRITE
 
 
-def test_parse_config_metadata_mode(tmp_path: Path) -> None:
+def test_parse_config_manifest_mode(tmp_path: Path) -> None:
     cfg = tmp_path / ".gitscale.toml"
     cfg.write_text(
         '[repos]\n'
         '"meta/svc" = { url = "https://github.com/org/svc.git", '
-        'revision = "main", mode = "metadata" }\n'
+        'revision = "main", mode = "manifest" }\n'
     )
     entries = parse_config(cfg)
     assert len(entries) == 1
-    assert entries[0].mode == RepoMode.METADATA
-    assert entries[0].is_metadata
+    assert entries[0].mode == RepoMode.MANIFEST
+    assert entries[0].is_manifest
     assert entries[0].is_readonly
-
-
-def test_parse_config_hosts(tmp_path: Path) -> None:
-    cfg = tmp_path / ".gitscale.toml"
-    cfg.write_text(
-        '[hosts]\n'
-        '"gh.corp.com" = "github"\n'
-        '"gl.internal" = "gitlab"\n\n'
-        '[repos]\n'
-        '"libs/a" = { url = "https://gh.corp.com/org/a.git", '
-        'revision = "main" }\n'
-    )
-    config = load_config(cfg)
-    assert config.hosts == {"gh.corp.com": "github", "gl.internal": "gitlab"}
-    assert len(config.repos) == 1
 
 
 def test_parse_config_missing_url(tmp_path: Path) -> None:
@@ -170,30 +176,18 @@ def test_write_config_roundtrip(tmp_path: Path) -> None:
     assert parsed == entries
 
 
-def test_write_config_with_hosts(tmp_path: Path) -> None:
-    cfg = tmp_path / ".gitscale.toml"
-    entries = [
-        RepoEntry("libs/a", "https://a.git", "main", RepoMode.READONLY),
-    ]
-    hosts = {"gh.corp.com": "github"}
-    write_config(cfg, entries, hosts=hosts)
-    config = load_config(cfg)
-    assert config.hosts == hosts
-    assert len(config.repos) == 1
-
-
-def test_write_config_metadata_roundtrip(tmp_path: Path) -> None:
+def test_write_config_manifest_roundtrip(tmp_path: Path) -> None:
     cfg = tmp_path / ".gitscale.toml"
     entries = [
         RepoEntry(
             "meta/svc", "https://github.com/org/svc.git",
-            "main", RepoMode.METADATA,
+            "main", RepoMode.MANIFEST,
         ),
     ]
     write_config(cfg, entries)
     parsed = parse_config(cfg)
     assert parsed == entries
-    assert parsed[0].is_metadata
+    assert parsed[0].is_manifest
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +227,7 @@ def test_add_duplicate_fails(tmp_path: Path) -> None:
         assert "already declared" in result.output
 
 
-def test_add_metadata_mode(tmp_path: Path) -> None:
+def test_add_manifest_mode(tmp_path: Path) -> None:
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path) as td:
         result = runner.invoke(
@@ -241,15 +235,52 @@ def test_add_metadata_mode(tmp_path: Path) -> None:
             [
                 "add", "meta/svc",
                 "https://github.com/org/svc.git", "main",
-                "--mode", "metadata",
+                "--mode", "manifest",
             ],
         )
         assert result.exit_code == 0
         assert "Added meta/svc" in result.output
-        assert "[metadata]" in result.output
+        assert "[manifest]" in result.output
 
         entries = parse_config(Path(td) / ".gitscale.toml")
-        assert entries[0].mode == RepoMode.METADATA
+        assert entries[0].mode == RepoMode.MANIFEST
+
+
+# ---------------------------------------------------------------------------
+# Remove command
+# ---------------------------------------------------------------------------
+
+
+def test_remove_entry(tmp_path: Path) -> None:
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path) as td:
+        runner.invoke(
+            cli,
+            ["add", "libs/core", "https://github.com/org/core.git", "main"],
+        )
+        runner.invoke(
+            cli,
+            ["add", "libs/utils", "https://github.com/org/utils.git", "main"],
+        )
+        result = runner.invoke(cli, ["remove", "libs/core"])
+        assert result.exit_code == 0
+        assert "Removed libs/core" in result.output
+
+        entries = parse_config(Path(td) / ".gitscale.toml")
+        assert len(entries) == 1
+        assert entries[0].directory == "libs/utils"
+
+
+def test_remove_nonexistent_fails(tmp_path: Path) -> None:
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        runner.invoke(
+            cli,
+            ["add", "libs/core", "https://github.com/org/core.git", "main"],
+        )
+        result = runner.invoke(cli, ["remove", "libs/nope"])
+        assert result.exit_code != 0
+        assert "not declared" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -289,7 +320,7 @@ def test_status_not_cloned(tmp_path: Path) -> None:
         )
         result = runner.invoke(cli, ["status"])
         assert result.exit_code == 0
-        assert "NOT CLONED" in result.output
+        assert "missed" in result.output
 
 
 def test_status_json_format(tmp_path: Path) -> None:
@@ -307,52 +338,12 @@ def test_status_json_format(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# API module unit tests
+# URL utility tests
 # ---------------------------------------------------------------------------
 
 
-def test_detect_platform_github() -> None:
-    from gitscale.api import detect_platform
-
-    platform, base = detect_platform(
-        "https://github.com/org/repo.git", {}
-    )
-    assert platform == "github"
-    assert base == "https://api.github.com"
-
-
-def test_detect_platform_gitlab() -> None:
-    from gitscale.api import detect_platform
-
-    platform, base = detect_platform(
-        "https://gitlab.com/org/repo.git", {}
-    )
-    assert platform == "gitlab"
-    assert base == "https://gitlab.com/api/v4"
-
-
-def test_detect_platform_custom_host() -> None:
-    from gitscale.api import detect_platform
-
-    hosts = {"gh.corp.com": "github"}
-    platform, base = detect_platform(
-        "https://gh.corp.com/org/repo.git", hosts
-    )
-    assert platform == "github"
-    assert base == "https://gh.corp.com/api/v3"
-
-
-def test_detect_platform_ssh() -> None:
-    from gitscale.api import detect_platform
-
-    platform, _ = detect_platform(
-        "git@github.com:org/repo.git", {}
-    )
-    assert platform == "github"
-
-
 def test_extract_owner_repo() -> None:
-    from gitscale.api import extract_owner_repo
+    from gitscale.urls import extract_owner_repo
 
     assert extract_owner_repo("https://github.com/org/repo.git") == (
         "org", "repo"
@@ -362,13 +353,11 @@ def test_extract_owner_repo() -> None:
     )
 
 
-def test_detect_platform_unknown_host() -> None:
-    import pytest
+def test_extract_hostname() -> None:
+    from gitscale.urls import _extract_hostname
 
-    from gitscale.api import ApiError, detect_platform
-
-    with pytest.raises(ApiError, match="Cannot detect platform"):
-        detect_platform("https://unknown.example.com/org/repo.git", {})
+    assert _extract_hostname("https://github.com/org/repo.git") == "github.com"
+    assert _extract_hostname("git@gitlab.com:org/repo.git") == "gitlab.com"
 
 
 # ---------------------------------------------------------------------------
@@ -421,9 +410,9 @@ def test_write_config_preserves_storage(tmp_path: Path) -> None:
 
 
 def test_object_url_construction() -> None:
-    from gitscale.storage import _object_url
+    from gitscale.storage import object_url
 
-    url = _object_url(
+    url = object_url(
         "https://bucket.s3.amazonaws.com/meta",
         "https://github.com/org/repo.git",
         "main",
@@ -435,9 +424,9 @@ def test_object_url_construction() -> None:
 
 
 def test_object_url_slash_in_revision() -> None:
-    from gitscale.storage import _object_url
+    from gitscale.storage import object_url
 
-    url = _object_url(
+    url = object_url(
         "https://bucket.s3.amazonaws.com/meta",
         "https://github.com/org/repo.git",
         "feature/foo",
@@ -476,55 +465,69 @@ def test_s3_region_default() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Metadata CLI (no storage configured)
+# CI detection
 # ---------------------------------------------------------------------------
 
 
-def test_metadata_help() -> None:
-    runner = CliRunner()
-    result = runner.invoke(cli, ["metadata", "--help"])
-    assert result.exit_code == 0
-    assert "Manage custom metadata" in result.output
+def test_is_ci_true() -> None:
+    import os
+
+    from gitscale.git import is_ci
+
+    old = os.environ.pop("CI", None)
+    try:
+        os.environ["CI"] = "true"
+        assert is_ci() is True
+        os.environ["CI"] = "1"
+        assert is_ci() is True
+        os.environ["CI"] = "TRUE"
+        assert is_ci() is True
+    finally:
+        if old is not None:
+            os.environ["CI"] = old
+        else:
+            os.environ.pop("CI", None)
 
 
-def test_metadata_push_help() -> None:
-    runner = CliRunner()
-    result = runner.invoke(cli, ["metadata", "push", "--help"])
-    assert result.exit_code == 0
-    assert "Upload metadata" in result.output
+def test_is_ci_false() -> None:
+    import os
+
+    from gitscale.git import is_ci
+
+    old = os.environ.pop("CI", None)
+    try:
+        assert is_ci() is False
+        os.environ["CI"] = ""
+        assert is_ci() is False
+        os.environ["CI"] = "false"
+        assert is_ci() is False
+    finally:
+        if old is not None:
+            os.environ["CI"] = old
+        else:
+            os.environ.pop("CI", None)
 
 
-def test_metadata_push_no_storage(tmp_path: Path) -> None:
-    runner = CliRunner()
-    with runner.isolated_filesystem(temp_dir=tmp_path) as td:
-        cfg = Path(td) / ".gitscale.toml"
-        cfg.write_text(
-            '[repos]\n'
-            '"libs/a" = { url = "https://a.git", revision = "main" }\n'
-        )
-        json_file = Path(td) / "data.json"
-        json_file.write_text('{"key": "value"}')
-        result = runner.invoke(
-            cli, ["metadata", "push", "libs/a", str(json_file)]
-        )
-        assert result.exit_code != 0
-        assert "No [storage] configured" in result.output
+# ---------------------------------------------------------------------------
+# RepoStatus.is_stale default
+# ---------------------------------------------------------------------------
 
 
-def test_metadata_push_unknown_entry(tmp_path: Path) -> None:
-    runner = CliRunner()
-    with runner.isolated_filesystem(temp_dir=tmp_path) as td:
-        cfg = Path(td) / ".gitscale.toml"
-        cfg.write_text(
-            '[storage]\n'
-            'url = "https://bucket.s3.amazonaws.com/gs"\n\n'
-            '[repos]\n'
-            '"libs/a" = { url = "https://a.git", revision = "main" }\n'
-        )
-        json_file = Path(td) / "data.json"
-        json_file.write_text('{"key": "value"}')
-        result = runner.invoke(
-            cli, ["metadata", "push", "nonexistent", str(json_file)]
-        )
-        assert result.exit_code != 0
-        assert "not found" in result.output
+def test_repo_status_stale_default() -> None:
+    from gitscale.git import RepoStatus
+
+    s = RepoStatus(
+        directory="x", exists=True, current_ref="main",
+        expected_ref="main", is_clean=True, is_detached=False,
+        ahead=0, behind=0,
+    )
+    assert s.is_stale is False
+
+    s2 = RepoStatus(
+        directory="x", exists=True, current_ref="main",
+        expected_ref="main", is_clean=True, is_detached=False,
+        ahead=0, behind=0, is_stale=True,
+    )
+    assert s2.is_stale is True
+
+

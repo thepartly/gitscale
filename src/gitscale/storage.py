@@ -1,10 +1,10 @@
-"""Cloud storage backends for metadata (S3-compatible + GCS).
+"""Cloud storage backends for manifests (S3-compatible + GCS).
 
 Uses raw httpx — no SDK dependencies. Auth is detected from the URL:
 - *.s3.amazonaws.com, *.r2.cloudflarestorage.com, or anything else → AWS Sig V4
 - storage.googleapis.com → GCS Bearer token
 
-Object paths mirror the local cache layout:
+Object paths follow the layout:
   {base_url}/{host}/{owner}/{repo}/{revision}.json
 """
 
@@ -16,21 +16,65 @@ import hmac
 import json
 import os
 import re
-from typing import Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import httpx
 
-from gitscale.api import _extract_hostname, extract_owner_repo
+from gitscale.urls import _extract_hostname, extract_owner_repo
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class StorageError(Exception):
     """Raised when a cloud storage operation fails."""
 
 
+@dataclass(frozen=True, slots=True)
+class HeadResult:
+    """Result of a HEAD request."""
+
+    exists: bool
+    etag: str
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+
+def object_url(
+    storage_url: str, repo_url: str, revision: str
+) -> str:
+    """Build the full object URL for a given repo + revision."""
+    hostname = _extract_hostname(repo_url)
+    owner, repo = extract_owner_repo(repo_url)
+    safe_rev = revision.replace("/", "_") if revision else "_default"
+    base = storage_url.rstrip("/")
+    return f"{base}/{hostname}/{owner}/{repo}/{safe_rev}.json"
+
+
+def head_object(url: str) -> HeadResult:
+    """HEAD an object. Returns existence and ETag."""
+    if _is_gcs(url):
+        return _gcs_head(url)
+    return _s3_head(url)
+
+
+def get_object(url: str) -> tuple[bytes, str] | None:
+    """GET an object. Returns (body, etag) or None if 404."""
+    if _is_gcs(url):
+        return _gcs_get(url)
+    return _s3_get(url)
+
+
+def put_object(url: str, body: bytes) -> str:
+    """PUT an object. Returns the ETag from the response."""
+    if _is_gcs(url):
+        return _gcs_put(url, body)
+    return _s3_put(url, body)
 
 
 def upload_metadata(
@@ -43,10 +87,10 @@ def upload_metadata(
 
     Returns the full object URL.
     """
-    object_url = _object_url(storage_url, repo_url, revision)
+    url = object_url(storage_url, repo_url, revision)
     body = json.dumps(data, indent=2).encode()
-    _put_object(object_url, body)
-    return object_url
+    put_object(url, body)
+    return url
 
 
 def download_metadata(
@@ -58,23 +102,155 @@ def download_metadata(
 
     Returns None if the object doesn't exist (404).
     """
-    object_url = _object_url(storage_url, repo_url, revision)
-    body = _get_object(object_url)
-    if body is None:
+    url = object_url(storage_url, repo_url, revision)
+    result = get_object(url)
+    if result is None:
         return None
-    result: dict[str, Any] = json.loads(body)
+    body, _etag = result
+    data: dict[str, Any] = json.loads(body)
+    return data
+
+
+def clone_manifest(
+    storage_url: str,
+    repo_url: str,
+    revision: str,
+    dest: Path,
+) -> bool:
+    """Download manifest and save to dest/manifest.json with ETags.
+
+    Only downloads if the directory doesn't exist yet.
+    Returns True if found and downloaded.
+    """
+    url = object_url(storage_url, repo_url, revision)
+    result = get_object(url)
+    if result is None:
+        return False
+    body, etag = result
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / "manifest.json").write_bytes(body)
+    (dest / ".etag").write_text(etag, encoding="utf-8")
+    (dest / ".etag-remote").write_text(etag, encoding="utf-8")
+    _apply_manifest_readonly(dest)
+    return True
+
+
+def fetch_manifest(
+    storage_url: str,
+    repo_url: str,
+    revision: str,
+    dest: Path,
+) -> HeadResult:
+    """HEAD the remote manifest and save .etag-remote."""
+    url = object_url(storage_url, repo_url, revision)
+    result = head_object(url)
+    if result.exists:
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / ".etag-remote").write_text(result.etag, encoding="utf-8")
     return result
+
+
+def pull_manifest(
+    storage_url: str,
+    repo_url: str,
+    revision: str,
+    dest: Path,
+) -> bool:
+    """HEAD + conditional GET for a manifest.
+
+    Downloads only if remote ETag differs from local.
+    Returns True if the manifest exists remotely.
+    """
+    url = object_url(storage_url, repo_url, revision)
+    hr = head_object(url)
+    if not hr.exists:
+        return False
+
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / ".etag-remote").write_text(hr.etag, encoding="utf-8")
+
+    # Check if local is already up to date
+    local_etag_file = dest / ".etag"
+    if local_etag_file.is_file():
+        local_etag = local_etag_file.read_text(encoding="utf-8").strip()
+        if local_etag == hr.etag:
+            return True  # up to date
+
+    # Download
+    result = get_object(url)
+    if result is None:
+        return False
+    body, etag = result
+    _restore_manifest_writable(dest)
+    (dest / "manifest.json").write_bytes(body)
+    (dest / ".etag").write_text(etag, encoding="utf-8")
+    _apply_manifest_readonly(dest)
+    return True
+
+
+def push_manifest(
+    storage_url: str,
+    repo_url: str,
+    revision: str,
+    dest: Path,
+) -> bool:
+    """HEAD + conditional PUT for a manifest.
+
+    Uploads only if remote ETag differs from local.
+    Returns True if upload happened, False if already up to date.
+    """
+    manifest_file = dest / "manifest.json"
+    if not manifest_file.is_file():
+        return False
+
+    url = object_url(storage_url, repo_url, revision)
+
+    # Check remote
+    hr = head_object(url)
+    local_etag_file = dest / ".etag"
+    local_etag = ""
+    if local_etag_file.is_file():
+        local_etag = local_etag_file.read_text(encoding="utf-8").strip()
+
+    if hr.exists and hr.etag == local_etag:
+        # Remote matches local — nothing to push
+        (dest / ".etag-remote").write_text(hr.etag, encoding="utf-8")
+        return False
+
+    body = manifest_file.read_bytes()
+    etag = put_object(url, body)
+    (dest / ".etag").write_text(etag, encoding="utf-8")
+    (dest / ".etag-remote").write_text(etag, encoding="utf-8")
+    return True
+
+
+def _apply_manifest_readonly(dest: Path) -> None:
+    """Remove write permission from manifest files."""
+    import stat
+
+    for name in ("manifest.json",):
+        fpath = dest / name
+        if fpath.is_file():
+            mode = fpath.stat().st_mode
+            fpath.chmod(mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+
+
+def _restore_manifest_writable(dest: Path) -> None:
+    """Restore write permission on manifest files before update."""
+    import stat
+
+    for name in ("manifest.json",):
+        fpath = dest / name
+        if fpath.is_file():
+            mode = fpath.stat().st_mode
+            fpath.chmod(mode | stat.S_IWUSR)
 
 
 def _object_url(
     storage_url: str, repo_url: str, revision: str
 ) -> str:
-    """Build the full object URL for a given repo + revision."""
-    hostname = _extract_hostname(repo_url)
-    owner, repo = extract_owner_repo(repo_url)
-    safe_rev = revision.replace("/", "_") if revision else "_default"
-    base = storage_url.rstrip("/")
-    return f"{base}/{hostname}/{owner}/{repo}/{safe_rev}.json"
+    """Deprecated alias for object_url."""
+    return object_url(storage_url, repo_url, revision)
 
 
 # ---------------------------------------------------------------------------
@@ -92,23 +268,8 @@ def _is_gcs(url: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# GET / PUT dispatch
+# GET / PUT / HEAD dispatch — now handled by public API directly
 # ---------------------------------------------------------------------------
-
-
-def _get_object(url: str) -> bytes | None:
-    """GET an object. Returns None on 404."""
-    if _is_gcs(url):
-        return _gcs_get(url)
-    return _s3_get(url)
-
-
-def _put_object(url: str, body: bytes) -> None:
-    """PUT an object."""
-    if _is_gcs(url):
-        _gcs_put(url, body)
-    else:
-        _s3_put(url, body)
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +289,22 @@ def _gcs_token() -> str:
     )
 
 
-def _gcs_get(url: str) -> bytes | None:
+def _gcs_head(url: str) -> HeadResult:
+    token = _gcs_token()
+    resp = httpx.head(
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30,
+    )
+    if resp.status_code == 404:
+        return HeadResult(exists=False, etag="")
+    _check_storage_response(resp, "HEAD")
+    return HeadResult(
+        exists=True, etag=resp.headers.get("etag", "")
+    )
+
+
+def _gcs_get(url: str) -> tuple[bytes, str] | None:
     token = _gcs_token()
     resp = httpx.get(
         url,
@@ -138,10 +314,10 @@ def _gcs_get(url: str) -> bytes | None:
     if resp.status_code == 404:
         return None
     _check_storage_response(resp, "GET")
-    return resp.content
+    return resp.content, resp.headers.get("etag", "")
 
 
-def _gcs_put(url: str, body: bytes) -> None:
+def _gcs_put(url: str, body: bytes) -> str:
     token = _gcs_token()
     resp = httpx.put(
         url,
@@ -153,6 +329,7 @@ def _gcs_put(url: str, body: bytes) -> None:
         timeout=30,
     )
     _check_storage_response(resp, "PUT")
+    return str(resp.headers.get("etag", ""))
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +444,21 @@ def _s3_sign(
     }
 
 
-def _s3_get(url: str) -> bytes | None:
+def _s3_head(url: str) -> HeadResult:
+    access_key, secret_key = _s3_credentials()
+    region = _s3_region(url)
+    headers = _s3_sign("HEAD", url, b"", access_key, secret_key, region)
+
+    resp = httpx.head(url, headers=headers, timeout=30)
+    if resp.status_code == 404:
+        return HeadResult(exists=False, etag="")
+    _check_storage_response(resp, "HEAD")
+    return HeadResult(
+        exists=True, etag=resp.headers.get("etag", "")
+    )
+
+
+def _s3_get(url: str) -> tuple[bytes, str] | None:
     access_key, secret_key = _s3_credentials()
     region = _s3_region(url)
     headers = _s3_sign("GET", url, b"", access_key, secret_key, region)
@@ -276,10 +467,10 @@ def _s3_get(url: str) -> bytes | None:
     if resp.status_code == 404:
         return None
     _check_storage_response(resp, "GET")
-    return resp.content
+    return resp.content, resp.headers.get("etag", "")
 
 
-def _s3_put(url: str, body: bytes) -> None:
+def _s3_put(url: str, body: bytes) -> str:
     access_key, secret_key = _s3_credentials()
     region = _s3_region(url)
     headers = _s3_sign("PUT", url, body, access_key, secret_key, region)
@@ -287,6 +478,7 @@ def _s3_put(url: str, body: bytes) -> None:
 
     resp = httpx.put(url, content=body, headers=headers, timeout=30)
     _check_storage_response(resp, "PUT")
+    return str(resp.headers.get("etag", ""))
 
 
 # ---------------------------------------------------------------------------
