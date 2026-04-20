@@ -268,6 +268,7 @@ class RepoStatus:
     is_detached: bool
     ahead: int
     behind: int
+    mode: str = ""
     is_stale: bool = False
 
 
@@ -350,6 +351,7 @@ def get_repo_status(entry: RepoEntry, root: Path) -> RepoStatus:
             is_detached=False,
             ahead=0,
             behind=0,
+            mode=entry.mode.value,
         )
 
     current = get_current_ref(entry, root)
@@ -368,6 +370,7 @@ def get_repo_status(entry: RepoEntry, root: Path) -> RepoStatus:
             is_detached=detached,
             ahead=0,
             behind=0,
+            mode=entry.mode.value,
             is_stale=stale,
         )
 
@@ -381,6 +384,7 @@ def get_repo_status(entry: RepoEntry, root: Path) -> RepoStatus:
         is_detached=detached,
         ahead=ahead,
         behind=behind,
+        mode=entry.mode.value,
     )
 
 
@@ -469,4 +473,5 @@ def get_manifest_status(
         is_detached=False,
         ahead=0,
         behind=behind,
+        mode=entry.mode.value,
     )

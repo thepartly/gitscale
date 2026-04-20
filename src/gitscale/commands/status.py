@@ -160,13 +160,13 @@ def _print_table(statuses: list[RepoStatus]) -> None:
     if not statuses:
         return
 
-    headers = ("", "REPO", "REF", "EXPECTED", "STATUS")
-    rows: list[tuple[str, str, str, str, str]] = []
+    headers = ("", "REPO", "MODE", "REF", "EXPECTED", "STATUS")
+    rows: list[tuple[str, str, str, str, str, str]] = []
     for s in statuses:
         flags = _get_status_flags(s)
         icon = _status_icon(flags)
         ref = s.current_ref if s.exists else "—"
-        rows.append((icon, s.directory, ref, s.expected_ref, flags))
+        rows.append((icon, s.directory, s.mode, ref, s.expected_ref, flags))
 
     # Compute column widths (minimum = header width)
     widths = [len(h) for h in headers]
@@ -181,12 +181,12 @@ def _print_table(statuses: list[RepoStatus]) -> None:
 
     click.echo(fmt.format(*headers))
     for row in rows:
-        flags = row[4]
+        flags = row[5]
         color = _status_color(flags)
         plain = fmt.format(*row)
         # Colorize the icon and status columns
         icon_plain = row[0].ljust(widths[0])
-        status_plain = row[4].ljust(widths[4])
+        status_plain = row[5].ljust(widths[5])
         icon_bold = "missed" not in flags
         plain = plain.replace(
             icon_plain, click.style(icon_plain, fg=color, bold=icon_bold), 1
@@ -212,6 +212,7 @@ def _print_json(statuses: list[RepoStatus]) -> None:
             "detached": s.is_detached,
             "ahead": s.ahead,
             "behind": s.behind,
+            "mode": s.mode,
             "stale": s.is_stale,
         }
         for s in statuses
