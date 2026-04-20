@@ -29,3 +29,10 @@ playground/libs/
 # OS
 .DS_Store
 Thumbs.db
+
+playground/gsdemo-argocd/
+playground/gsdemo-compose/
+playground/gsdemo-core/
+playground/gsdemo-core-sdk/
+playground/gsdemo-frontend/
+playground/gsdemo-sso-sdk/

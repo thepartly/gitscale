@@ -1,5 +1,9 @@
-# Small public repos for testing
 [repos]
-"libs/markupsafe" = { url = "https://github.com/pallets/markupsafe.git", revision = "main", mode = "readonly" }
-"libs/humanize" = { url = "https://github.com/python-humanize/humanize.git", revision = "main" }
-"meta/gsdemo-fe" = { url = "https://github.com/avkonst/gsdemo-fe.git", revision = "main", mode = "artefact" }
+"gsdemo-sso" = { url = "https://github.com/avkonst/gsdemo-sso.git", revision = "master" }
+"gsdemo-sso-sdk" = { url = "https://github.com/avkonst/gsdemo-sso-sdk.git", revision = "master", mode = "readonly" }
+"gsdemo-core" = { url = "https://github.com/avkonst/gsdemo-core.git", revision = "master" }
+"gsdemo-core-sdk" = { url = "https://github.com/avkonst/gsdemo-core-sdk.git", revision = "master", mode = "readonly" }
+"gsdemo-frontend" = { url = "https://github.com/avkonst/gsdemo-frontend.git", revision = "master" }
+"gsdemo-sharedlibs" = { url = "https://github.com/avkonst/gsdemo-sharedlibs.git", revision = "master", mode = "readonly" }
+"gsdemo-compose" = { url = "https://github.com/avkonst/gsdemo-compose.git", revision = "master" }
+"gsdemo-argocd" = { url = "https://github.com/avkonst/gsdemo-argocd.git", revision = "master" }

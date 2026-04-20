@@ -1,4 +1,0 @@
-# Small public repos for testing
-[repos]
-"libs/markupsafe" = { url = "https://github.com/pallets/markupsafe.git", revision = "main", mode = "readonly" }
-"libs/humanize" = { url = "https://github.com/python-humanize/humanize.git", revision = "main" }

@@ -1,1 +1,1 @@
-collect_ignore_glob = ["libs/**"]
+collect_ignore_glob = ["./**"]
