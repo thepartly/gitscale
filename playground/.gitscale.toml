@@ -7,3 +7,6 @@
 "gsdemo-sharedlibs" = { url = "https://github.com/avkonst/gsdemo-sharedlibs.git", revision = "master", mode = "readonly" }
 "gsdemo-compose" = { url = "https://github.com/avkonst/gsdemo-compose.git", revision = "master" }
 "gsdemo-argocd" = { url = "https://github.com/avkonst/gsdemo-argocd.git", revision = "master" }
+
+[hooks]
+post_sync = "echo 'post-sync hook executed successfully'"

@@ -1,6 +1,7 @@
 mod commands;
 mod config;
 mod git;
+mod hooks;
 mod storage;
 mod urls;
 
@@ -94,24 +95,16 @@ fn main() {
     let verbose = cli.verbose;
 
     let result = match cli.command {
-        Commands::Clone { root, names } => {
-            commands::clone::run(root.as_deref(), &names, verbose)
-        }
-        Commands::Fetch { root, names } => {
-            commands::fetch::run(root.as_deref(), &names, verbose)
-        }
-        Commands::Pull { root, names } => {
-            commands::pull::run(root.as_deref(), &names, verbose)
-        }
-        Commands::Push { root, names } => {
-            commands::push::run(root.as_deref(), &names, verbose)
-        }
-        Commands::Sync { root, names } => {
-            commands::sync::run(root.as_deref(), &names, verbose)
-        }
-        Commands::Status { root, fetch, format } => {
-            commands::status::run(root.as_deref(), fetch, &format, verbose)
-        }
+        Commands::Clone { root, names } => commands::clone::run(root.as_deref(), &names, verbose),
+        Commands::Fetch { root, names } => commands::fetch::run(root.as_deref(), &names, verbose),
+        Commands::Pull { root, names } => commands::pull::run(root.as_deref(), &names, verbose),
+        Commands::Push { root, names } => commands::push::run(root.as_deref(), &names, verbose),
+        Commands::Sync { root, names } => commands::sync::run(root.as_deref(), &names, verbose),
+        Commands::Status {
+            root,
+            fetch,
+            format,
+        } => commands::status::run(root.as_deref(), fetch, &format, verbose),
         Commands::Add {
             directory,
             repo_url,
@@ -119,9 +112,7 @@ fn main() {
             mode,
             root,
         } => commands::add::run(&directory, &repo_url, &revision, &mode, root.as_deref()),
-        Commands::Remove { directory, root } => {
-            commands::remove::run(&directory, root.as_deref())
-        }
+        Commands::Remove { directory, root } => commands::remove::run(&directory, root.as_deref()),
     };
 
     if let Err(e) = result {

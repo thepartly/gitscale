@@ -56,16 +56,28 @@ impl RepoEntry {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct Hooks {
+    pub post_sync: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct GitScaleConfig {
     pub repos: Vec<RepoEntry>,
     pub storage_url: String,
+    pub hooks: Hooks,
 }
 
 #[derive(Deserialize)]
 struct RawConfig {
     storage: Option<RawStorage>,
     repos: Option<BTreeMap<String, RawRepo>>,
+    hooks: Option<RawHooks>,
+}
+
+#[derive(Deserialize)]
+struct RawHooks {
+    post_sync: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -109,8 +121,13 @@ pub fn load_config(config_path: &Path) -> Result<GitScaleConfig> {
 
     let storage_url = parse_storage(raw.storage.as_ref(), config_path)?;
     let repos = parse_repos(raw.repos.as_ref(), config_path)?;
+    let hooks = parse_hooks(raw.hooks.as_ref());
 
-    Ok(GitScaleConfig { repos, storage_url })
+    Ok(GitScaleConfig {
+        repos,
+        storage_url,
+        hooks,
+    })
 }
 
 fn parse_storage(raw: Option<&RawStorage>, config_path: &Path) -> Result<String> {
@@ -160,6 +177,15 @@ fn parse_repos(
         });
     }
     Ok(entries)
+}
+
+fn parse_hooks(raw: Option<&RawHooks>) -> Hooks {
+    let Some(hooks) = raw else {
+        return Hooks::default();
+    };
+    Hooks {
+        post_sync: hooks.post_sync.clone(),
+    }
 }
 
 pub fn write_config(config_path: &Path, entries: &[RepoEntry], storage_url: &str) -> Result<()> {

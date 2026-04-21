@@ -4,9 +4,26 @@ use std::path::Path;
 use crate::commands::clone::filter_entries;
 use crate::config::{find_config, load_config};
 use crate::git::{is_ci, pull_repo};
+use crate::hooks;
 use crate::storage::pull_artefact;
 
 pub fn run(root: Option<&Path>, names: &[String], verbose: bool) -> Result<()> {
+    let (config, config_root) = pull_inner(root, names, verbose)?;
+    hooks::run_post_sync(&config.hooks, &config_root, verbose)?;
+    Ok(())
+}
+
+/// Pull without running hooks — used by sync to avoid double-running.
+pub fn run_no_hooks(root: Option<&Path>, names: &[String], verbose: bool) -> Result<()> {
+    pull_inner(root, names, verbose)?;
+    Ok(())
+}
+
+fn pull_inner(
+    root: Option<&Path>,
+    names: &[String],
+    verbose: bool,
+) -> Result<(crate::config::GitScaleConfig, std::path::PathBuf)> {
     let config_path = find_config(root)?;
     let config_root = config_path.parent().unwrap().to_path_buf();
     let config = load_config(&config_path)?;
@@ -14,7 +31,7 @@ pub fn run(root: Option<&Path>, names: &[String], verbose: bool) -> Result<()> {
 
     if selected.is_empty() {
         println!("Nothing to pull.");
-        return Ok(());
+        return Ok((config, config_root));
     }
 
     let mut failed = 0;
@@ -59,5 +76,6 @@ pub fn run(root: Option<&Path>, names: &[String], verbose: bool) -> Result<()> {
     if failed > 0 {
         anyhow::bail!("{} repo(s) failed to pull", failed);
     }
-    Ok(())
+
+    Ok((config, config_root))
 }
