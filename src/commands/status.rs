@@ -1,17 +1,18 @@
 use anyhow::Result;
+use std::io::Write;
 use std::path::Path;
 
 use crate::config::{find_config, load_config};
 use crate::git::{fetch_repo, get_artefact_status, get_repo_status, get_self_status, RepoStatus};
 use crate::storage::fetch_artefact;
 
-pub fn run(root: Option<&Path>, do_fetch: bool, output_format: &str, verbose: bool) -> Result<()> {
+pub fn run(root: Option<&Path>, do_fetch: bool, output_format: &str, verbose: bool, out: &mut dyn Write, _err: &mut dyn Write) -> Result<()> {
     let config_path = find_config(root)?;
     let config_root = config_path.parent().unwrap().to_path_buf();
     let config = load_config(&config_path)?;
 
     if config.repos.is_empty() {
-        println!("No repos declared in .gitscale.toml");
+        writeln!(out, "No repos declared in .gitscale.toml")?;
         return Ok(());
     }
 
@@ -22,7 +23,7 @@ pub fn run(root: Option<&Path>, do_fetch: bool, output_format: &str, verbose: bo
                 if !config.storage_url.is_empty() {
                     let revision = if entry.revision.is_empty() { "HEAD" } else { &entry.revision };
                     if verbose {
-                        println!("Fetching {}...", entry.directory);
+                        writeln!(out, "Fetching {}...", entry.directory)?;
                     }
                     let _ = fetch_artefact(&config.storage_url, &entry.repo_url, revision, &dest);
                 }
@@ -30,7 +31,7 @@ pub fn run(root: Option<&Path>, do_fetch: bool, output_format: &str, verbose: bo
             }
             if dest.exists() {
                 if verbose {
-                    println!("Fetching {}...", entry.directory);
+                    writeln!(out, "Fetching {}...", entry.directory)?;
                 }
                 let _ = fetch_repo(entry, &config_root);
             }
@@ -52,9 +53,9 @@ pub fn run(root: Option<&Path>, do_fetch: bool, output_format: &str, verbose: bo
     }
 
     if output_format == "json" {
-        print_json(&statuses);
+        print_json(&statuses, out)?;
     } else {
-        print_table(&statuses);
+        print_table(&statuses, out)?;
     }
     Ok(())
 }
@@ -144,9 +145,9 @@ fn colorize(text: &str, ansi_code: &str, bold: bool) -> String {
     }
 }
 
-fn print_table(statuses: &[RepoStatus]) {
+fn print_table(statuses: &[RepoStatus], out: &mut dyn Write) -> Result<()> {
     if statuses.is_empty() {
-        return;
+        return Ok(());
     }
 
     let headers = ["", "REPO", "MODE", "REF", "EXPECTED", "STATUS"];
@@ -191,7 +192,7 @@ fn print_table(statuses: &[RepoStatus]) {
         .enumerate()
         .map(|(i, h)| format!("{:<width$}", h, width = widths[i]))
         .collect();
-    println!("{}", header_line.join(gap));
+    writeln!(out, "{}", header_line.join(gap))?;
 
     // Print rows with colors
     for row in &rows {
@@ -209,11 +210,12 @@ fn print_table(statuses: &[RepoStatus]) {
         cells[0] = colorize(&cells[0], color, icon_bold);
         cells[5] = colorize(&cells[5], color, false);
 
-        println!("{}", cells.join(gap));
+        writeln!(out, "{}", cells.join(gap))?;
     }
+    Ok(())
 }
 
-fn print_json(statuses: &[RepoStatus]) {
+fn print_json(statuses: &[RepoStatus], out: &mut dyn Write) -> Result<()> {
     let data: Vec<serde_json::Value> = statuses
         .iter()
         .map(|s| {
@@ -231,5 +233,6 @@ fn print_json(statuses: &[RepoStatus]) {
             })
         })
         .collect();
-    println!("{}", serde_json::to_string_pretty(&data).unwrap());
+    writeln!(out, "{}", serde_json::to_string_pretty(&data).unwrap())?;
+    Ok(())
 }

@@ -7,6 +7,10 @@ edition = "2021"
 name = "gitscale"
 path = "src/main.rs"
 
+[lib]
+name = "gitscale"
+path = "src/lib.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 toml = "0.8"
@@ -22,3 +26,7 @@ chrono = { version = "0.4", features = ["now"] }
 url = "2"
 anyhow = "1"
 regex = "1"
+
+[dev-dependencies]
+insta = { version = "1", features = ["redactions", "json"] }
+tempfile = "3"

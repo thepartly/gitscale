@@ -1,9 +1,10 @@
 use anyhow::Result;
+use std::io::Write;
 use std::path::Path;
 
 use crate::config::{find_config, load_config, write_config};
 
-pub fn run(directory: &str, root: Option<&Path>) -> Result<()> {
+pub fn run(directory: &str, root: Option<&Path>, out: &mut dyn Write) -> Result<()> {
     let config_path = find_config(root)?;
     let config = load_config(&config_path)?;
     let orig_len = config.repos.len();
@@ -23,6 +24,6 @@ pub fn run(directory: &str, root: Option<&Path>) -> Result<()> {
     }
 
     write_config(&config_path, &remaining, &config.storage_url)?;
-    println!("Removed {}", directory);
+    writeln!(out, "Removed {}", directory)?;
     Ok(())
 }

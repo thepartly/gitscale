@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::io::Write;
 use std::path::Path;
 
 use crate::config::{find_config, load_config, RepoEntry, RepoMode, write_config, CONFIG_FILENAME};
@@ -9,6 +10,7 @@ pub fn run(
     revision: &str,
     mode: &str,
     root: Option<&Path>,
+    out: &mut dyn Write,
 ) -> Result<()> {
     let mode_enum = RepoMode::from_str_checked(mode)?;
 
@@ -41,6 +43,6 @@ pub fn run(
     });
 
     write_config(&config_path, &entries, &storage_url)?;
-    println!("Added {} → {} @ {} [{}]", directory, repo_url, revision, mode);
+    writeln!(out, "Added {} → {} @ {} [{}]", directory, repo_url, revision, mode)?;
     Ok(())
 }

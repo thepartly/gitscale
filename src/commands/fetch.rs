@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::io::Write;
 use std::path::Path;
 
 use crate::commands::clone::filter_entries;
@@ -6,14 +7,14 @@ use crate::config::{find_config, load_config};
 use crate::git::fetch_repo;
 use crate::storage::fetch_artefact;
 
-pub fn run(root: Option<&Path>, names: &[String], verbose: bool) -> Result<()> {
+pub fn run(root: Option<&Path>, names: &[String], verbose: bool, out: &mut dyn Write, err: &mut dyn Write) -> Result<()> {
     let config_path = find_config(root)?;
     let config_root = config_path.parent().unwrap().to_path_buf();
     let config = load_config(&config_path)?;
     let selected = filter_entries(&config.repos, names)?;
 
     if selected.is_empty() {
-        println!("Nothing to fetch.");
+        writeln!(out, "Nothing to fetch.")?;
         return Ok(());
     }
 
@@ -21,7 +22,7 @@ pub fn run(root: Option<&Path>, names: &[String], verbose: bool) -> Result<()> {
     for entry in &selected {
         if entry.is_artefact() {
             if config.storage_url.is_empty() {
-                eprintln!("  FAIL  {}: no [storage] configured", entry.directory);
+                writeln!(err, "  FAIL  {}: no [storage] configured", entry.directory)?;
                 failed += 1;
                 continue;
             }
@@ -34,13 +35,13 @@ pub fn run(root: Option<&Path>, names: &[String], verbose: bool) -> Result<()> {
             match fetch_artefact(&config.storage_url, &entry.repo_url, revision, &dest) {
                 Ok(result) => {
                     if result.exists {
-                        println!("  ok    {} (artefact)", entry.directory);
+                        writeln!(out, "  ok    {} (artefact)", entry.directory)?;
                     } else {
-                        println!("  skip  {} (no remote artefact)", entry.directory);
+                        writeln!(out, "  skip  {} (no remote artefact)", entry.directory)?;
                     }
                 }
                 Err(e) => {
-                    eprintln!("  FAIL  {}: {}", entry.directory, e);
+                    writeln!(err, "  FAIL  {}: {}", entry.directory, e)?;
                     failed += 1;
                 }
             }
@@ -49,16 +50,16 @@ pub fn run(root: Option<&Path>, names: &[String], verbose: bool) -> Result<()> {
 
         let dest = config_root.join(&entry.directory);
         if !dest.exists() {
-            println!("  skip  {} (not cloned)", entry.directory);
+            writeln!(out, "  skip  {} (not cloned)", entry.directory)?;
             continue;
         }
         if verbose {
-            println!("  fetch {}", entry.directory);
+            writeln!(out, "  fetch {}", entry.directory)?;
         }
         match fetch_repo(entry, &config_root) {
-            Ok(()) => println!("  ok    {}", entry.directory),
+            Ok(()) => writeln!(out, "  ok    {}", entry.directory)?,
             Err(e) => {
-                eprintln!("  FAIL  {}: {}", entry.directory, e);
+                writeln!(err, "  FAIL  {}: {}", entry.directory, e)?;
                 failed += 1;
             }
         }

@@ -1,18 +1,19 @@
 use anyhow::Result;
+use std::io::Write;
 use std::path::Path;
 
 use crate::config::{find_config, load_config, RepoEntry};
 use crate::git::{clone_repo, is_ci};
 use crate::storage::clone_artefact;
 
-pub fn run(root: Option<&Path>, names: &[String], verbose: bool) -> Result<()> {
+pub fn run(root: Option<&Path>, names: &[String], verbose: bool, out: &mut dyn Write, err: &mut dyn Write) -> Result<()> {
     let config_path = find_config(root)?;
     let config_root = config_path.parent().unwrap().to_path_buf();
     let config = load_config(&config_path)?;
     let selected = filter_entries(&config.repos, names)?;
 
     if selected.is_empty() {
-        println!("Nothing to clone.");
+        writeln!(out, "Nothing to clone.")?;
         return Ok(());
     }
 
@@ -21,11 +22,11 @@ pub fn run(root: Option<&Path>, names: &[String], verbose: bool) -> Result<()> {
         let dest = config_root.join(&entry.directory);
         if entry.is_artefact() {
             if dest.exists() {
-                println!("  skip  {} (already exists)", entry.directory);
+                writeln!(out, "  skip  {} (already exists)", entry.directory)?;
                 continue;
             }
             if config.storage_url.is_empty() {
-                eprintln!("  FAIL  {}: no [storage] configured", entry.directory);
+                writeln!(err, "  FAIL  {}: no [storage] configured", entry.directory)?;
                 failed += 1;
                 continue;
             }
@@ -35,31 +36,32 @@ pub fn run(root: Option<&Path>, names: &[String], verbose: bool) -> Result<()> {
                 &entry.revision
             };
             match clone_artefact(&config.storage_url, &entry.repo_url, revision, &dest) {
-                Ok(true) => println!("  ok    {} (artefact)", entry.directory),
-                Ok(false) => println!("  skip  {} (no artefact data)", entry.directory),
+                Ok(true) => writeln!(out, "  ok    {} (artefact)", entry.directory)?,
+                Ok(false) => writeln!(out, "  skip  {} (no artefact data)", entry.directory)?,
                 Err(e) => {
-                    eprintln!("  FAIL  {}: {}", entry.directory, e);
+                    writeln!(err, "  FAIL  {}: {}", entry.directory, e)?;
                     failed += 1;
                 }
             }
             continue;
         }
         if dest.exists() {
-            println!("  skip  {} (already exists)", entry.directory);
+            writeln!(out, "  skip  {} (already exists)", entry.directory)?;
             continue;
         }
         if verbose {
-            println!(
+            writeln!(
+                out,
                 "  clone {} → {} @ {}",
                 entry.repo_url, entry.directory, entry.revision
-            );
+            )?;
         }
         let ci = is_ci();
         let shallow = ci || entry.is_readonly();
         match clone_repo(entry, &config_root, verbose, shallow) {
-            Ok(()) => println!("  ok    {}", entry.directory),
+            Ok(()) => writeln!(out, "  ok    {}", entry.directory)?,
             Err(e) => {
-                eprintln!("  FAIL  {}: {}", entry.directory, e);
+                writeln!(err, "  FAIL  {}: {}", entry.directory, e)?;
                 failed += 1;
             }
         }

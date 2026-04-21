@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::io::Write;
 use std::path::Path;
 
 use crate::commands::clone::filter_entries;
@@ -7,15 +8,15 @@ use crate::git::{is_ci, pull_repo};
 use crate::hooks;
 use crate::storage::pull_artefact;
 
-pub fn run(root: Option<&Path>, names: &[String], verbose: bool) -> Result<()> {
-    let (config, config_root) = pull_inner(root, names, verbose)?;
-    hooks::run_post_sync(&config.hooks, &config_root, verbose)?;
+pub fn run(root: Option<&Path>, names: &[String], verbose: bool, out: &mut dyn Write, err: &mut dyn Write) -> Result<()> {
+    let (config, config_root) = pull_inner(root, names, verbose, out, err)?;
+    hooks::run_post_sync(&config.hooks, &config_root, verbose, out)?;
     Ok(())
 }
 
 /// Pull without running hooks — used by sync to avoid double-running.
-pub fn run_no_hooks(root: Option<&Path>, names: &[String], verbose: bool) -> Result<()> {
-    pull_inner(root, names, verbose)?;
+pub fn run_no_hooks(root: Option<&Path>, names: &[String], verbose: bool, out: &mut dyn Write, err: &mut dyn Write) -> Result<()> {
+    pull_inner(root, names, verbose, out, err)?;
     Ok(())
 }
 
@@ -23,6 +24,8 @@ fn pull_inner(
     root: Option<&Path>,
     names: &[String],
     verbose: bool,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
 ) -> Result<(crate::config::GitScaleConfig, std::path::PathBuf)> {
     let config_path = find_config(root)?;
     let config_root = config_path.parent().unwrap().to_path_buf();
@@ -30,7 +33,7 @@ fn pull_inner(
     let selected = filter_entries(&config.repos, names)?;
 
     if selected.is_empty() {
-        println!("Nothing to pull.");
+        writeln!(out, "Nothing to pull.")?;
         return Ok((config, config_root));
     }
 
@@ -38,7 +41,7 @@ fn pull_inner(
     for entry in &selected {
         if entry.is_artefact() {
             if config.storage_url.is_empty() {
-                eprintln!("  FAIL  {}: no [storage] configured", entry.directory);
+                writeln!(err, "  FAIL  {}: no [storage] configured", entry.directory)?;
                 failed += 1;
                 continue;
             }
@@ -49,10 +52,10 @@ fn pull_inner(
                 &entry.revision
             };
             match pull_artefact(&config.storage_url, &entry.repo_url, revision, &dest) {
-                Ok(true) => println!("  ok    {} (artefact)", entry.directory),
-                Ok(false) => println!("  skip  {} (no remote artefact)", entry.directory),
+                Ok(true) => writeln!(out, "  ok    {} (artefact)", entry.directory)?,
+                Ok(false) => writeln!(out, "  skip  {} (no remote artefact)", entry.directory)?,
                 Err(e) => {
-                    eprintln!("  FAIL  {}: {}", entry.directory, e);
+                    writeln!(err, "  FAIL  {}: {}", entry.directory, e)?;
                     failed += 1;
                 }
             }
@@ -60,14 +63,14 @@ fn pull_inner(
         }
 
         if verbose {
-            println!("  pull  {}", entry.directory);
+            writeln!(out, "  pull  {}", entry.directory)?;
         }
         let ci = is_ci();
         let shallow = ci || entry.is_readonly();
         match pull_repo(entry, &config_root, verbose, shallow) {
-            Ok(()) => println!("  ok    {}", entry.directory),
+            Ok(()) => writeln!(out, "  ok    {}", entry.directory)?,
             Err(e) => {
-                eprintln!("  FAIL  {}: {}", entry.directory, e);
+                writeln!(err, "  FAIL  {}: {}", entry.directory, e)?;
                 failed += 1;
             }
         }

@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
 use crate::config::Hooks;
 
-pub fn run_post_sync(hooks: &Hooks, cwd: &Path, verbose: bool) -> Result<()> {
+pub fn run_post_sync(hooks: &Hooks, cwd: &Path, verbose: bool, out: &mut dyn Write) -> Result<()> {
     let Some(cmd) = &hooks.post_sync else {
         return Ok(());
     };
@@ -12,7 +13,7 @@ pub fn run_post_sync(hooks: &Hooks, cwd: &Path, verbose: bool) -> Result<()> {
         return Ok(());
     }
     if verbose {
-        println!("  hook  post_sync: {}", cmd);
+        writeln!(out, "  hook  post_sync: {}", cmd)?;
     }
     let status = Command::new("sh")
         .arg("-c")

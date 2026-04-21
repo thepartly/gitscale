@@ -17,3 +17,9 @@ playground/gsdemo-core/
 playground/gsdemo-core-sdk/
 playground/gsdemo-frontend/
 playground/gsdemo-sso-sdk/
+
+# Test runtime dirs
+tests/playground/
+tests/repos-remote/
+tests/artefacts-remote/
+tests/snapshots/
