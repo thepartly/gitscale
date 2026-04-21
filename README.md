@@ -227,10 +227,11 @@ Any S3-compatible storage works with the same URL pattern:
 | Backblaze B2 | `https://s3.us-west-004.backblazeb2.com/my-bucket/prefix` |
 | DigitalOcean Spaces | `https://nyc3.digitaloceanspaces.com/my-bucket/prefix` |
 | Google Cloud Storage | `https://storage.googleapis.com/my-bucket/prefix` |
+| Local directory | `/tmp/artefacts` or `file:///home/user/artefacts` |
 
 ### Authentication
 
-Set credentials via environment variables:
+Set credentials via environment variables (not needed for local storage):
 
 **S3-compatible** (AWS, MinIO, R2, B2, Spaces):
 ```
@@ -253,6 +254,17 @@ For example, with `url = "https://bucket.s3.amazonaws.com/meta"` and a repo at `
 ```
 https://bucket.s3.amazonaws.com/meta/github.com/org/app/main.tar.gz
 ```
+
+## Hooks
+
+Add a `[hooks]` section to run commands after certain operations:
+
+```toml
+[hooks]
+post_sync = "make install"
+```
+
+- **post_sync** — Runs after `pull` and `sync` complete (executed via `sh -c` in the config root directory). Fails the command if the hook exits non-zero.
 
 ## License
 

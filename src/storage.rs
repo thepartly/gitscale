@@ -5,7 +5,7 @@ use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use url::Url;
 
 use crate::urls::{extract_hostname, extract_owner_repo};
@@ -36,7 +36,9 @@ pub fn object_url(storage_url: &str, repo_url: &str, revision: &str) -> Result<S
 }
 
 pub fn head_object(url: &str) -> Result<HeadResult> {
-    if is_gcs(url) {
+    if is_local(url) {
+        local_head(url)
+    } else if is_gcs(url) {
         gcs_head(url)
     } else {
         s3_head(url)
@@ -44,7 +46,9 @@ pub fn head_object(url: &str) -> Result<HeadResult> {
 }
 
 pub fn get_object(url: &str) -> Result<Option<(Vec<u8>, String)>> {
-    if is_gcs(url) {
+    if is_local(url) {
+        local_get(url)
+    } else if is_gcs(url) {
         gcs_get(url)
     } else {
         s3_get(url)
@@ -52,7 +56,9 @@ pub fn get_object(url: &str) -> Result<Option<(Vec<u8>, String)>> {
 }
 
 pub fn put_object(url: &str, body: &[u8]) -> Result<String> {
-    if is_gcs(url) {
+    if is_local(url) {
+        local_put(url, body)
+    } else if is_gcs(url) {
         gcs_put(url, body)
     } else {
         s3_put(url, body)
@@ -211,6 +217,10 @@ fn clean_artefact_files(dest: &Path) -> Result<()> {
 // Backend detection
 // ---------------------------------------------------------------------------
 
+fn is_local(url: &str) -> bool {
+    url.starts_with("file://") || url.starts_with('/') || url.starts_with("./")
+}
+
 fn is_gcs(url: &str) -> bool {
     if let Ok(parsed) = Url::parse(url) {
         if let Some(host) = parsed.host_str() {
@@ -218,6 +228,50 @@ fn is_gcs(url: &str) -> bool {
         }
     }
     false
+}
+
+// ---------------------------------------------------------------------------
+// Local filesystem
+// ---------------------------------------------------------------------------
+
+fn local_fs_path(url: &str) -> PathBuf {
+    PathBuf::from(url.strip_prefix("file://").unwrap_or(url))
+}
+
+fn local_content_etag(content: &[u8]) -> String {
+    format!("\"{}\"", hex::encode(Sha256::digest(content)))
+}
+
+fn local_head(url: &str) -> Result<HeadResult> {
+    let path = local_fs_path(url);
+    if !path.is_file() {
+        return Ok(HeadResult {
+            exists: false,
+            etag: String::new(),
+        });
+    }
+    let content = fs::read(&path)?;
+    let etag = local_content_etag(&content);
+    Ok(HeadResult { exists: true, etag })
+}
+
+fn local_get(url: &str) -> Result<Option<(Vec<u8>, String)>> {
+    let path = local_fs_path(url);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let content = fs::read(&path)?;
+    let etag = local_content_etag(&content);
+    Ok(Some((content, etag)))
+}
+
+fn local_put(url: &str, body: &[u8]) -> Result<String> {
+    let path = local_fs_path(url);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, body)?;
+    Ok(local_content_etag(body))
 }
 
 // ---------------------------------------------------------------------------
