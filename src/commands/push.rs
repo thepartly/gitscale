@@ -6,7 +6,13 @@ use crate::commands::clone::filter_entries;
 use crate::config::{find_config, load_config};
 use crate::git::push_repo;
 
-pub fn run(root: Option<&Path>, names: &[String], verbose: bool, out: &mut dyn Write, err: &mut dyn Write) -> Result<()> {
+pub fn run(
+    root: Option<&Path>,
+    names: &[String],
+    verbose: bool,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<()> {
     let config_path = find_config(root)?;
     let config_root = config_path.parent().unwrap().to_path_buf();
     let config = load_config(&config_path)?;

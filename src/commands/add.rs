@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::io::Write;
 use std::path::Path;
 
-use crate::config::{find_config, load_config, RepoEntry, RepoMode, write_config, CONFIG_FILENAME};
+use crate::config::{find_config, load_config, write_config, RepoEntry, RepoMode, CONFIG_FILENAME};
 
 pub fn run(
     directory: &str,
@@ -43,6 +43,10 @@ pub fn run(
     });
 
     write_config(&config_path, &entries, &storage_url)?;
-    writeln!(out, "Added {} → {} @ {} [{}]", directory, repo_url, revision, mode)?;
+    writeln!(
+        out,
+        "Added {} → {} @ {} [{}]",
+        directory, repo_url, revision, mode
+    )?;
     Ok(())
 }

@@ -48,7 +48,12 @@ impl TestEnv {
 
     /// Create a bare git repo with an initial commit containing the given files.
     /// Returns the path to the bare repo (usable as a git remote URL).
-    pub fn create_bare_repo(&self, repo_name: &str, branch: &str, files: &[(&str, &str)]) -> PathBuf {
+    pub fn create_bare_repo(
+        &self,
+        repo_name: &str,
+        branch: &str,
+        files: &[(&str, &str)],
+    ) -> PathBuf {
         let bare_path = self.repos_remote.join(format!("{}.git", repo_name));
         fs::create_dir_all(&bare_path).unwrap();
 
@@ -60,7 +65,11 @@ impl TestEnv {
         let _ = fs::remove_dir_all(&tmp_clone);
         run_git(
             &self.repos_remote,
-            &["clone", bare_path.to_str().unwrap(), tmp_clone.to_str().unwrap()],
+            &[
+                "clone",
+                bare_path.to_str().unwrap(),
+                tmp_clone.to_str().unwrap(),
+            ],
         );
 
         // Configure git identity for commits
@@ -80,7 +89,10 @@ impl TestEnv {
         }
         run_git(&tmp_clone, &["add", "."]);
         run_git(&tmp_clone, &["commit", "-m", "initial"]);
-        run_git(&tmp_clone, &["push", "origin", &format!("{}:{}", branch, branch)]);
+        run_git(
+            &tmp_clone,
+            &["push", "origin", &format!("{}:{}", branch, branch)],
+        );
 
         // Clean up temp clone
         let _ = fs::remove_dir_all(&tmp_clone);

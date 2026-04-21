@@ -8,14 +8,26 @@ use crate::git::{is_ci, pull_repo};
 use crate::hooks;
 use crate::storage::pull_artefact;
 
-pub fn run(root: Option<&Path>, names: &[String], verbose: bool, out: &mut dyn Write, err: &mut dyn Write) -> Result<()> {
+pub fn run(
+    root: Option<&Path>,
+    names: &[String],
+    verbose: bool,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<()> {
     let (config, config_root) = pull_inner(root, names, verbose, out, err)?;
     hooks::run_post_sync(&config.hooks, &config_root, verbose, out)?;
     Ok(())
 }
 
 /// Pull without running hooks — used by sync to avoid double-running.
-pub fn run_no_hooks(root: Option<&Path>, names: &[String], verbose: bool, out: &mut dyn Write, err: &mut dyn Write) -> Result<()> {
+pub fn run_no_hooks(
+    root: Option<&Path>,
+    names: &[String],
+    verbose: bool,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<()> {
     pull_inner(root, names, verbose, out, err)?;
     Ok(())
 }

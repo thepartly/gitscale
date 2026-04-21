@@ -6,7 +6,14 @@ use crate::config::{find_config, load_config};
 use crate::git::{fetch_repo, get_artefact_status, get_repo_status, get_self_status, RepoStatus};
 use crate::storage::fetch_artefact;
 
-pub fn run(root: Option<&Path>, do_fetch: bool, output_format: &str, verbose: bool, out: &mut dyn Write, _err: &mut dyn Write) -> Result<()> {
+pub fn run(
+    root: Option<&Path>,
+    do_fetch: bool,
+    output_format: &str,
+    verbose: bool,
+    out: &mut dyn Write,
+    _err: &mut dyn Write,
+) -> Result<()> {
     let config_path = find_config(root)?;
     let config_root = config_path.parent().unwrap().to_path_buf();
     let config = load_config(&config_path)?;
@@ -21,7 +28,11 @@ pub fn run(root: Option<&Path>, do_fetch: bool, output_format: &str, verbose: bo
             let dest = config_root.join(&entry.directory);
             if entry.is_artefact() {
                 if !config.storage_url.is_empty() {
-                    let revision = if entry.revision.is_empty() { "HEAD" } else { &entry.revision };
+                    let revision = if entry.revision.is_empty() {
+                        "HEAD"
+                    } else {
+                        &entry.revision
+                    };
                     if verbose {
                         writeln!(out, "Fetching {}...", entry.directory)?;
                     }

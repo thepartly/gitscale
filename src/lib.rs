@@ -107,11 +107,7 @@ pub fn run_cli(args: &[&str]) -> CliOutput {
     }
 }
 
-fn run_cli_inner(
-    args: &[&str],
-    out: &mut dyn Write,
-    err: &mut dyn Write,
-) -> Result<()> {
+fn run_cli_inner(args: &[&str], out: &mut dyn Write, err: &mut dyn Write) -> Result<()> {
     let cli = Cli::try_parse_from(args)?;
     let verbose = cli.verbose;
 
@@ -142,7 +138,14 @@ fn run_cli_inner(
             revision,
             mode,
             root,
-        } => commands::add::run(&directory, &repo_url, &revision, &mode, root.as_deref(), out),
+        } => commands::add::run(
+            &directory,
+            &repo_url,
+            &revision,
+            &mode,
+            root.as_deref(),
+            out,
+        ),
         Commands::Remove { directory, root } => {
             commands::remove::run(&directory, root.as_deref(), out)
         }

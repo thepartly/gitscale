@@ -11,7 +11,12 @@ fn add_entry() {
     let env = TestEnv::new("add_entry");
     env.write_config("");
 
-    let out = env.run(&["add", "libs/core", "https://github.com/org/core.git", "main"]);
+    let out = env.run(&[
+        "add",
+        "libs/core",
+        "https://github.com/org/core.git",
+        "main",
+    ]);
     assert!(out.success, "stderr: {}", out.stderr);
     insta::assert_snapshot!("add_entry_stdout", out.stdout);
 
@@ -27,7 +32,12 @@ fn add_entry_artefact() {
     env.write_config("");
 
     let out = env.run(&[
-        "add", "meta/svc", "https://github.com/org/svc.git", "main", "--mode", "artefact",
+        "add",
+        "meta/svc",
+        "https://github.com/org/svc.git",
+        "main",
+        "--mode",
+        "artefact",
     ]);
     assert!(out.success, "stderr: {}", out.stderr);
     insta::assert_snapshot!("add_entry_artefact_stdout", out.stdout);
@@ -45,7 +55,12 @@ fn add_duplicate_fails() {
 "#,
     );
 
-    let out = env.run(&["add", "libs/core", "https://github.com/org/other.git", "main"]);
+    let out = env.run(&[
+        "add",
+        "libs/core",
+        "https://github.com/org/other.git",
+        "main",
+    ]);
     assert!(!out.success);
     assert!(out.stderr.contains("already declared"));
 }

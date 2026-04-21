@@ -5,7 +5,13 @@ use std::path::Path;
 use crate::config::{find_config, load_config};
 use crate::hooks;
 
-pub fn run(root: Option<&Path>, names: &[String], verbose: bool, out: &mut dyn Write, err: &mut dyn Write) -> Result<()> {
+pub fn run(
+    root: Option<&Path>,
+    names: &[String],
+    verbose: bool,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<()> {
     crate::commands::clone::run(root, names, verbose, out, err)?;
     // pull runs its own post_sync hook, skip it here to avoid double-run
     crate::commands::pull::run_no_hooks(root, names, verbose, out, err)?;
