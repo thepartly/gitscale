@@ -1,0 +1,24 @@
+[package]
+name = "gitscale"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "gitscale"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["blocking"] }
+flate2 = "1"
+tar = "0.4"
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+chrono = { version = "0.4", features = ["now"] }
+url = "2"
+anyhow = "1"
+regex = "1"

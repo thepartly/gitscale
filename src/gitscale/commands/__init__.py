@@ -1,1 +1,0 @@
-"""Subcommands for gitscale CLI."""
