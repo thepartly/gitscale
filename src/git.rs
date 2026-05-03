@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::config::RepoEntry;
 
@@ -15,6 +15,11 @@ pub fn is_ci() -> bool {
 fn run_git(args: &[&str], cwd: Option<&Path>, check: bool) -> Result<std::process::Output> {
     let mut cmd = Command::new("git");
     cmd.args(args);
+    cmd.stdin(Stdio::null());
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("GIT_ASKPASS", "");
+    cmd.env("SSH_ASKPASS", "");
+    cmd.env("SSH_ASKPASS_REQUIRE", "never");
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
@@ -23,12 +28,8 @@ fn run_git(args: &[&str], cwd: Option<&Path>, check: bool) -> Result<std::proces
         .with_context(|| format!("failed to run: git {}", args.join(" ")))?;
     if check && !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "git {} failed (exit {}):\n{}",
-            args.join(" "),
-            output.status.code().unwrap_or(-1),
-            stderr.trim()
-        );
+        let msg = stderr.trim().lines().next().unwrap_or("unknown error");
+        bail!("{}", msg);
     }
     Ok(output)
 }
@@ -73,8 +74,25 @@ pub fn clone_repo(entry: &RepoEntry, root: &Path, verbose: bool, shallow: bool) 
 
 pub fn checkout_revision(entry: &RepoEntry, root: &Path) -> Result<()> {
     let dest = root.join(&entry.directory);
+    // Try branch checkout first, then detached HEAD for tags/SHAs
     let result = run_git(&["checkout", &entry.revision], Some(&dest), false)?;
     if !result.status.success() {
+        let result = run_git(
+            &[
+                "rev-parse",
+                "--verify",
+                &format!("{}^{{commit}}", entry.revision),
+            ],
+            Some(&dest),
+            false,
+        )?;
+        if !result.status.success() {
+            bail!(
+                "revision '{}' does not exist in {}",
+                entry.revision,
+                entry.directory
+            );
+        }
         run_git(
             &["checkout", "--detach", &entry.revision],
             Some(&dest),
@@ -229,6 +247,10 @@ pub fn pull_repo(entry: &RepoEntry, root: &Path, verbose: bool, shallow: bool) -
             run_git(&["fetch", "--depth", "1", "--quiet"], Some(&dest), true)?;
             run_git(&["reset", "--hard", "@{upstream}"], Some(&dest), false)?;
         } else {
+            let current = get_current_ref(entry, root)?;
+            if current != entry.revision {
+                checkout_revision(entry, root)?;
+            }
             run_git(&["pull", "--ff-only", "--quiet"], Some(&dest), false)?;
         }
         Ok(())

@@ -1,0 +1,5 @@
+---
+source: tests/cli.rs
+expression: out.stdout
+---
+Added libs/core → https://github.com/org/core.git @ main [readwrite]

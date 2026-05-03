@@ -1,15 +1,18 @@
 use anyhow::Result;
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 
 use crate::commands::clone::filter_entries;
 use crate::config::{find_config, load_config};
 use crate::git::push_repo;
+use crate::progress::{run_parallel, RepoStatus};
 
 pub fn run(
     root: Option<&Path>,
     names: &[String],
     verbose: bool,
+    interactive: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
@@ -23,32 +26,36 @@ pub fn run(
         return Ok(());
     }
 
-    let mut failed = 0;
-    for entry in &selected {
-        if entry.is_artefact() {
-            writeln!(out, "  skip  {} (artefact)", entry.directory)?;
-            continue;
-        }
-        if entry.is_readonly() {
-            writeln!(out, "  skip  {} (readonly)", entry.directory)?;
-            continue;
-        }
-        let dest = config_root.join(&entry.directory);
-        if !dest.exists() {
-            writeln!(out, "  skip  {} (not cloned)", entry.directory)?;
-            continue;
-        }
-        if verbose {
-            writeln!(out, "  push  {}", entry.directory)?;
-        }
-        match push_repo(entry, &config_root, verbose) {
-            Ok(()) => writeln!(out, "  ok    {}", entry.directory)?,
-            Err(e) => {
-                writeln!(err, "  FAIL  {}: {}", entry.directory, e)?;
-                failed += 1;
+    let entry_map: HashMap<&str, &crate::config::RepoEntry> =
+        selected.iter().map(|e| (e.directory.as_str(), e)).collect();
+    let dir_names: Vec<String> = selected.iter().map(|e| e.directory.clone()).collect();
+
+    let failed = run_parallel(
+        "Pushing local changes...",
+        &dir_names,
+        interactive,
+        |name| {
+            let entry = &entry_map[name];
+
+            if entry.is_artefact() {
+                return RepoStatus::Skip(format!("{} (artefact)", name));
             }
-        }
-    }
+            if entry.is_readonly() {
+                return RepoStatus::Skip(format!("{} (readonly)", name));
+            }
+            let dest = config_root.join(&entry.directory);
+            if !dest.exists() {
+                return RepoStatus::Skip(format!("{} (not cloned)", name));
+            }
+
+            match push_repo(entry, &config_root, verbose) {
+                Ok(()) => RepoStatus::Ok(name.to_string()),
+                Err(e) => RepoStatus::Fail(format!("{}: {}", name, e)),
+            }
+        },
+        out,
+        err,
+    )?;
 
     if failed > 0 {
         anyhow::bail!("{} repo(s) failed to push", failed);

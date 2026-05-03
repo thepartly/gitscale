@@ -1,0 +1,7 @@
+---
+source: tests/cli.rs
+assertion_line: 297
+expression: out.stdout
+---
+Fetching...
+  ok    meta/app (artefact)

@@ -1,0 +1,7 @@
+---
+source: tests/cli.rs
+expression: plain
+---
+      REPO       MODE       REF      EXPECTED   STATUS
+!     .                     master              dirty 
+✘     meta/app   artefact   —        main       missed

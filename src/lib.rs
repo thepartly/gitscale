@@ -2,6 +2,7 @@ pub mod commands;
 pub mod config;
 pub mod git;
 pub mod hooks;
+pub mod progress;
 pub mod storage;
 pub mod urls;
 
@@ -91,8 +92,9 @@ pub struct CliOutput {
 pub fn run_cli(args: &[&str]) -> CliOutput {
     let mut stdout_buf = Vec::new();
     let mut stderr_buf = Vec::new();
+    let interactive = progress::is_interactive();
 
-    let success = match run_cli_inner(args, &mut stdout_buf, &mut stderr_buf) {
+    let success = match run_cli_inner(args, interactive, &mut stdout_buf, &mut stderr_buf) {
         Ok(()) => true,
         Err(e) => {
             let _ = writeln!(stderr_buf, "Error: {}", e);
@@ -107,25 +109,30 @@ pub fn run_cli(args: &[&str]) -> CliOutput {
     }
 }
 
-fn run_cli_inner(args: &[&str], out: &mut dyn Write, err: &mut dyn Write) -> Result<()> {
+fn run_cli_inner(
+    args: &[&str],
+    interactive: bool,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<()> {
     let cli = Cli::try_parse_from(args)?;
     let verbose = cli.verbose;
 
     match cli.command {
         Commands::Clone { root, names } => {
-            commands::clone::run(root.as_deref(), &names, verbose, out, err)
+            commands::clone::run(root.as_deref(), &names, verbose, interactive, out, err)
         }
         Commands::Fetch { root, names } => {
-            commands::fetch::run(root.as_deref(), &names, verbose, out, err)
+            commands::fetch::run(root.as_deref(), &names, interactive, out, err)
         }
         Commands::Pull { root, names } => {
-            commands::pull::run(root.as_deref(), &names, verbose, out, err)
+            commands::pull::run(root.as_deref(), &names, verbose, interactive, out, err)
         }
         Commands::Push { root, names } => {
-            commands::push::run(root.as_deref(), &names, verbose, out, err)
+            commands::push::run(root.as_deref(), &names, verbose, interactive, out, err)
         }
         Commands::Sync { root, names } => {
-            commands::sync::run(root.as_deref(), &names, verbose, out, err)
+            commands::sync::run(root.as_deref(), &names, verbose, interactive, out, err)
         }
         Commands::Status {
             root,

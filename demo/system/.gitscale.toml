@@ -1,5 +1,5 @@
 [repos]
-"gsdemo-sso" = { url = "https://github.com/avkonst/gsdemo-sso.git", revision = "master" }
+"gsdemo-sso" = { url = "https://github.com/avkonst/gsdemo-sso.git", revision = "main" }
 "gsdemo-sso-sdk" = { url = "https://github.com/avkonst/gsdemo-sso-sdk.git", revision = "master" }
 "gsdemo-core" = { url = "https://github.com/avkonst/gsdemo-core.git", revision = "master" }
 "gsdemo-core-sdk" = { url = "https://github.com/avkonst/gsdemo-core-sdk.git", revision = "master" }

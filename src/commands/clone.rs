@@ -1,15 +1,18 @@
 use anyhow::Result;
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 
 use crate::config::{find_config, load_config, RepoEntry};
 use crate::git::{clone_repo, is_ci};
+use crate::progress::{run_parallel, RepoStatus};
 use crate::storage::clone_artefact;
 
 pub fn run(
     root: Option<&Path>,
     names: &[String],
     verbose: bool,
+    interactive: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
@@ -23,55 +26,52 @@ pub fn run(
         return Ok(());
     }
 
-    let mut failed = 0;
-    for entry in &selected {
-        let dest = config_root.join(&entry.directory);
-        if entry.is_artefact() {
-            if dest.exists() {
-                writeln!(out, "  skip  {} (already exists)", entry.directory)?;
-                continue;
-            }
-            if config.storage_url.is_empty() {
-                writeln!(err, "  FAIL  {}: no [storage] configured", entry.directory)?;
-                failed += 1;
-                continue;
-            }
-            let revision = if entry.revision.is_empty() {
-                "HEAD"
-            } else {
-                &entry.revision
-            };
-            match clone_artefact(&config.storage_url, &entry.repo_url, revision, &dest) {
-                Ok(true) => writeln!(out, "  ok    {} (artefact)", entry.directory)?,
-                Ok(false) => writeln!(out, "  skip  {} (no artefact data)", entry.directory)?,
-                Err(e) => {
-                    writeln!(err, "  FAIL  {}: {}", entry.directory, e)?;
-                    failed += 1;
+    let entry_map: HashMap<&str, &RepoEntry> =
+        selected.iter().map(|e| (e.directory.as_str(), e)).collect();
+    let dir_names: Vec<String> = selected.iter().map(|e| e.directory.clone()).collect();
+    let storage_url = &config.storage_url;
+    let ci = is_ci();
+
+    let failed = run_parallel(
+        "Cloning missing repos...",
+        &dir_names,
+        interactive,
+        |name| {
+            let entry = &entry_map[name];
+            let dest = config_root.join(&entry.directory);
+
+            if entry.is_artefact() {
+                if dest.exists() {
+                    return RepoStatus::Skip(format!("{} (already exists)", name));
                 }
+                if storage_url.is_empty() {
+                    return RepoStatus::Fail(format!("{}: no [storage] configured", name));
+                }
+                let revision = if entry.revision.is_empty() {
+                    "HEAD"
+                } else {
+                    &entry.revision
+                };
+                return match clone_artefact(storage_url, &entry.repo_url, revision, &dest) {
+                    Ok(true) => RepoStatus::Ok(format!("{} (artefact)", name)),
+                    Ok(false) => RepoStatus::Skip(format!("{} (no artefact data)", name)),
+                    Err(e) => RepoStatus::Fail(format!("{}: {}", name, e)),
+                };
             }
-            continue;
-        }
-        if dest.exists() {
-            writeln!(out, "  skip  {} (already exists)", entry.directory)?;
-            continue;
-        }
-        if verbose {
-            writeln!(
-                out,
-                "  clone {} → {} @ {}",
-                entry.repo_url, entry.directory, entry.revision
-            )?;
-        }
-        let ci = is_ci();
-        let shallow = ci || entry.is_readonly();
-        match clone_repo(entry, &config_root, verbose, shallow) {
-            Ok(()) => writeln!(out, "  ok    {}", entry.directory)?,
-            Err(e) => {
-                writeln!(err, "  FAIL  {}: {}", entry.directory, e)?;
-                failed += 1;
+
+            if dest.exists() {
+                return RepoStatus::Skip(format!("{} (already exists)", name));
             }
-        }
-    }
+
+            let shallow = ci || entry.is_readonly();
+            match clone_repo(entry, &config_root, verbose, shallow) {
+                Ok(()) => RepoStatus::Ok(name.to_string()),
+                Err(e) => RepoStatus::Fail(format!("{}: {}", name, e)),
+            }
+        },
+        out,
+        err,
+    )?;
 
     if failed > 0 {
         anyhow::bail!("{} repo(s) failed to clone", failed);

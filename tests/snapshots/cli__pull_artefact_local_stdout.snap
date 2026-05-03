@@ -1,0 +1,7 @@
+---
+source: tests/cli.rs
+assertion_line: 370
+expression: out2.stdout
+---
+Pulling latest changes...
+  ok    meta/app (artefact)

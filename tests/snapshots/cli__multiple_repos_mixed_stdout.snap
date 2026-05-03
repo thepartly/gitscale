@@ -1,0 +1,9 @@
+---
+source: tests/cli.rs
+assertion_line: 697
+expression: out.stdout
+---
+Cloning missing repos...
+  ok    libs/ro-lib
+  ok    libs/rw-lib
+  ok    meta/art (artefact)

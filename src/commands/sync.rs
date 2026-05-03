@@ -9,13 +9,14 @@ pub fn run(
     root: Option<&Path>,
     names: &[String],
     verbose: bool,
+    interactive: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
-    crate::commands::clone::run(root, names, verbose, out, err)?;
+    crate::commands::clone::run(root, names, verbose, interactive, out, err)?;
     // pull runs its own post_sync hook, skip it here to avoid double-run
-    crate::commands::pull::run_no_hooks(root, names, verbose, out, err)?;
-    crate::commands::push::run(root, names, verbose, out, err)?;
+    crate::commands::pull::run_no_hooks(root, names, verbose, interactive, out, err)?;
+    crate::commands::push::run(root, names, verbose, interactive, out, err)?;
 
     let config_path = find_config(root)?;
     let config_root = config_path.parent().unwrap().to_path_buf();

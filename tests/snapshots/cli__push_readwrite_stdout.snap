@@ -1,0 +1,7 @@
+---
+source: tests/cli.rs
+assertion_line: 480
+expression: out.stdout
+---
+Pushing local changes...
+  ok    libs/mylib

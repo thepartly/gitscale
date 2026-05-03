@@ -1,0 +1,7 @@
+---
+source: tests/cli.rs
+assertion_line: 171
+expression: out.stdout
+---
+Cloning missing repos...
+  ok    meta/app (artefact)

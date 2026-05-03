@@ -1,0 +1,7 @@
+---
+source: tests/cli.rs
+assertion_line: 317
+expression: out.stdout
+---
+Fetching...
+  skip  libs/mylib (not cloned)

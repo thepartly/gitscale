@@ -1,0 +1,7 @@
+---
+source: tests/cli.rs
+assertion_line: 335
+expression: out.stdout
+---
+Fetching...
+  ok    libs/mylib

@@ -1,0 +1,7 @@
+---
+source: tests/cli.rs
+assertion_line: 417
+expression: out.stdout
+---
+Pulling latest changes...
+  ok    libs/mylib

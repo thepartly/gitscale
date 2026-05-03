@@ -1,0 +1,5 @@
+---
+source: tests/cli.rs
+expression: out.stdout
+---
+Added meta/svc → https://github.com/org/svc.git @ main [artefact]
