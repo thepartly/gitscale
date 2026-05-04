@@ -185,6 +185,10 @@ impl Drop for TestEnv {
 }
 
 fn run_git(cwd: &Path, args: &[&str]) {
+    run_git_pub(cwd, args);
+}
+
+pub fn run_git_pub(cwd: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)
         .current_dir(cwd)

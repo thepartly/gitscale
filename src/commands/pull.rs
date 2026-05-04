@@ -98,5 +98,8 @@ fn pull_inner(
         anyhow::bail!("{} repo(s) failed to pull", failed);
     }
 
+    // Re-resolve symlinks after pull (child configs may have changed)
+    crate::resolve::resolve_and_link(&config.repos, &config_root, false, out)?;
+
     Ok((config, config_root))
 }

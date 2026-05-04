@@ -60,6 +60,7 @@ Each entry maps a local directory to a git repo:
   - `readwrite` (default) — Normal clone, full access
   - `readonly` — Cloned, but all files have write permissions removed
   - `artefact` — No git clone. Artefact archive synced via cloud storage
+- **recursive** — Scan the repo for a nested `.gitscale.toml` and resolve transitive deps (default: `true`)
 
 ### Storage
 
@@ -265,6 +266,36 @@ post_sync = "make install"
 ```
 
 - **post_sync** — Runs after `pull` and `sync` complete (executed via `sh -c` in the config root directory). Fails the command if the hook exits non-zero.
+
+## Recursive dependencies
+
+When a cloned repo contains its own `.gitscale.toml`, GitScale resolves transitive dependencies automatically. Instead of cloning nested copies, it creates **symlinks** from the child's declared paths to the root-level checkouts.
+
+### Example
+
+```
+# Root .gitscale.toml
+[repos]
+"core" = { url = "git@github.com:org/core.git", revision = "main" }
+"sharedlibs" = { url = "git@github.com:org/sharedlibs.git", revision = "main" }
+```
+
+If `core/.gitscale.toml` declares:
+
+```toml
+[repos]
+"libs/shared" = { url = "git@github.com:org/sharedlibs.git", revision = "main" }
+```
+
+GitScale matches the URL, skips cloning, and creates a symlink: `core/libs/shared → ../../sharedlibs`.
+
+### Rules
+
+- **Recursive by default.** Disable per repo with `recursive = false`.
+- **Root is the source of truth.** All transitive deps must be declared in the root config — if missing, GitScale errors out.
+- **Root revision wins.** If root specifies a revision, child declarations are ignored silently.
+- **Revision deferral.** If root omits `revision`, the child's revision is adopted. If multiple children disagree, GitScale errors out and asks you to pin one in the root config.
+- **Works with artefacts.** Extracted artefact folders are scanned for `.gitscale.toml` too.
 
 ## License
 

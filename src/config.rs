@@ -44,6 +44,7 @@ pub struct RepoEntry {
     pub repo_url: String,
     pub revision: String,
     pub mode: RepoMode,
+    pub recursive: bool,
 }
 
 impl RepoEntry {
@@ -90,6 +91,7 @@ struct RawRepo {
     url: Option<String>,
     revision: Option<String>,
     mode: Option<String>,
+    recursive: Option<bool>,
 }
 
 pub fn find_config(start: Option<&Path>) -> Result<PathBuf> {
@@ -169,11 +171,14 @@ fn parse_repos(
             None => RepoMode::Readwrite,
         };
 
+        let recursive = spec.recursive.unwrap_or(true);
+
         entries.push(RepoEntry {
             directory: directory.clone(),
             repo_url: url.to_string(),
             revision,
             mode,
+            recursive,
         });
     }
     Ok(entries)
@@ -206,6 +211,9 @@ pub fn write_config(config_path: &Path, entries: &[RepoEntry], storage_url: &str
             }
             if entry.mode != RepoMode::Readwrite {
                 parts.push(format!("mode = \"{}\"", entry.mode));
+            }
+            if !entry.recursive {
+                parts.push("recursive = false".to_string());
             }
             let inline = parts.join(", ");
             lines.push(format!("\"{}\" = {{ {} }}", entry.directory, inline));

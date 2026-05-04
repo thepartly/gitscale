@@ -76,6 +76,9 @@ pub fn run(
     if failed > 0 {
         anyhow::bail!("{} repo(s) failed to clone", failed);
     }
+
+    crate::resolve::resolve_and_link(&config.repos, &config_root, true, out)?;
+
     Ok(())
 }
 

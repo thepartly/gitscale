@@ -53,8 +53,10 @@ pub fn clone_repo(entry: &RepoEntry, root: &Path, verbose: bool, shallow: bool) 
 
     let dest_str = dest.to_string_lossy().to_string();
     let mut args: Vec<&str> = vec!["clone", &entry.repo_url, &dest_str];
-    if shallow {
+    if shallow && !entry.revision.is_empty() {
         args.extend_from_slice(&["--depth", "1", "--branch", &entry.revision]);
+    } else if shallow {
+        args.extend_from_slice(&["--depth", "1"]);
     }
     if verbose {
         args.push("--progress");
@@ -63,7 +65,7 @@ pub fn clone_repo(entry: &RepoEntry, root: &Path, verbose: bool, shallow: bool) 
     }
     run_git(&args, None, true)?;
 
-    if !shallow {
+    if !shallow && !entry.revision.is_empty() {
         checkout_revision(entry, root)?;
     }
     if entry.is_readonly() {

@@ -3,6 +3,7 @@ pub mod config;
 pub mod git;
 pub mod hooks;
 pub mod progress;
+pub mod resolve;
 pub mod storage;
 pub mod urls;
 

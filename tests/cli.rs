@@ -700,3 +700,348 @@ url = "{}"
     assert!(env.playground.join("libs/ro-lib/ro.txt").is_file());
     assert!(env.playground.join("meta/art/art.bin").is_file());
 }
+
+// ---------------------------------------------------------------------------
+// Recursive dependency resolution
+// ---------------------------------------------------------------------------
+
+#[test]
+fn recursive_basic_symlink() {
+    let env = TestEnv::new("recursive_basic_symlink");
+
+    // Create bare repo B
+    let bare_b = env.create_bare_repo("repoB", "main", &[("b.txt", "hello from B")]);
+
+    // Create bare repo A that declares B as a dependency
+    let bare_a = env.create_bare_repo(
+        "repoA",
+        "main",
+        &[
+            ("a.txt", "hello from A"),
+            (
+                ".gitscale.toml",
+                &format!(
+                    "[repos]\n\"libs/b\" = {{ url = \"{}\", revision = \"main\" }}\n",
+                    bare_b.display()
+                ),
+            ),
+        ],
+    );
+
+    // Root config declares both
+    env.write_config(&format!(
+        r#"[repos]
+"repoA" = {{ url = "{}", revision = "main" }}
+"repoB" = {{ url = "{}", revision = "main" }}
+"#,
+        bare_a.display(),
+        bare_b.display(),
+    ));
+
+    let out = env.run(&["clone"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+
+    // repoA/libs/b should be a symlink pointing to ../../repoB
+    let link = env.playground.join("repoA/libs/b");
+    assert!(link.is_symlink(), "expected symlink at repoA/libs/b");
+    let target = std::fs::read_link(&link).unwrap();
+    assert_eq!(
+        target,
+        std::path::PathBuf::from("../../repoB"),
+        "symlink should be relative"
+    );
+
+    // Content accessible through symlink
+    assert!(link.join("b.txt").is_file());
+    let content = std::fs::read_to_string(link.join("b.txt")).unwrap();
+    assert_eq!(content, "hello from B");
+}
+
+#[test]
+fn recursive_missing_dep_errors() {
+    let env = TestEnv::new("recursive_missing_dep_errors");
+
+    // B is NOT declared at root level
+    let bare_b = env.create_bare_repo("repoB", "main", &[("b.txt", "B")]);
+
+    let bare_a = env.create_bare_repo(
+        "repoA",
+        "main",
+        &[
+            ("a.txt", "A"),
+            (
+                ".gitscale.toml",
+                &format!(
+                    "[repos]\n\"libs/b\" = {{ url = \"{}\", revision = \"main\" }}\n",
+                    bare_b.display()
+                ),
+            ),
+        ],
+    );
+
+    // Root only declares A, not B
+    env.write_config(&format!(
+        r#"[repos]
+"repoA" = {{ url = "{}", revision = "main" }}
+"#,
+        bare_a.display(),
+    ));
+
+    let out = env.run(&["clone"]);
+    assert!(!out.success, "should fail when child dep is not in root");
+    assert!(
+        out.stderr.contains("not declared in the root"),
+        "stderr: {}",
+        out.stderr
+    );
+}
+
+#[test]
+fn recursive_revision_adoption() {
+    let env = TestEnv::new("recursive_revision_adoption");
+
+    // Create B with two branches
+    let bare_b = env.create_bare_repo("repoB", "main", &[("b.txt", "B main")]);
+    // Add a develop branch
+    {
+        let tmp = env.repos_remote.join("repoB-checkout");
+        let _ = std::fs::remove_dir_all(&tmp);
+        helpers::run_git_pub(
+            &env.repos_remote,
+            &["clone", bare_b.to_str().unwrap(), tmp.to_str().unwrap()],
+        );
+        helpers::run_git_pub(&tmp, &["config", "user.email", "t@t.com"]);
+        helpers::run_git_pub(&tmp, &["config", "user.name", "T"]);
+        helpers::run_git_pub(&tmp, &["checkout", "-b", "develop"]);
+        std::fs::write(tmp.join("b.txt"), "B develop").unwrap();
+        helpers::run_git_pub(&tmp, &["add", "."]);
+        helpers::run_git_pub(&tmp, &["commit", "-m", "dev"]);
+        helpers::run_git_pub(&tmp, &["push", "origin", "develop"]);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // A's config says it needs B at "develop"
+    let bare_a = env.create_bare_repo(
+        "repoA",
+        "main",
+        &[
+            ("a.txt", "A"),
+            (
+                ".gitscale.toml",
+                &format!(
+                    "[repos]\n\"libs/b\" = {{ url = \"{}\", revision = \"develop\" }}\n",
+                    bare_b.display()
+                ),
+            ),
+        ],
+    );
+
+    // Root declares B WITHOUT a revision (defer to child)
+    env.write_config(&format!(
+        r#"[repos]
+"repoA" = {{ url = "{}", revision = "main" }}
+"repoB" = {{ url = "{}" }}
+"#,
+        bare_a.display(),
+        bare_b.display(),
+    ));
+
+    let out = env.run(&["clone"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+
+    // B should be checked out on "develop"
+    let b_txt = std::fs::read_to_string(env.playground.join("repoB/b.txt")).unwrap();
+    assert_eq!(b_txt, "B develop");
+
+    // Symlink should exist
+    let link = env.playground.join("repoA/libs/b");
+    assert!(link.is_symlink());
+}
+
+#[test]
+fn recursive_revision_conflict() {
+    let env = TestEnv::new("recursive_revision_conflict");
+
+    let bare_c = env.create_bare_repo("repoC", "main", &[("c.txt", "C")]);
+
+    // A wants C at "main"
+    let bare_a = env.create_bare_repo(
+        "repoA",
+        "main",
+        &[
+            ("a.txt", "A"),
+            (
+                ".gitscale.toml",
+                &format!(
+                    "[repos]\n\"libs/c\" = {{ url = \"{}\", revision = \"main\" }}\n",
+                    bare_c.display()
+                ),
+            ),
+        ],
+    );
+
+    // B wants C at "develop" (different)
+    let bare_b = env.create_bare_repo(
+        "repoB",
+        "main",
+        &[
+            ("b.txt", "B"),
+            (
+                ".gitscale.toml",
+                &format!(
+                    "[repos]\n\"deps/c\" = {{ url = \"{}\", revision = \"develop\" }}\n",
+                    bare_c.display()
+                ),
+            ),
+        ],
+    );
+
+    // Root declares all three, C without revision
+    env.write_config(&format!(
+        r#"[repos]
+"repoA" = {{ url = "{}", revision = "main" }}
+"repoB" = {{ url = "{}", revision = "main" }}
+"repoC" = {{ url = "{}" }}
+"#,
+        bare_a.display(),
+        bare_b.display(),
+        bare_c.display(),
+    ));
+
+    let out = env.run(&["clone"]);
+    assert!(!out.success, "should fail on conflicting revisions");
+    assert!(
+        out.stderr.contains("conflicting revisions"),
+        "stderr: {}",
+        out.stderr
+    );
+}
+
+#[test]
+fn recursive_disabled() {
+    let env = TestEnv::new("recursive_disabled");
+
+    // B isn't declared at root, but A references it
+    let bare_b = env.create_bare_repo("repoB", "main", &[("b.txt", "B")]);
+
+    let bare_a = env.create_bare_repo(
+        "repoA",
+        "main",
+        &[
+            ("a.txt", "A"),
+            (
+                ".gitscale.toml",
+                &format!(
+                    "[repos]\n\"libs/b\" = {{ url = \"{}\", revision = \"main\" }}\n",
+                    bare_b.display()
+                ),
+            ),
+        ],
+    );
+
+    // Root declares A with recursive = false — B is not needed
+    env.write_config(&format!(
+        r#"[repos]
+"repoA" = {{ url = "{}", revision = "main", recursive = false }}
+"#,
+        bare_a.display(),
+    ));
+
+    let out = env.run(&["clone"]);
+    assert!(
+        out.success,
+        "should succeed because recursion is disabled: stderr: {}",
+        out.stderr
+    );
+
+    // No symlink should be created
+    assert!(!env.playground.join("repoA/libs/b").exists());
+}
+
+#[test]
+fn recursive_root_revision_wins() {
+    let env = TestEnv::new("recursive_root_revision_wins");
+
+    let bare_b = env.create_bare_repo("repoB", "main", &[("b.txt", "B main")]);
+
+    // A wants B at "develop"
+    let bare_a = env.create_bare_repo(
+        "repoA",
+        "main",
+        &[
+            ("a.txt", "A"),
+            (
+                ".gitscale.toml",
+                &format!(
+                    "[repos]\n\"libs/b\" = {{ url = \"{}\", revision = \"develop\" }}\n",
+                    bare_b.display()
+                ),
+            ),
+        ],
+    );
+
+    // Root pins B at "main" — root wins, no conflict
+    env.write_config(&format!(
+        r#"[repos]
+"repoA" = {{ url = "{}", revision = "main" }}
+"repoB" = {{ url = "{}", revision = "main" }}
+"#,
+        bare_a.display(),
+        bare_b.display(),
+    ));
+
+    let out = env.run(&["clone"]);
+    assert!(
+        out.success,
+        "root revision wins, no error: stderr: {}",
+        out.stderr
+    );
+
+    // B should be on main (root wins)
+    let b_txt = std::fs::read_to_string(env.playground.join("repoB/b.txt")).unwrap();
+    assert_eq!(b_txt, "B main");
+
+    // Symlink should still be created
+    let link = env.playground.join("repoA/libs/b");
+    assert!(link.is_symlink());
+}
+
+#[test]
+fn recursive_artefact_with_config() {
+    let env = TestEnv::new("recursive_artefact_config");
+    let repo_url_art = "https://github.com/org/art.git";
+    let bare_dep = env.create_bare_repo("dep", "main", &[("dep.txt", "dep content")]);
+
+    // Create artefact that contains a .gitscale.toml
+    let child_config = format!(
+        "[repos]\n\"vendor/dep\" = {{ url = \"{}\", revision = \"main\" }}\n",
+        bare_dep.display()
+    );
+    env.create_artefact(
+        repo_url_art,
+        "v1",
+        &[("art.bin", "binary"), (".gitscale.toml", &child_config)],
+    );
+
+    // Root declares both artefact and the dep
+    env.write_config(&format!(
+        r#"[storage]
+url = "{}"
+
+[repos]
+"meta/art" = {{ url = "{}", revision = "v1", mode = "artefact" }}
+"dep" = {{ url = "{}", revision = "main" }}
+"#,
+        env.storage_url(),
+        repo_url_art,
+        bare_dep.display(),
+    ));
+
+    let out = env.run(&["clone"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+
+    // Symlink inside artefact dir
+    let link = env.playground.join("meta/art/vendor/dep");
+    assert!(link.is_symlink(), "expected symlink inside artefact");
+    assert!(link.join("dep.txt").is_file());
+}

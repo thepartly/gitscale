@@ -40,6 +40,7 @@ pub fn run(
         repo_url: repo_url.to_string(),
         revision: revision.to_string(),
         mode: mode_enum,
+        recursive: true,
     });
 
     write_config(&config_path, &entries, &storage_url)?;
