@@ -2,6 +2,5 @@
 source: tests/cli.rs
 expression: plain
 ---
-      REPO         MODE        REF      EXPECTED   STATUS
-!     .                        master              dirty 
-✘     libs/mylib   readwrite   —        main       missed
+      REPO         PATH   MODE        REF   EXPECTED   STATUS
+✘     libs/mylib   -      readwrite   —     main       missed

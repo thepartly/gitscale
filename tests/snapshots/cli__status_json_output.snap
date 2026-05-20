@@ -6,18 +6,6 @@ expression: parsed
   {
     "ahead": 0,
     "behind": 0,
-    "clean": false,
-    "current_ref": "[ref]",
-    "detached": false,
-    "directory": ".",
-    "exists": true,
-    "expected_ref": "",
-    "mode": "",
-    "stale": false
-  },
-  {
-    "ahead": 0,
-    "behind": 0,
     "clean": true,
     "current_ref": "[ref]",
     "detached": false,
@@ -25,6 +13,8 @@ expression: parsed
     "exists": true,
     "expected_ref": "main",
     "mode": "readwrite",
-    "stale": false
+    "stale": false,
+    "symlink": false,
+    "symlink_target": ""
   }
 ]

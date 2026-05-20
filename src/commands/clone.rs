@@ -40,6 +40,13 @@ pub fn run(
             let entry = &entry_map[name];
             let dest = config_root.join(&entry.directory);
 
+            // Replace symlinks with actual clones
+            if dest.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+                if let Err(e) = std::fs::remove_file(&dest) {
+                    return RepoStatus::Fail(format!("{}: failed to remove symlink: {}", name, e));
+                }
+            }
+
             if entry.is_artefact() {
                 if dest.exists() {
                     return RepoStatus::Skip(format!("{} (already exists)", name));

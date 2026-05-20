@@ -33,10 +33,10 @@ gitscale status
 ```
 
 ```
-    REPO          MODE        REF    EXPECTED   STATUS
-✔   .                         main              ok
-✔   libs/core     readonly    main   main       ok
-✔   libs/utils    readwrite   v2.1   v2.1.0     ok
+      REPO          PATH   MODE        REF    EXPECTED   STATUS
+✔     libs/core     -      readonly    main   main       ok
+✔     libs/utils    -      readwrite   v2.1   v2.1       ok
+⤷     libs/shared   ../s   readonly    main   main       symlink
 ```
 
 ## Config file
@@ -122,7 +122,7 @@ gitscale sync libs/core         # sync one
 
 ### `gitscale status`
 
-Show the status of all managed repos, including the root repo itself (shown as `.`). Use `--fetch` to check remote state before reporting.
+Show the status of all managed repos. Use `--fetch` to check remote state before reporting.
 
 ```
 gitscale status                 # table output
@@ -130,16 +130,30 @@ gitscale status --format json   # JSON output
 gitscale status --fetch         # fetch before checking
 ```
 
+Columns:
+
+| Column | Description |
+|--------|-------------|
+| REPO | Directory name of the managed repo |
+| PATH | Symlink target path (or `-` if not a symlink) |
+| MODE | `readonly`, `readwrite`, or `artefact` |
+| REF | Current git ref (branch/tag/SHA) |
+| EXPECTED | Declared revision from `.gitscale.toml` |
+| STATUS | Flags describing repo state |
+
 Status icons and flags:
 
 | Icon | Color | Flag | Meaning |
 |------|-------|------|---------|
 | `✔` | green | **ok** | Clean, on expected ref |
-| `!` | orange | **dirty** | Uncommitted changes |
-| `≠` | orange | **ref-mismatch** | On a different branch than declared |
-| `≠` | orange | **stale** | Shallow clone: local differs from upstream |
+| `⤷` | cyan | **symlink** | Resolved as symlink to parent-level checkout |
+| `~` | yellow | **unlinked** | Expected symlink replaced by real clone (safe to relink) |
+| `~` | red | **unlinked, modified** | Unlinked clone has local changes (unsafe to relink) |
+| `!` | red | **dirty** | Uncommitted changes |
+| `≠` | red | **ref-mismatch** | On a different branch than declared |
+| `≠` | red | **stale** | Shallow clone: local differs from upstream |
 | `⇑` | yellow | **+N** | Commits ahead of upstream |
-| `⇓` | yellow | **-N** | Commits behind upstream / artefact remote is newer |
+| `⇓` | yellow | **-N** | Commits behind upstream |
 | `⇅` | yellow | **+N, -N** | Diverged (ahead and behind) |
 | `◆` | cyan | **detached** | HEAD is detached |
 | `✘` | red | **missed** | Directory doesn't exist yet |

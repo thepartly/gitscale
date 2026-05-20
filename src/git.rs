@@ -292,6 +292,10 @@ pub struct RepoStatus {
     pub behind: i32,
     pub mode: String,
     pub is_stale: bool,
+    pub is_symlink: bool,
+    pub symlink_target: String,
+    pub has_unlinked: bool,
+    pub has_unlinked_modified: bool,
 }
 
 pub fn get_current_ref(entry: &RepoEntry, root: &Path) -> Result<String> {
@@ -353,6 +357,10 @@ fn is_stale(dest: &Path) -> bool {
 
 pub fn get_repo_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
     let dest = root.join(&entry.directory);
+    let symlink = dest
+        .symlink_metadata()
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
     if !dest.exists() {
         return RepoStatus {
             directory: entry.directory.clone(),
@@ -365,6 +373,42 @@ pub fn get_repo_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
             behind: 0,
             mode: entry.mode.to_string(),
             is_stale: false,
+            is_symlink: symlink,
+            symlink_target: String::new(),
+            has_unlinked: false,
+            has_unlinked_modified: false,
+        };
+    }
+    if symlink {
+        let target = fs::read_link(&dest)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let resolved = dest.canonicalize().unwrap_or_default();
+        let ref_str = run_git(&["symbolic-ref", "--short", "HEAD"], Some(&resolved), false)
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| stdout_str(&o))
+            .or_else(|| {
+                run_git(&["rev-parse", "--short", "HEAD"], Some(&resolved), false)
+                    .ok()
+                    .map(|o| stdout_str(&o))
+            })
+            .unwrap_or_default();
+        return RepoStatus {
+            directory: entry.directory.clone(),
+            exists: true,
+            current_ref: ref_str,
+            expected_ref: entry.revision.clone(),
+            is_clean: true,
+            is_detached: false,
+            ahead: 0,
+            behind: 0,
+            mode: entry.mode.to_string(),
+            is_stale: false,
+            is_symlink: true,
+            symlink_target: target,
+            has_unlinked: false,
+            has_unlinked_modified: false,
         };
     }
 
@@ -386,6 +430,10 @@ pub fn get_repo_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
             behind: 0,
             mode: entry.mode.to_string(),
             is_stale: stale,
+            is_symlink: false,
+            symlink_target: String::new(),
+            has_unlinked: false,
+            has_unlinked_modified: false,
         };
     }
 
@@ -401,6 +449,10 @@ pub fn get_repo_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
         behind,
         mode: entry.mode.to_string(),
         is_stale: false,
+        is_symlink: false,
+        symlink_target: String::new(),
+        has_unlinked: false,
+        has_unlinked_modified: false,
     }
 }
 
@@ -453,13 +505,42 @@ pub fn get_self_status(root: &Path) -> Option<RepoStatus> {
         behind,
         mode: String::new(),
         is_stale: false,
+        is_symlink: false,
+        symlink_target: String::new(),
+        has_unlinked: false,
+        has_unlinked_modified: false,
     })
 }
 
 pub fn get_artefact_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
     let dest = root.join(&entry.directory);
-    let exists = dest.is_dir() && dest.join(".etag").is_file();
+    let symlink = dest
+        .symlink_metadata()
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+    if symlink {
+        let target = fs::read_link(&dest)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        return RepoStatus {
+            directory: entry.directory.clone(),
+            exists: true,
+            current_ref: String::new(),
+            expected_ref: entry.revision.clone(),
+            is_clean: true,
+            is_detached: false,
+            ahead: 0,
+            behind: 0,
+            mode: entry.mode.to_string(),
+            is_stale: false,
+            is_symlink: true,
+            symlink_target: target,
+            has_unlinked: false,
+            has_unlinked_modified: false,
+        };
+    }
 
+    let exists = dest.is_dir() && dest.join(".etag").is_file();
     let mut behind = 0;
     let etag_file = dest.join(".etag");
     let etag_remote_file = dest.join(".etag-remote");
@@ -492,5 +573,9 @@ pub fn get_artefact_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
         behind,
         mode: entry.mode.to_string(),
         is_stale: false,
+        is_symlink: false,
+        symlink_target: String::new(),
+        has_unlinked: false,
+        has_unlinked_modified: false,
     }
 }

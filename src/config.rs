@@ -132,6 +132,13 @@ pub fn load_config(config_path: &Path) -> Result<GitScaleConfig> {
     })
 }
 
+pub fn load_config_optional(config_path: &Path) -> Option<GitScaleConfig> {
+    if !config_path.is_file() {
+        return None;
+    }
+    load_config(config_path).ok()
+}
+
 fn parse_storage(raw: Option<&RawStorage>, config_path: &Path) -> Result<String> {
     let Some(storage) = raw else {
         return Ok(String::new());

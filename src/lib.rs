@@ -55,6 +55,8 @@ enum Commands {
     Sync {
         #[arg(short = 'C', long)]
         root: Option<PathBuf>,
+        #[arg(long)]
+        force: bool,
         names: Vec<String>,
     },
     /// Show status of repos declared in .gitscale.toml
@@ -132,8 +134,8 @@ fn run_cli_inner(
         Commands::Push { root, names } => {
             commands::push::run(root.as_deref(), &names, verbose, interactive, out, err)
         }
-        Commands::Sync { root, names } => {
-            commands::sync::run(root.as_deref(), &names, verbose, interactive, out, err)
+        Commands::Sync { root, force, names } => {
+            commands::sync::run(root.as_deref(), &names, verbose, force, interactive, out, err)
         }
         Commands::Status {
             root,

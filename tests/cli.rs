@@ -1045,3 +1045,215 @@ url = "{}"
     assert!(link.is_symlink(), "expected symlink inside artefact");
     assert!(link.join("dep.txt").is_file());
 }
+
+// ---------------------------------------------------------------------------
+// Relink
+// ---------------------------------------------------------------------------
+
+/// Helper: set up a workspace with repoA (recursive) depending on repoB,
+/// clone it (creating a symlink), then replace the symlink with a real clone.
+/// Returns (env, path_to_link).
+fn setup_unlinked_env(name: &str) -> (TestEnv, std::path::PathBuf) {
+    let env = TestEnv::new(name);
+
+    let bare_b = env.create_bare_repo("repoB", "main", &[("b.txt", "hello from B")]);
+    let bare_a = env.create_bare_repo(
+        "repoA",
+        "main",
+        &[
+            ("a.txt", "hello from A"),
+            (
+                ".gitscale.toml",
+                &format!(
+                    "[repos]\n\"libs/b\" = {{ url = \"{}\", revision = \"main\" }}\n",
+                    bare_b.display()
+                ),
+            ),
+        ],
+    );
+
+    env.write_config(&format!(
+        r#"[repos]
+"repoA" = {{ url = "{}", revision = "main", recursive = true }}
+"repoB" = {{ url = "{}", revision = "main" }}
+"#,
+        bare_a.display(),
+        bare_b.display(),
+    ));
+
+    // Clone creates the symlink
+    let out = env.run(&["clone"]);
+    assert!(out.success, "clone failed: {}", out.stderr);
+
+    let link = env.playground.join("repoA/libs/b");
+    assert!(link.is_symlink(), "expected symlink after clone");
+
+    // Replace symlink with a real clone (simulating `gitscale sync` from inside repoA)
+    std::fs::remove_file(&link).unwrap();
+    helpers::run_git_pub(
+        &env.playground,
+        &[
+            "clone",
+            "--branch",
+            "main",
+            bare_b.to_str().unwrap(),
+            link.to_str().unwrap(),
+        ],
+    );
+    assert!(!link.is_symlink(), "should be a real dir now");
+    assert!(link.join("b.txt").is_file());
+
+    (env, link)
+}
+
+#[test]
+fn sync_relinks_clean_clone() {
+    let (env, link) = setup_unlinked_env("sync_relinks_clean");
+
+    // Sync should auto-relink since the clone is clean
+    let out = env.run(&["sync"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+
+    assert!(link.is_symlink(), "expected symlink restored after sync");
+    let target = std::fs::read_link(&link).unwrap();
+    assert_eq!(
+        target,
+        std::path::PathBuf::from("../../repoB"),
+        "symlink target mismatch: {:?}",
+        target
+    );
+    // Verify content is accessible through the symlink
+    assert!(
+        env.playground.join("repoB/b.txt").is_file(),
+        "repoB/b.txt should exist"
+    );
+    assert!(
+        link.join("b.txt").is_file(),
+        "b.txt not accessible through symlink; link={:?}, target={:?}, exists={}, is_dir={}",
+        link,
+        target,
+        link.exists(),
+        link.is_dir()
+    );
+}
+
+#[test]
+fn sync_skips_modified_clone_without_force() {
+    let (env, link) = setup_unlinked_env("sync_skips_modified");
+
+    // Make the clone dirty (uncommitted changes)
+    std::fs::write(link.join("dirty.txt"), "local change").unwrap();
+    helpers::run_git_pub(&link, &["add", "."]);
+
+    // Sync without --force should fail (non-zero exit)
+    let out = env.run(&["sync"]);
+    assert!(
+        !out.success,
+        "expected sync to fail when skipping modified unlinked clone"
+    );
+    assert!(
+        out.stdout.contains("skip") || out.stderr.contains("skip"),
+        "expected skip message, got stdout: {}, stderr: {}",
+        out.stdout,
+        out.stderr
+    );
+
+    assert!(
+        !link.is_symlink(),
+        "should still be a real dir (not relinked)"
+    );
+    assert!(link.join("dirty.txt").is_file());
+}
+
+#[test]
+fn sync_force_relinks_modified_clone() {
+    let (env, link) = setup_unlinked_env("sync_force_relinks_modified");
+
+    // Make the clone dirty
+    std::fs::write(link.join("dirty.txt"), "local change").unwrap();
+    helpers::run_git_pub(&link, &["add", "."]);
+
+    // Sync with --force should relink even though modified
+    let out = env.run(&["sync", "--force"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+
+    assert!(link.is_symlink(), "expected symlink restored with --force");
+    let target = std::fs::read_link(&link).unwrap();
+    assert_eq!(target, std::path::PathBuf::from("../../repoB"));
+    // dirty.txt should be gone (it was in the clone that got removed)
+    assert!(!link.join("dirty.txt").exists());
+}
+
+#[test]
+fn sync_skips_clone_with_unpushed_commits() {
+    let (env, link) = setup_unlinked_env("sync_skips_unpushed");
+
+    // Make a commit that isn't pushed
+    helpers::run_git_pub(&link, &["config", "user.email", "t@t.com"]);
+    helpers::run_git_pub(&link, &["config", "user.name", "T"]);
+    std::fs::write(link.join("new.txt"), "new file").unwrap();
+    helpers::run_git_pub(&link, &["add", "."]);
+    helpers::run_git_pub(&link, &["commit", "-m", "unpushed"]);
+
+    // Sync without --force should fail (non-zero exit)
+    let out = env.run(&["sync"]);
+    assert!(
+        !out.success,
+        "expected sync to fail when skipping unlinked clone with unpushed commits"
+    );
+
+    assert!(
+        !link.is_symlink(),
+        "should still be a real dir (unpushed commits)"
+    );
+    assert!(link.join("new.txt").is_file());
+}
+
+#[test]
+fn sync_force_relinks_clone_with_unpushed_commits() {
+    let (env, link) = setup_unlinked_env("sync_force_unpushed");
+
+    // Make a commit that isn't pushed
+    helpers::run_git_pub(&link, &["config", "user.email", "t@t.com"]);
+    helpers::run_git_pub(&link, &["config", "user.name", "T"]);
+    std::fs::write(link.join("new.txt"), "new file").unwrap();
+    helpers::run_git_pub(&link, &["add", "."]);
+    helpers::run_git_pub(&link, &["commit", "-m", "unpushed"]);
+
+    // Sync with --force should relink
+    let out = env.run(&["sync", "--force"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+
+    assert!(link.is_symlink(), "expected symlink restored with --force");
+}
+
+#[test]
+fn status_shows_unlinked() {
+    let (env, _link) = setup_unlinked_env("status_shows_unlinked");
+
+    let out = env.run(&["status"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+
+    let plain = strip_ansi(&out.stdout);
+    assert!(
+        plain.contains("unlinked"),
+        "expected 'unlinked' in status output: {}",
+        plain
+    );
+}
+
+#[test]
+fn status_shows_unlinked_modified() {
+    let (env, link) = setup_unlinked_env("status_shows_unlinked_modified");
+
+    // Make dirty
+    std::fs::write(link.join("dirty.txt"), "change").unwrap();
+    helpers::run_git_pub(&link, &["add", "."]);
+
+    let out = env.run(&["status"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+
+    let plain = strip_ansi(&out.stdout);
+    assert!(plain.contains("unlinked"), "expected 'unlinked': {}", plain);
+    assert!(plain.contains("modified"), "expected 'modified': {}", plain);
+}
