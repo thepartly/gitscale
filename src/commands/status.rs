@@ -62,12 +62,21 @@ pub fn run(
     }
 
     // Check for expected symlinks that are no longer symlinks
+    let mut orphans: Vec<crate::resolve::OrphanLink> = Vec::new();
     if let Ok((symlinks, _)) = resolve_recursive(&config.repos, &config_root) {
         for sym in &symlinks {
             let link_abs = config_root.join(&sym.link_path);
-            if link_abs.exists() && !link_abs.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+            if link_abs.exists()
+                && !link_abs
+                    .symlink_metadata()
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false)
+            {
                 // Find the parent repo that owns this link
-                let parent_dir = sym.link_path.iter().next()
+                let parent_dir = sym
+                    .link_path
+                    .iter()
+                    .next()
                     .and_then(|c| c.to_str())
                     .unwrap_or("");
                 if let Some(s) = statuses.iter_mut().find(|s| s.directory == parent_dir) {
@@ -78,12 +87,15 @@ pub fn run(
                 }
             }
         }
+
+        // Collect orphaned symlinks (declared deps that were removed from config)
+        orphans = crate::resolve::find_orphan_links(&config.repos, &config_root, &symlinks);
     }
 
     if output_format == "json" {
-        print_json(&statuses, out)?;
+        print_json(&statuses, &orphans, out)?;
     } else {
-        print_table(&statuses, out)?;
+        print_table(&statuses, &orphans, out)?;
     }
     Ok(())
 }
@@ -112,7 +124,11 @@ fn is_tree_modified(path: &Path) -> bool {
         .map(|o| {
             let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
             let parts: Vec<&str> = s.split_whitespace().collect();
-            parts.first().and_then(|v| v.parse::<i32>().ok()).unwrap_or(0) > 0
+            parts
+                .first()
+                .and_then(|v| v.parse::<i32>().ok())
+                .unwrap_or(0)
+                > 0
         })
         .unwrap_or(false);
     if ahead {
@@ -191,6 +207,9 @@ fn status_icon(flags: &str) -> &str {
     if flags.contains("missed") {
         return "✘";
     }
+    if flags.contains("orphan") {
+        return "⊘";
+    }
     if flags.contains("unlinked") {
         return "~";
     }
@@ -224,10 +243,20 @@ fn status_color(flags: &str) -> &str {
     if flags.contains("missed") {
         return "31"; // red
     }
+    if flags == "orphan" {
+        return "33"; // yellow: safe to remove, target still valid
+    }
+    if flags.contains("orphan") {
+        return "91"; // bright red: broken orphan
+    }
     if flags == "unlinked" {
         return "33"; // yellow
     }
-    if flags.contains("dirty") || flags.contains("ref-mismatch") || flags.contains("stale") || flags.contains("unlinked") {
+    if flags.contains("dirty")
+        || flags.contains("ref-mismatch")
+        || flags.contains("stale")
+        || flags.contains("unlinked")
+    {
         return "91"; // bright red
     }
     if flags.contains('+') || flags.contains('-') {
@@ -244,8 +273,12 @@ fn colorize(text: &str, ansi_code: &str, bold: bool) -> String {
     }
 }
 
-fn print_table(statuses: &[RepoStatus], out: &mut dyn Write) -> Result<()> {
-    if statuses.is_empty() {
+fn print_table(
+    statuses: &[RepoStatus],
+    orphans: &[crate::resolve::OrphanLink],
+    out: &mut dyn Write,
+) -> Result<()> {
+    if statuses.is_empty() && orphans.is_empty() {
         return Ok(());
     }
 
@@ -274,6 +307,21 @@ fn print_table(statuses: &[RepoStatus], out: &mut dyn Write) -> Result<()> {
             mode,
             ref_str,
             expected,
+            flags,
+        ]);
+    }
+
+    // Append orphaned-symlink rows
+    for o in orphans {
+        let flags = if o.broken { "orphan, broken" } else { "orphan" }.to_string();
+        let icon = status_icon(&flags).to_string();
+        rows.push([
+            icon,
+            o.link_path.display().to_string(),
+            "-".to_string(),
+            "-".to_string(),
+            "—".to_string(),
+            String::new(),
             flags,
         ]);
     }
@@ -329,8 +377,12 @@ fn print_table(statuses: &[RepoStatus], out: &mut dyn Write) -> Result<()> {
     Ok(())
 }
 
-fn print_json(statuses: &[RepoStatus], out: &mut dyn Write) -> Result<()> {
-    let data: Vec<serde_json::Value> = statuses
+fn print_json(
+    statuses: &[RepoStatus],
+    orphans: &[crate::resolve::OrphanLink],
+    out: &mut dyn Write,
+) -> Result<()> {
+    let mut data: Vec<serde_json::Value> = statuses
         .iter()
         .map(|s| {
             serde_json::json!({
@@ -349,6 +401,13 @@ fn print_json(statuses: &[RepoStatus], out: &mut dyn Write) -> Result<()> {
             })
         })
         .collect();
+    for o in orphans {
+        data.push(serde_json::json!({
+            "directory": o.link_path.display().to_string(),
+            "orphan": true,
+            "broken": o.broken,
+        }));
+    }
     writeln!(out, "{}", serde_json::to_string_pretty(&data).unwrap())?;
     Ok(())
 }

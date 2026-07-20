@@ -159,6 +159,118 @@ pub fn create_symlinks(
     Ok(())
 }
 
+/// An orphaned symlink: a gitscale-managed symlink that is no longer declared
+/// in any config.
+#[derive(Debug, Clone)]
+pub struct OrphanLink {
+    /// Path (relative to `config_root`) of the orphaned symlink.
+    pub link_path: PathBuf,
+    /// True when the symlink target no longer exists on disk.
+    pub broken: bool,
+}
+
+/// Find gitscale-managed symlinks that are no longer declared in config.
+///
+/// A symlink qualifies as an orphan when it lives inside a recursive repo's
+/// checkout, follows gitscale's relative-link-to-config-root-sibling pattern
+/// (e.g. `../repo` or `../../repo`), and is not in the current `expected`
+/// symlink set. This heuristic avoids removing a user's own internal symlinks.
+pub fn find_orphan_links(
+    root_repos: &[RepoEntry],
+    config_root: &Path,
+    expected: &[SymlinkEntry],
+) -> Vec<OrphanLink> {
+    let expected_set: std::collections::HashSet<&Path> =
+        expected.iter().map(|e| e.link_path.as_path()).collect();
+
+    let mut orphans = Vec::new();
+    for entry in root_repos {
+        if !entry.recursive {
+            continue;
+        }
+        let repo_dir = config_root.join(&entry.directory);
+        if !repo_dir.is_dir() || repo_dir.is_symlink() {
+            continue;
+        }
+        scan_orphans(&repo_dir, config_root, &expected_set, &mut orphans);
+    }
+    orphans
+}
+
+fn scan_orphans(
+    dir: &Path,
+    config_root: &Path,
+    expected_set: &std::collections::HashSet<&Path>,
+    orphans: &mut Vec<OrphanLink>,
+) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name() == ".git" {
+            continue;
+        }
+        let path = entry.path();
+        let is_symlink = path
+            .symlink_metadata()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+        if is_symlink {
+            // Never descend into symlinks; just classify them.
+            if let Some(orphan) = classify_orphan(&path, config_root, expected_set) {
+                orphans.push(orphan);
+            }
+        } else if path.is_dir() {
+            scan_orphans(&path, config_root, expected_set, orphans);
+        }
+    }
+}
+
+fn classify_orphan(
+    link_abs: &Path,
+    config_root: &Path,
+    expected_set: &std::collections::HashSet<&Path>,
+) -> Option<OrphanLink> {
+    let link_rel = link_abs.strip_prefix(config_root).ok()?;
+    if expected_set.contains(link_rel) {
+        return None;
+    }
+    let target = fs::read_link(link_abs).ok()?;
+    // gitscale only ever creates relative symlinks.
+    if target.is_absolute() {
+        return None;
+    }
+    let resolved = lexical_join(link_abs.parent()?, &target);
+    // gitscale links always point to a direct child of the config root.
+    if resolved.parent() != Some(config_root) {
+        return None;
+    }
+    Some(OrphanLink {
+        link_path: link_rel.to_path_buf(),
+        broken: !link_abs.exists(),
+    })
+}
+
+/// Lexically join `base` with `rel`, resolving `.` and `..` components without
+/// touching the filesystem (so it works for broken symlinks).
+fn lexical_join(base: &Path, rel: &Path) -> PathBuf {
+    let mut result: Vec<Component> = base.components().collect();
+    for comp in rel.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(result.last(), Some(Component::Normal(_))) {
+                    result.pop();
+                } else {
+                    result.push(comp);
+                }
+            }
+            other => result.push(other),
+        }
+    }
+    result.iter().collect()
+}
+
 /// Checkout resolved revisions for repos that had an empty revision in root
 /// config but got one adopted from a child.
 pub fn apply_resolved_revisions(
@@ -288,5 +400,24 @@ mod tests {
         );
         // Unparseable URLs fall back to strip-.git + lowercase.
         assert_eq!(normalize_url("file:///Tmp/Repo.git"), "file:///tmp/repo");
+    }
+
+    #[test]
+    fn test_lexical_join_parent() {
+        // `../sibling` from a repo dir resolves to a config-root sibling.
+        assert_eq!(
+            lexical_join(Path::new("/root/repoA"), Path::new("../repoB")),
+            PathBuf::from("/root/repoB")
+        );
+        // Nested dep path `../../repo` resolves the same way.
+        assert_eq!(
+            lexical_join(Path::new("/root/repoA/libs"), Path::new("../../repoB")),
+            PathBuf::from("/root/repoB")
+        );
+        // CurDir components are ignored.
+        assert_eq!(
+            lexical_join(Path::new("/root/repoA"), Path::new("./x")),
+            PathBuf::from("/root/repoA/x")
+        );
     }
 }

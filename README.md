@@ -113,11 +113,16 @@ gitscale push libs/core         # push one
 
 ### `gitscale sync [NAMES...]`
 
-Full sync: clone + pull + push in sequence.
+Full sync: clone + pull + push in sequence. After syncing, it also:
+
+- **Reconciles remotes** — updates each clone's `origin` URL to match the configured URL (e.g. after switching from HTTPS to SSH).
+- **Relinks** — restores symlinks for recursive dependencies. A clone that replaced an expected symlink is relinked automatically when clean; if it has local modifications, use `--force`.
+- **Removes orphaned symlinks** — leftover gitscale symlinks whose dependency was removed from config. Broken orphans (target missing) are removed automatically; orphans whose target still resolves require `--force`.
 
 ```
 gitscale sync                   # sync all
 gitscale sync libs/core         # sync one
+gitscale sync --force           # also relink modified clones / remove valid-target orphans
 ```
 
 ### `gitscale status`
@@ -150,6 +155,8 @@ Status icons and flags:
 | `~` | yellow | **unlinked** | Expected symlink replaced by real clone (safe to relink) |
 | `~` | red | **unlinked, modified** | Unlinked clone has local changes (unsafe to relink) |
 | `~` | red | **unlinked, dirty** | Unlinked clone is clean, but the parent repo has uncommitted changes  (unsafe to relink) |
+| `⊘` | yellow | **orphan** | Leftover gitscale symlink whose dependency was removed from config (target still resolves) |
+| `⊘` | red | **orphan, broken** | Leftover gitscale symlink whose target no longer exists |
 | `!` | red | **dirty** | Uncommitted changes |
 | `≠` | red | **ref-mismatch** | On a different branch than declared |
 | `≠` | red | **stale** | Shallow clone: local differs from upstream |

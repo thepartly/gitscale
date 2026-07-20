@@ -20,14 +20,16 @@ pub fn run(
     reconcile_remotes(root, names, out)?;
     // pull runs its own post_sync hook, skip it here to avoid double-run
     crate::commands::pull::run_no_hooks(root, names, verbose, interactive, out, err)?;
-    crate::commands::push::run(root, names, verbose, interactive, out, err)?;
 
     let config_path = find_config(root)?;
     let config_root = config_path.parent().unwrap().to_path_buf();
     let config = load_config(&config_path)?;
 
-    // Relink: restore symlinks for unlinked clones
+    // Restore symlinks for unlinked clones and remove orphaned links before
+    // pushing, so local hygiene isn't blocked by a remote/auth failure.
     relink(&config.repos, &config_root, force, out)?;
+
+    crate::commands::push::run(root, names, verbose, interactive, out, err)?;
 
     hooks::run_post_sync(&config.hooks, &config_root, verbose, out)?;
     Ok(())
@@ -60,6 +62,26 @@ fn relink(
     out: &mut dyn Write,
 ) -> Result<()> {
     let (symlinks, _) = resolve_recursive(repos, config_root)?;
+
+    // Remove orphaned symlinks (links whose dep was removed from config).
+    // Broken orphans are always safe to remove; orphans that still resolve to a
+    // valid checkout are only removed with --force.
+    let orphans = crate::resolve::find_orphan_links(repos, config_root, &symlinks);
+    let mut orphan_skipped = 0usize;
+    for orphan in &orphans {
+        let link_abs = config_root.join(&orphan.link_path);
+        if orphan.broken || force {
+            std::fs::remove_file(&link_abs)?;
+            writeln!(out, "  unlink  {} (orphan)", orphan.link_path.display())?;
+        } else {
+            writeln!(
+                out,
+                "  skip  {} (orphan with valid target, use --force to remove)",
+                orphan.link_path.display()
+            )?;
+            orphan_skipped += 1;
+        }
+    }
 
     let mut skipped = 0usize;
 
@@ -94,11 +116,21 @@ fn relink(
     // Restore symlinks for any that were removed
     create_symlinks(&symlinks, config_root, out)?;
 
-    if skipped > 0 {
-        anyhow::bail!(
-            "{} unlinked repo(s) have local modifications (use --force to override)",
-            skipped
-        );
+    if skipped > 0 || orphan_skipped > 0 {
+        let mut parts = Vec::new();
+        if skipped > 0 {
+            parts.push(format!(
+                "{} unlinked repo(s) with local modifications",
+                skipped
+            ));
+        }
+        if orphan_skipped > 0 {
+            parts.push(format!(
+                "{} orphaned link(s) with valid targets",
+                orphan_skipped
+            ));
+        }
+        anyhow::bail!("{} (use --force to override)", parts.join(" and "));
     }
 
     Ok(())

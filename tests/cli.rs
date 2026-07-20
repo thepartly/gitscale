@@ -1257,3 +1257,120 @@ fn status_shows_unlinked_modified() {
     assert!(plain.contains("unlinked"), "expected 'unlinked': {}", plain);
     assert!(plain.contains("modified"), "expected 'modified': {}", plain);
 }
+
+// ---------------------------------------------------------------------------
+// Orphaned symlinks
+// ---------------------------------------------------------------------------
+
+/// Helper: set up a workspace with repoA (recursive) depending on repoB, clone
+/// it, then plant an orphaned gitscale-style symlink `repoA/libs/c -> ../../repoC`
+/// for a dependency that is not declared anywhere (simulating a removed dep).
+/// When `valid_target` is true the target `repoC` dir is created so the orphan
+/// resolves; otherwise the orphan is left broken. Returns (env, orphan_link).
+fn setup_orphan_env(name: &str, valid_target: bool) -> (TestEnv, std::path::PathBuf) {
+    let env = TestEnv::new(name);
+
+    let bare_b = env.create_bare_repo("repoB", "main", &[("b.txt", "hello from B")]);
+    let bare_a = env.create_bare_repo(
+        "repoA",
+        "main",
+        &[
+            ("a.txt", "hello from A"),
+            (
+                ".gitscale.toml",
+                &format!(
+                    "[repos]\n\"libs/b\" = {{ url = \"{}\", revision = \"main\" }}\n",
+                    bare_b.display()
+                ),
+            ),
+        ],
+    );
+
+    env.write_config(&format!(
+        r#"[repos]
+"repoA" = {{ url = "{}", revision = "main", recursive = true }}
+"repoB" = {{ url = "{}", revision = "main" }}
+"#,
+        bare_a.display(),
+        bare_b.display(),
+    ));
+
+    let out = env.run(&["clone"]);
+    assert!(out.success, "clone failed: {}", out.stderr);
+
+    // Plant an orphaned gitscale-style symlink for an undeclared dependency.
+    let orphan = env.playground.join("repoA/libs/c");
+    std::os::unix::fs::symlink("../../repoC", &orphan).unwrap();
+    if valid_target {
+        std::fs::create_dir_all(env.playground.join("repoC")).unwrap();
+        std::fs::write(env.playground.join("repoC/c.txt"), "hello from C").unwrap();
+    }
+
+    (env, orphan)
+}
+
+#[test]
+fn status_shows_orphan() {
+    let (env, _orphan) = setup_orphan_env("status_shows_orphan", true);
+
+    let out = env.run(&["status"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+
+    let plain = strip_ansi(&out.stdout);
+    assert!(
+        plain.contains("orphan"),
+        "expected 'orphan' in status output: {}",
+        plain
+    );
+}
+
+#[test]
+fn sync_removes_broken_orphan_by_default() {
+    let (env, orphan) = setup_orphan_env("sync_removes_broken_orphan", false);
+
+    // A broken orphan (target missing) is removed automatically, no --force.
+    let out = env.run(&["sync"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+
+    assert!(
+        std::fs::symlink_metadata(&orphan).is_err(),
+        "expected broken orphan symlink to be removed"
+    );
+}
+
+#[test]
+fn sync_skips_orphan_with_valid_target_without_force() {
+    let (env, orphan) = setup_orphan_env("sync_skips_orphan_valid", true);
+
+    // An orphan whose target still resolves requires --force.
+    let out = env.run(&["sync"]);
+    assert!(
+        !out.success,
+        "expected sync to fail when skipping orphan with valid target"
+    );
+    assert!(
+        out.stdout.contains("orphan") || out.stderr.contains("orphan"),
+        "expected orphan message, stdout: {}, stderr: {}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        std::fs::symlink_metadata(&orphan)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false),
+        "orphan symlink with valid target should remain without --force"
+    );
+}
+
+#[test]
+fn sync_force_removes_orphan_with_valid_target() {
+    let (env, orphan) = setup_orphan_env("sync_force_removes_orphan", true);
+
+    let out = env.run(&["sync", "--force"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+
+    assert!(
+        std::fs::symlink_metadata(&orphan).is_err(),
+        "expected orphan symlink to be removed with --force"
+    );
+}
