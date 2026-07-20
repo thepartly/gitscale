@@ -74,6 +74,31 @@ pub fn clone_repo(entry: &RepoEntry, root: &Path, verbose: bool, shallow: bool) 
     Ok(())
 }
 
+/// Ensure an existing clone's `origin` remote URL matches the configured URL.
+/// Returns `true` if the remote was updated.
+pub fn reconcile_remote(entry: &RepoEntry, root: &Path) -> Result<bool> {
+    if entry.is_artefact() {
+        return Ok(false);
+    }
+    let dest = root.join(&entry.directory);
+    if !dest.exists() {
+        return Ok(false);
+    }
+    let current = run_git(&["remote", "get-url", "origin"], Some(&dest), false)?;
+    if !current.status.success() {
+        return Ok(false);
+    }
+    if stdout_str(&current) == entry.repo_url {
+        return Ok(false);
+    }
+    run_git(
+        &["remote", "set-url", "origin", &entry.repo_url],
+        Some(&dest),
+        true,
+    )?;
+    Ok(true)
+}
+
 pub fn checkout_revision(entry: &RepoEntry, root: &Path) -> Result<()> {
     let dest = root.join(&entry.directory);
     // Try branch checkout first, then detached HEAD for tags/SHAs

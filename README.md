@@ -149,6 +149,7 @@ Status icons and flags:
 | `⤷` | cyan | **symlink** | Resolved as symlink to parent-level checkout |
 | `~` | yellow | **unlinked** | Expected symlink replaced by real clone (safe to relink) |
 | `~` | red | **unlinked, modified** | Unlinked clone has local changes (unsafe to relink) |
+| `~` | red | **unlinked, dirty** | Unlinked clone is clean, but the parent repo has uncommitted changes  (unsafe to relink) |
 | `!` | red | **dirty** | Uncommitted changes |
 | `≠` | red | **ref-mismatch** | On a different branch than declared |
 | `≠` | red | **stale** | Shallow clone: local differs from upstream |
@@ -310,6 +311,49 @@ GitScale matches the URL, skips cloning, and creates a symlink: `core/libs/share
 - **Root revision wins.** If root specifies a revision, child declarations are ignored silently.
 - **Revision deferral.** If root omits `revision`, the child's revision is adopted. If multiple children disagree, GitScale errors out and asks you to pin one in the root config.
 - **Works with artefacts.** Extracted artefact folders are scanned for `.gitscale.toml` too.
+
+## Related tools
+
+GitScale occupies the same space as several multi-repo and vendoring tools. The last few rows include adjacent language-specific workspace managers for context rather than direct one-to-one equivalents.
+
+| Tool | Config | Approach | History in parent repo | Prebuilt artefacts | Dedup transitive deps | Language agnostic? |
+|------|--------|----------|------------------------|--------------------|-----------------------|--------------------|
+| **GitScale** | single `.gitscale.toml` | separate clones + symlinks | config-pinned revision | yes (S3) | yes (symlinks) | yes |
+| git submodules | `.gitmodules` + gitlink | separate clones | pinned SHA only | no | no (nested copies) | yes |
+| git subtree | none (in-tree) | merged into main tree | yes (full) | no | no | yes |
+| [git-subrepo](https://github.com/ingydotnet/git-subrepo) | `.gitrepo` per subdir | merged into main tree | yes (squashed) | no | no | yes |
+| [Google repo](https://gerrit.googlesource.com/git-repo) | `manifest.xml` | separate clones | no | no | no | yes |
+| [vcstool](https://github.com/dirk-thomas/vcstool) | `.repos` YAML | separate clones | no | no | no | yes |
+| [west](https://github.com/zephyrproject-rtos/west) | `west.yml` | separate clones | no | no | no | mostly |
+| [myrepos (mr)](https://myrepos.branchable.com/) | `.mrconfig` | separate clones, any VCS | no | no | no | yes |
+| [meta](https://github.com/mateodelnorte/meta) | `.meta` JSON | separate clones + plugins | no | no | no | yes |
+| [gclient](https://chromium.googlesource.com/chromium/tools/depot_tools) | `DEPS` (Python) | separate clones + hooks | no | no | no | mostly |
+| Yarn workspaces | `package.json` | JS/TS monorepo workspace | yes (full) | no | package-level hoisting | no |
+| Cargo workspaces | `Cargo.toml` | Rust multi-crate workspace | yes (full) | no | shared workspace, not repo dedup | no |
+| Go workspaces | `go.work` | Go multi-module workspace | yes (full) | no | module-level, not repo dedup | no |
+
+### GitScale highlights
+
+- **Readonly enforcement.** Vendored dependencies have their write bits stripped on disk, so accidental edits fail loudly instead of drifting silently. Submodules, repo, and vcstool leave everything writable.
+- **Artefact mode.** Entries can be pulled as prebuilt `tar.gz` archives from any S3-compatible bucket instead of cloned — useful for large generated outputs or closed-source blobs. No comparable tool ships this; you'd otherwise bolt on a separate artefact/LFS pipeline.
+- **Native S3 storage.** Signing and transfer are built in (no `aws` CLI or SDK required); works with AWS, MinIO, R2, B2, Spaces, GCS, or a local directory.
+- **Transitive dedup via symlinks.** When two nested configs depend on the same repo, GitScale checks it out once at the root and symlinks the rest, avoiding duplicate clones. Submodules and repo produce independent nested copies.
+- **CI-aware shallow cloning.** Automatically shallow-clones everything under `CI=1`, and readonly repos are always shallow — faster, smaller checkouts without extra flags.
+- **Rich, single-glance status.** One `status` table (with JSON output) surfaces ahead/behind, detached, ref-mismatch, dirty, stale, and broken-symlink states across every repo.
+- **One human-readable config.** A single TOML file versus `.gitmodules` + gitlink entries, XML manifests, or Python `DEPS`.
+
+### Design choices
+
+- **Separate history per repo.** subtree and git-subrepo vendor code *into* your main repo, so the dependency's file history lives directly in the parent repository. GitScale keeps sub-repos as separate working trees by design, while the parent repo tracks the selected dependency revision in `.gitscale.toml`.
+- **External binary.** Submodules and subtree ship with git and need no extra install; GitScale is a separate binary.
+- **Git-only.** myrepos handles Git, Mercurial, Bazaar, SVN, and more. GitScale targets Git (plus its own artefact archives).
+- **Simpler workflow model.** Google repo and west help coordinate branch creation, topic work, and release manifests across many repos. GitScale can pin each dependency to a branch, tag, or commit, but it does not try to manage a shared multi-repo branching lifecycle. When `.gitscale.toml` pins child repos to immutable tags or commit SHAs, that config effectively becomes the release manifest: the system version is defined as an assembly of specific subsystem versions.
+- **Self-contained tool.** meta has a plugin system and repo/gclient have larger surrounding ecosystems, while GitScale keeps the core workflow built into one tool. That simplifies operation and keeps behavior directly controllable for Partly's needs.
+- **Linux-first symlink dedup.** Symlink-based dedup is efficient and natural on Linux, which is the primary development environment for Partly engineers. The tradeoff is that it is more awkward on Windows without developer mode or elevated privileges.
+
+### When to pick GitScale
+
+Choose GitScale when you want submodule-style separate checkouts but with a friendlier single config, enforced-readonly vendoring, prebuilt artefact delivery, and automatic deduplication of shared transitive dependencies. Prefer subtree/git-subrepo if you need everything in one repo and one history, or Google repo/west if you're managing a very large manifest-driven project with heavy multi-branch workflows.
 
 ## License
 

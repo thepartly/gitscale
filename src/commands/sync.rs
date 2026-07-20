@@ -17,6 +17,7 @@ pub fn run(
     err: &mut dyn Write,
 ) -> Result<()> {
     crate::commands::clone::run(root, names, verbose, interactive, out, err)?;
+    reconcile_remotes(root, names, out)?;
     // pull runs its own post_sync hook, skip it here to avoid double-run
     crate::commands::pull::run_no_hooks(root, names, verbose, interactive, out, err)?;
     crate::commands::push::run(root, names, verbose, interactive, out, err)?;
@@ -29,6 +30,26 @@ pub fn run(
     relink(&config.repos, &config_root, force, out)?;
 
     hooks::run_post_sync(&config.hooks, &config_root, verbose, out)?;
+    Ok(())
+}
+
+/// Update each existing clone's `origin` remote to match the configured URL.
+fn reconcile_remotes(root: Option<&Path>, names: &[String], out: &mut dyn Write) -> Result<()> {
+    let config_path = find_config(root)?;
+    let config_root = config_path.parent().unwrap().to_path_buf();
+    let config = load_config(&config_path)?;
+    let selected = crate::commands::clone::filter_entries(&config.repos, names)?;
+
+    let mut header_done = false;
+    for entry in &selected {
+        if crate::git::reconcile_remote(entry, &config_root)? {
+            if !header_done {
+                writeln!(out, "Reconciling remotes...")?;
+                header_done = true;
+            }
+            writeln!(out, "  update  {} -> {}", entry.directory, entry.repo_url)?;
+        }
+    }
     Ok(())
 }
 
