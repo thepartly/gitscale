@@ -301,6 +301,39 @@ pub fn push_repo(entry: &RepoEntry, root: &Path, _verbose: bool) -> Result<()> {
     Ok(())
 }
 
+/// Stage all changes (including untracked) and commit them with `message`.
+/// Returns `Ok(true)` if a commit was created, `Ok(false)` if the working tree
+/// was already clean (nothing to commit).
+pub fn commit_path(dir: &Path, message: &str) -> Result<bool> {
+    if !dir.exists() {
+        return Ok(false);
+    }
+    // Nothing to commit if the working tree is clean.
+    let porcelain = run_git(&["status", "--porcelain"], Some(dir), true)?;
+    if stdout_str(&porcelain).is_empty() {
+        return Ok(false);
+    }
+    run_git(&["add", "-A"], Some(dir), true)?;
+    run_git(&["commit", "-m", message], Some(dir), true)?;
+    Ok(true)
+}
+
+/// Returns true when `dir` is the top level of its own git repository (not
+/// merely nested inside some ancestor git repo).
+pub fn is_repo_root(dir: &Path) -> bool {
+    run_git(&["rev-parse", "--show-toplevel"], Some(dir), false)
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            let top = std::path::PathBuf::from(stdout_str(&o));
+            match (fs::canonicalize(&top), fs::canonicalize(dir)) {
+                (Ok(a), Ok(b)) => a == b,
+                _ => false,
+            }
+        })
+        .unwrap_or(false)
+}
+
 // ---------------------------------------------------------------------------
 // Status
 // ---------------------------------------------------------------------------

@@ -59,6 +59,14 @@ enum Commands {
         force: bool,
         names: Vec<String>,
     },
+    /// Commit local changes across sub-repositories with one shared message
+    Commit {
+        #[arg(short = 'C', long)]
+        root: Option<PathBuf>,
+        #[arg(short = 'm', long)]
+        message: String,
+        names: Vec<String>,
+    },
     /// Show status of repos declared in .gitscale.toml
     Status {
         #[arg(short = 'C', long)]
@@ -137,6 +145,11 @@ fn run_cli_inner(
         Commands::Sync { root, force, names } => {
             commands::sync::run(root.as_deref(), &names, verbose, force, interactive, out, err)
         }
+        Commands::Commit {
+            root,
+            message,
+            names,
+        } => commands::commit::run(root.as_deref(), &names, &message, interactive, out, err),
         Commands::Status {
             root,
             fetch,

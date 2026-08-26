@@ -1374,3 +1374,104 @@ fn sync_force_removes_orphan_with_valid_target() {
         "expected orphan symlink to be removed with --force"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Commit
+// ---------------------------------------------------------------------------
+
+/// Run git in `cwd` and return trimmed stdout (panics on failure).
+fn git_stdout(cwd: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("failed to run git");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// Clone a single writable repo and configure a commit identity on it.
+fn setup_commit_env(name: &str) -> (TestEnv, std::path::PathBuf, std::path::PathBuf) {
+    let env = TestEnv::new(name);
+    let bare = env.create_bare_repo("mylib", "main", &[("README.md", "# v1\n")]);
+    env.write_config(&format!(
+        "[repos]\n\"libs/mylib\" = {{ url = \"{}\", revision = \"main\" }}\n",
+        bare.display()
+    ));
+    let out = env.run(&["clone"]);
+    assert!(out.success, "clone failed: {}", out.stderr);
+
+    let clone = env.playground.join("libs/mylib");
+    helpers::run_git_pub(&clone, &["config", "user.email", "t@t.com"]);
+    helpers::run_git_pub(&clone, &["config", "user.name", "T"]);
+    (env, bare, clone)
+}
+
+#[test]
+fn commit_commits_dirty_repo() {
+    let (env, _bare, clone) = setup_commit_env("commit_dirty");
+
+    // Make it dirty: modify a tracked file and add an untracked one.
+    std::fs::write(clone.join("README.md"), "# v2\n").unwrap();
+    std::fs::write(clone.join("new.txt"), "new").unwrap();
+
+    let out = env.run(&["commit", "-m", "test commit"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+
+    // Working tree should be clean afterwards.
+    assert!(
+        git_stdout(&clone, &["status", "--porcelain"]).is_empty(),
+        "expected clean working tree after commit"
+    );
+    // The commit has our message and includes the untracked file (git add -A).
+    assert_eq!(git_stdout(&clone, &["log", "-1", "--pretty=%s"]), "test commit");
+    let files = git_stdout(&clone, &["show", "--name-only", "--pretty=format:", "HEAD"]);
+    assert!(files.contains("new.txt"), "expected new.txt in commit: {}", files);
+}
+
+#[test]
+fn commit_skips_clean_repo() {
+    let (env, _bare, _clone) = setup_commit_env("commit_clean");
+
+    let out = env.run(&["commit", "-m", "nothing to do"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    let plain = strip_ansi(&out.stdout);
+    assert!(
+        plain.contains("clean") || plain.contains("skip"),
+        "expected a clean/skip message: {}",
+        plain
+    );
+}
+
+#[test]
+fn commit_rejects_empty_message() {
+    let (env, _bare, clone) = setup_commit_env("commit_empty_msg");
+    std::fs::write(clone.join("new.txt"), "new").unwrap();
+
+    let out = env.run(&["commit", "-m", ""]);
+    assert!(!out.success, "expected failure on empty commit message");
+}
+
+#[test]
+fn commit_then_push_propagates() {
+    let (env, bare, clone) = setup_commit_env("commit_then_push");
+
+    std::fs::write(clone.join("README.md"), "# v2\n").unwrap();
+    let out = env.run(&["commit", "-m", "propagated"]);
+    assert!(out.success, "commit stderr: {}", out.stderr);
+
+    let out = env.run(&["push"]);
+    assert!(out.success, "push stderr: {}", out.stderr);
+
+    // The bare remote's main branch now carries our commit.
+    assert_eq!(
+        git_stdout(&bare, &["log", "-1", "--pretty=%s", "main"]),
+        "propagated"
+    );
+}
+
