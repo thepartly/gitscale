@@ -105,7 +105,25 @@ pub fn run_cli(args: &[&str]) -> CliOutput {
     let mut stderr_buf = Vec::new();
     let interactive = progress::is_interactive();
 
-    let success = match run_cli_inner(args, interactive, &mut stdout_buf, &mut stderr_buf) {
+    let cli = match Cli::try_parse_from(args) {
+        Ok(cli) => cli,
+        Err(e) => {
+            use clap::error::ErrorKind;
+            let success = matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion);
+            if success {
+                let _ = write!(stdout_buf, "{}", e);
+            } else {
+                let _ = write!(stderr_buf, "{}", e);
+            }
+            return CliOutput {
+                stdout: String::from_utf8_lossy(&stdout_buf).into_owned(),
+                stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
+                success,
+            };
+        }
+    };
+
+    let success = match run_cli_inner(cli, interactive, &mut stdout_buf, &mut stderr_buf) {
         Ok(()) => true,
         Err(e) => {
             let _ = writeln!(stderr_buf, "Error: {}", e);
@@ -121,12 +139,11 @@ pub fn run_cli(args: &[&str]) -> CliOutput {
 }
 
 fn run_cli_inner(
-    args: &[&str],
+    cli: Cli,
     interactive: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
-    let cli = Cli::try_parse_from(args)?;
     let verbose = cli.verbose;
 
     match cli.command {

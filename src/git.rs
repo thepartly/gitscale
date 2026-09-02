@@ -28,10 +28,21 @@ fn run_git(args: &[&str], cwd: Option<&Path>, check: bool) -> Result<std::proces
         .with_context(|| format!("failed to run: git {}", args.join(" ")))?;
     if check && !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let msg = stderr.trim().lines().next().unwrap_or("unknown error");
-        bail!("{}", msg);
+        bail!("{}", git_error_line(&stderr));
     }
     Ok(output)
+}
+
+/// Pick the most relevant line from git/ssh stderr output. Advisory notices
+/// (e.g. openssh's post-quantum key exchange warning) print early, ahead of
+/// the actual failure, so a plain "first line" pick reports the wrong thing.
+fn git_error_line(stderr: &str) -> &str {
+    let trimmed = stderr.trim();
+    trimmed
+        .lines()
+        .find(|l| l.contains("fatal:") || l.contains("error:"))
+        .or_else(|| trimmed.lines().last())
+        .unwrap_or("unknown error")
 }
 
 fn stdout_str(output: &std::process::Output) -> String {
@@ -635,5 +646,35 @@ pub fn get_artefact_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
         symlink_target: String::new(),
         has_unlinked: false,
         has_unlinked_modified: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::git_error_line;
+
+    #[test]
+    fn picks_fatal_line_over_leading_warning() {
+        let stderr = "** WARNING: connection is not using a post-quantum key exchange algorithm.\n\
+                       git@gitlab.partly.pro: Permission denied (publickey).\n\
+                       fatal: Could not read from remote repository.\n\
+                       \n\
+                       Please make sure you have the correct access rights\n\
+                       and the repository exists.";
+        assert_eq!(
+            git_error_line(stderr),
+            "fatal: Could not read from remote repository."
+        );
+    }
+
+    #[test]
+    fn falls_back_to_last_line_when_no_fatal_marker() {
+        let stderr = "Cloning into 'repo'...\nsomething went sideways";
+        assert_eq!(git_error_line(stderr), "something went sideways");
+    }
+
+    #[test]
+    fn falls_back_to_unknown_error_when_empty() {
+        assert_eq!(git_error_line(""), "unknown error");
     }
 }
