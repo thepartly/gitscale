@@ -57,9 +57,31 @@ impl RepoEntry {
     }
 }
 
+/// What a git-hook-triggered pull should do when it fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnHookError {
+    /// Return non-zero, failing the git operation that triggered the hook.
+    Fail,
+    /// Report on stderr but let the git operation succeed.
+    Warn,
+}
+
+impl OnHookError {
+    /// Unconfigured, CI fails fast; interactive use only warns, so a broken
+    /// pull cannot make unrelated `git checkout` calls look like failures.
+    pub fn resolved(configured: Option<Self>) -> Self {
+        configured.unwrap_or(if crate::git::is_ci() {
+            Self::Fail
+        } else {
+            Self::Warn
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Hooks {
     pub post_sync: Option<String>,
+    pub on_pull_error: Option<OnHookError>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +101,7 @@ struct RawConfig {
 #[derive(Deserialize)]
 struct RawHooks {
     post_sync: Option<String>,
+    on_pull_error: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -123,7 +146,7 @@ pub fn load_config(config_path: &Path) -> Result<GitScaleConfig> {
 
     let storage_url = parse_storage(raw.storage.as_ref(), config_path)?;
     let repos = parse_repos(raw.repos.as_ref(), config_path)?;
-    let hooks = parse_hooks(raw.hooks.as_ref());
+    let hooks = parse_hooks(raw.hooks.as_ref(), config_path)?;
 
     Ok(GitScaleConfig {
         repos,
@@ -191,13 +214,24 @@ fn parse_repos(
     Ok(entries)
 }
 
-fn parse_hooks(raw: Option<&RawHooks>) -> Hooks {
+fn parse_hooks(raw: Option<&RawHooks>, config_path: &Path) -> Result<Hooks> {
     let Some(hooks) = raw else {
-        return Hooks::default();
+        return Ok(Hooks::default());
     };
-    Hooks {
+    let on_pull_error = match hooks.on_pull_error.as_deref() {
+        None => None,
+        Some("fail") => Some(OnHookError::Fail),
+        Some("warn") => Some(OnHookError::Warn),
+        Some(other) => bail!(
+            "{}: invalid hooks.on_pull_error '{}' (expected \"fail\" or \"warn\")",
+            config_path.display(),
+            other
+        ),
+    };
+    Ok(Hooks {
         post_sync: hooks.post_sync.clone(),
-    }
+        on_pull_error,
+    })
 }
 
 pub fn write_config(config_path: &Path, entries: &[RepoEntry], storage_url: &str) -> Result<()> {

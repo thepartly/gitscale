@@ -17,6 +17,10 @@ fn run_git(args: &[&str], cwd: Option<&Path>, check: bool) -> Result<std::proces
     cmd.args(args);
     cmd.stdin(Stdio::null());
     cmd.env("GIT_TERMINAL_PROMPT", "0");
+    // Marks every git call gitscale makes, so an installed gitscale git hook
+    // can tell re-entry from a genuine user operation and bail out. Without
+    // it, a hook that runs `gitscale pull` recurses without bound.
+    cmd.env("GITSCALE_HOOK", "1");
     cmd.env("GIT_ASKPASS", "");
     cmd.env("SSH_ASKPASS", "");
     cmd.env("SSH_ASKPASS_REQUIRE", "never");
@@ -53,6 +57,42 @@ fn stdout_str(output: &std::process::Output) -> String {
 // Core operations
 // ---------------------------------------------------------------------------
 
+/// True if `revision` names a commit rather than a branch or tag. `git clone
+/// --branch` accepts only branch and tag names, so a SHA-pinned entry cannot
+/// be cloned shallowly the usual way.
+fn looks_like_sha(revision: &str) -> bool {
+    revision.len() >= 7 && revision.len() <= 64 && revision.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Shallow-clone a repo pinned to a commit SHA: init an empty repo and fetch
+/// just that commit. Returns `false` if the remote refused to serve the commit
+/// (not every server allows fetching an arbitrary SHA), leaving the caller to
+/// fall back to a full clone.
+fn shallow_clone_at_sha(entry: &RepoEntry, dest: &Path, verbose: bool) -> Result<bool> {
+    let progress = if verbose { "--progress" } else { "--quiet" };
+    fs::create_dir_all(dest).with_context(|| format!("cannot create {}", dest.display()))?;
+    run_git(&["init", "--quiet"], Some(dest), true)?;
+    run_git(
+        &["remote", "add", "origin", &entry.repo_url],
+        Some(dest),
+        true,
+    )?;
+    let fetched = run_git(
+        &["fetch", "--depth", "1", progress, "origin", &entry.revision],
+        Some(dest),
+        false,
+    )?;
+    if !fetched.status.success() {
+        return Ok(false);
+    }
+    run_git(
+        &["checkout", "--detach", progress, "FETCH_HEAD"],
+        Some(dest),
+        true,
+    )?;
+    Ok(true)
+}
+
 pub fn clone_repo(entry: &RepoEntry, root: &Path, verbose: bool, shallow: bool) -> Result<()> {
     if entry.is_artefact() {
         return Ok(());
@@ -62,22 +102,31 @@ pub fn clone_repo(entry: &RepoEntry, root: &Path, verbose: bool, shallow: bool) 
         bail!("Directory already exists: {}", dest.display());
     }
 
-    let dest_str = dest.to_string_lossy().to_string();
-    let mut args: Vec<&str> = vec!["clone", &entry.repo_url, &dest_str];
-    if shallow && !entry.revision.is_empty() {
-        args.extend_from_slice(&["--depth", "1", "--branch", &entry.revision]);
-    } else if shallow {
-        args.extend_from_slice(&["--depth", "1"]);
-    }
-    if verbose {
-        args.push("--progress");
+    if shallow && looks_like_sha(&entry.revision) {
+        if !shallow_clone_at_sha(entry, &dest, verbose)? {
+            // Remote would not serve the bare commit; retry unshallowed.
+            fs::remove_dir_all(&dest)
+                .with_context(|| format!("cannot clean up {}", dest.display()))?;
+            return clone_repo(entry, root, verbose, false);
+        }
     } else {
-        args.push("--quiet");
-    }
-    run_git(&args, None, true)?;
+        let dest_str = dest.to_string_lossy().to_string();
+        let mut args: Vec<&str> = vec!["clone", &entry.repo_url, &dest_str];
+        if shallow && !entry.revision.is_empty() {
+            args.extend_from_slice(&["--depth", "1", "--branch", &entry.revision]);
+        } else if shallow {
+            args.extend_from_slice(&["--depth", "1"]);
+        }
+        if verbose {
+            args.push("--progress");
+        } else {
+            args.push("--quiet");
+        }
+        run_git(&args, None, true)?;
 
-    if !shallow && !entry.revision.is_empty() {
-        checkout_revision(entry, root)?;
+        if !shallow && !entry.revision.is_empty() {
+            checkout_revision(entry, root)?;
+        }
     }
     if entry.is_readonly() {
         apply_readonly(&dest)?;
@@ -282,8 +331,29 @@ pub fn pull_repo(entry: &RepoEntry, root: &Path, verbose: bool, shallow: bool) -
 
     let result = (|| -> Result<()> {
         if is_shallow(&dest) {
-            run_git(&["fetch", "--depth", "1", "--quiet"], Some(&dest), true)?;
-            run_git(&["reset", "--hard", "@{upstream}"], Some(&dest), false)?;
+            if looks_like_sha(&entry.revision) {
+                // Detached at a commit: there is no @{upstream} to reset to.
+                run_git(
+                    &[
+                        "fetch",
+                        "--depth",
+                        "1",
+                        "--quiet",
+                        "origin",
+                        &entry.revision,
+                    ],
+                    Some(&dest),
+                    true,
+                )?;
+                run_git(
+                    &["reset", "--hard", "--quiet", "FETCH_HEAD"],
+                    Some(&dest),
+                    true,
+                )?;
+            } else {
+                run_git(&["fetch", "--depth", "1", "--quiet"], Some(&dest), true)?;
+                run_git(&["reset", "--hard", "@{upstream}"], Some(&dest), false)?;
+            }
         } else {
             let current = get_current_ref(entry, root)?;
             if current != entry.revision {

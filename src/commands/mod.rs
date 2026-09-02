@@ -2,6 +2,7 @@ pub mod add;
 pub mod clone;
 pub mod commit;
 pub mod fetch;
+pub mod hook;
 pub mod pull;
 pub mod push;
 pub mod remove;

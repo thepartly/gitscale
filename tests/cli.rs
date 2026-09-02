@@ -1481,3 +1481,137 @@ fn commit_then_push_propagates() {
     );
 }
 
+
+// ---------------------------------------------------------------------------
+// Shallow clones (CI forces --depth 1)
+// ---------------------------------------------------------------------------
+
+/// Run git against a bare repo and return trimmed stdout. Addresses the git
+/// dir explicitly, since discovery-based access to a bare repo is refused when
+/// the developer has `safe.bareRepository = explicit` set.
+#[cfg(test)]
+fn bare_git_stdout(bare: &std::path::Path, args: &[&str]) -> String {
+    let mut full = vec!["--git-dir", bare.to_str().unwrap()];
+    full.extend_from_slice(args);
+    let output = std::process::Command::new("git")
+        .args(&full)
+        .output()
+        .expect("failed to run git");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        full,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// Add a commit to `branch` of a bare repo via a throwaway clone.
+/// Returns the new commit SHA.
+#[cfg(test)]
+fn commit_to_bare(bare: &std::path::Path, branch: &str, file: &str, content: &str) -> String {
+    let tmp = bare.with_extension("commit-tmp");
+    let _ = std::fs::remove_dir_all(&tmp);
+    helpers::run_git_pub(
+        bare.parent().unwrap(),
+        &[
+            "clone",
+            bare.to_str().unwrap(),
+            tmp.to_str().unwrap(),
+            "--branch",
+            branch,
+        ],
+    );
+    helpers::run_git_pub(&tmp, &["config", "user.email", "test@test.com"]);
+    helpers::run_git_pub(&tmp, &["config", "user.name", "Test"]);
+    std::fs::write(tmp.join(file), content).unwrap();
+    helpers::run_git_pub(&tmp, &["add", "-A"]);
+    helpers::run_git_pub(&tmp, &["commit", "-m", "update"]);
+    helpers::run_git_pub(&tmp, &["push", "origin", &format!("{}:{}", branch, branch)]);
+    let sha = git_stdout(&tmp, &["rev-parse", "HEAD"]);
+    let _ = std::fs::remove_dir_all(&tmp);
+    sha
+}
+
+/// `git clone --branch` cannot name a commit, so shallow + SHA needs its own
+/// path. Exercised through `git::clone_repo` directly rather than by setting
+/// `CI=true`, which is process-global and would leak across parallel tests.
+#[cfg(test)]
+fn shallow_entry(url: &str, revision: &str) -> gitscale::config::RepoEntry {
+    gitscale::config::RepoEntry {
+        directory: "libs/mylib".to_string(),
+        repo_url: url.to_string(),
+        revision: revision.to_string(),
+        mode: gitscale::config::RepoMode::Readwrite,
+        recursive: false,
+    }
+}
+
+#[test]
+fn shallow_clone_pinned_to_sha() {
+    let env = TestEnv::new("shallow_clone_sha");
+    let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "a")]);
+    // file:// so --depth is honoured; git ignores it for plain local paths.
+    let url = format!("file://{}", bare.display());
+    let sha = bare_git_stdout(&bare, &["rev-parse", "main"]);
+
+    let entry = shallow_entry(&url, &sha);
+    gitscale::git::clone_repo(&entry, &env.playground, false, true)
+        .expect("shallow clone of a SHA-pinned revision should succeed");
+
+    let dest = env.playground.join("libs/mylib");
+    assert_eq!(
+        git_stdout(&dest, &["rev-parse", "HEAD"]),
+        sha,
+        "clone should be checked out at the pinned commit"
+    );
+    assert_eq!(
+        git_stdout(&dest, &["rev-parse", "--is-shallow-repository"]),
+        "true",
+        "clone should still be shallow"
+    );
+}
+
+#[test]
+fn shallow_clone_pinned_to_branch_still_works() {
+    let env = TestEnv::new("shallow_clone_branch");
+    let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "a")]);
+    let url = format!("file://{}", bare.display());
+
+    let entry = shallow_entry(&url, "main");
+    gitscale::git::clone_repo(&entry, &env.playground, false, true)
+        .expect("shallow clone of a branch revision should succeed");
+
+    let dest = env.playground.join("libs/mylib");
+    assert_eq!(
+        git_stdout(&dest, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "main",
+        "a branch revision should stay on that branch, not detach"
+    );
+}
+
+#[test]
+fn shallow_pull_pinned_to_sha_moves_to_new_sha() {
+    let env = TestEnv::new("shallow_pull_sha");
+    let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "v1")]);
+    let url = format!("file://{}", bare.display());
+    let first = bare_git_stdout(&bare, &["rev-parse", "main"]);
+
+    let entry = shallow_entry(&url, &first);
+    gitscale::git::clone_repo(&entry, &env.playground, false, true).unwrap();
+
+    // Add a second commit upstream and re-pin the config to it.
+    let second = commit_to_bare(&bare, "main", "a.txt", "v2");
+    assert_ne!(first, second);
+
+    let entry = shallow_entry(&url, &second);
+    gitscale::git::pull_repo(&entry, &env.playground, false, true)
+        .expect("shallow pull to a new SHA should succeed");
+
+    let dest = env.playground.join("libs/mylib");
+    assert_eq!(
+        git_stdout(&dest, &["rev-parse", "HEAD"]),
+        second,
+        "pull should move a SHA-pinned shallow clone to the new commit"
+    );
+}

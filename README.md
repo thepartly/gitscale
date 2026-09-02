@@ -55,7 +55,7 @@ The `.gitscale.toml` file lives at the root of your project. GitScale searches u
 Each entry maps a local directory to a git repo:
 
 - **url** (required) — Git repository URL (HTTPS or SSH)
-- **revision** — Branch, tag, or commit SHA. Defaults to the repo's default branch
+- **revision** — Branch, tag, or commit SHA. Defaults to the repo's default branch. See [Shallow clones](#pinning-to-a-commit-sha) for how SHAs are handled
 - **mode** — Access mode:
   - `readwrite` (default) — Normal clone, full access
   - `readonly` — Cloned, but all files have write permissions removed
@@ -184,6 +184,19 @@ Remove an entry from `.gitscale.toml`.
 gitscale remove libs/core
 ```
 
+### `gitscale hook <install|uninstall|status|run>`
+
+Install gitscale as a git hook so `gitscale pull` runs automatically whenever a
+checkout or merge changes the working tree. See [Git hooks](#git-hooks).
+
+```
+gitscale hook install --local     # this repository only (default)
+gitscale hook install --global    # every repo for the current user
+gitscale hook install --system    # every repo for every user on the machine
+gitscale hook status              # where hooks are installed, and what shadows them
+gitscale hook uninstall --local
+```
+
 ### Global options
 
 - `-v, --verbose` — Enable verbose output (must go before the subcommand)
@@ -216,7 +229,7 @@ The archive content is opaque to gitscale — it can contain anything.
 
 ## Shallow clones
 
-Readonly repos are always shallow-cloned (`--depth 1 --branch <revision>`). This is fast and disk-efficient — only the declared revision is fetched.
+Readonly repos are always shallow-cloned (`--depth 1`). This is fast and disk-efficient — only the declared revision is fetched.
 
 When the `CI` environment variable is set to `1` or `true` (as done by GitHub Actions, GitLab CI, etc.), **all** git repos are shallow-cloned, regardless of mode.
 
@@ -226,6 +239,24 @@ When the `CI` environment variable is set to `1` or `true` (as done by GitHub Ac
 | CI (`CI=1`) | shallow | shallow | no git |
 
 Shallow repos show `≠ stale` in status when the local commit differs from upstream (exact behind count is unavailable).
+
+### Pinning to a commit SHA
+
+A `revision` naming a branch or tag is fetched with `--depth 1 --branch <revision>`, leaving the clone on that branch.
+
+A `revision` naming a **commit SHA** cannot use `--branch`, which accepts only branch and tag names. GitScale initialises the repo and fetches that single commit instead:
+
+```bash
+git init && git remote add origin <url>
+git fetch --depth 1 origin <sha>
+git checkout --detach FETCH_HEAD
+```
+
+The result is a shallow clone with a **detached HEAD** at exactly the pinned commit. This matters most in CI, where every repo is shallow — a SHA-pinned entry that clones fine locally would otherwise fail there.
+
+Some git servers refuse to serve an arbitrary commit. If the fetch is rejected, GitScale falls back to a full clone and checks the revision out normally. GitHub and GitLab both permit it.
+
+**Trade-off:** a `revision` of 7–64 hexadecimal characters is treated as a commit SHA. A branch or tag whose name happens to be entirely hexadecimal (e.g. `abcdef1`) therefore takes the SHA path as well. It still resolves and checks out the right commit, but the clone ends up detached rather than on the branch — rename the ref or use a longer name if you need to stay on it.
 
 ## Artefact storage
 
@@ -278,16 +309,87 @@ For example, with `url = "https://bucket.s3.amazonaws.com/meta"` and a repo at `
 https://bucket.s3.amazonaws.com/meta/github.com/org/app/main.tar.gz
 ```
 
-## Hooks
+## Config hooks
 
 Add a `[hooks]` section to run commands after certain operations:
 
 ```toml
 [hooks]
 post_sync = "make install"
+on_pull_error = "warn"
 ```
 
 - **post_sync** — Runs after `pull` and `sync` complete (executed via `sh -c` in the config root directory). Fails the command if the hook exits non-zero.
+- **on_pull_error** — What a [git-hook-triggered](#git-hooks) pull should do when it fails: `"fail"` returns non-zero, failing the git operation; `"warn"` reports and lets it succeed. Defaults to `"fail"` under CI and `"warn"` otherwise.
+
+Not to be confused with [Git hooks](#git-hooks) below, which is how gitscale hooks *into git*.
+
+## Git hooks
+
+`gitscale hook install` registers gitscale with git so that `gitscale pull` runs
+whenever a checkout or merge changes what is in the working tree — a fresh
+clone materialises its sub-repositories without anyone remembering to run
+anything.
+
+### Scopes
+
+| Scope | Writes | Use for |
+|-------|--------|---------|
+| `--local` (default) | a hook file in this repo's hooks directory | one repository; repos where a global install is shadowed |
+| `--global` | `core.hooksPath` in `~/.gitconfig` | every repo for the current user |
+| `--system` | `core.hooksPath` in `/etc/gitconfig` | build machines, where every user should get it |
+
+`--local` does **not** survive a fresh clone — git never transfers `.git/hooks`
+— so it cannot bootstrap a brand-new checkout. Use `--global` or `--system` for
+that, and `--local` for repos that already exist or where a global install does
+not apply.
+
+### Which hooks, and what they cover
+
+Only `post-checkout` and `post-merge` are installed. Between them:
+
+| Operation | Covered |
+|-----------|---------|
+| `clone` | yes (`post-checkout`) |
+| `checkout` / `switch` | yes |
+| `fetch --depth=1` + `checkout FETCH_HEAD` (how CI checks out) | yes |
+| `merge`, `git pull` | yes (`post-merge`) |
+| `rebase`, `git pull --rebase` | yes (fires `post-checkout` too) |
+| `git reset --hard` | **no** |
+| plain `fetch` | not needed — the working tree does not change |
+
+`git reset --hard` fires no working-tree hook at all, so gitscale cannot react
+to it. `gitscale status` remains the way to spot drift.
+
+### Coexisting with other hooks
+
+A global `core.hooksPath` *replaces* `.git/hooks` rather than adding to it, so
+the installed hook always runs the repository's own hook first and reports its
+exit status. If a hook of the same name already exists, install moves it aside
+to `<name>.local` and chains to it; `uninstall` puts it back.
+
+The installed hook does nothing at all unless the repository root contains a
+`.gitscale.toml`. Repos that never opted in stay silent.
+
+### CI
+
+Hooks cannot bootstrap a checkout on hosted CI: GitLab fetches sources before
+any job script runs, and hosted runners keep no global git config between jobs.
+On runners you control, `gitscale hook install --system` works. Everywhere else,
+run `gitscale pull` as an explicit step after checkout.
+
+### Caveats
+
+- A repository that sets its own `core.hooksPath` (husky, lefthook, pre-commit)
+  overrides the global one, so a `--global` install does not run there. This is
+  silent — `gitscale hook status` reports it, and `--local` is the fix.
+- Install refuses to replace an existing `core.hooksPath` without `--force`,
+  since doing so would quietly disable those hooks.
+- When a hook-triggered pull fails, gitscale reports it on stderr and records it
+  in `.git/gitscale-pull-failed`, which `gitscale hook status` surfaces. Git
+  collapses any non-zero hook exit to `1` and attributes it to the checkout, so
+  the breadcrumb — not the exit status — is what makes a later failure
+  diagnosable.
 
 ## Recursive dependencies
 

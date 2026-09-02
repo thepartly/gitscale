@@ -86,12 +86,70 @@ enum Commands {
         #[arg(short = 'C', long)]
         root: Option<PathBuf>,
     },
+    /// Install or inspect gitscale's git hooks
+    Hook {
+        #[command(subcommand)]
+        action: HookAction,
+    },
     /// Remove a sub-repository entry from .gitscale config
     Remove {
         directory: String,
         #[arg(short = 'C', long)]
         root: Option<PathBuf>,
     },
+}
+
+#[derive(Subcommand)]
+enum HookAction {
+    /// Install gitscale's post-checkout and post-merge hooks
+    Install {
+        /// Install for every user on this machine (/etc/gitconfig)
+        #[arg(long, conflicts_with_all = ["global", "local"])]
+        system: bool,
+        /// Install for the current user (~/.gitconfig)
+        #[arg(long, conflicts_with_all = ["system", "local"])]
+        global: bool,
+        /// Install into this repository only (default)
+        #[arg(long, conflicts_with_all = ["system", "global"])]
+        local: bool,
+        /// Replace an existing core.hooksPath or displaced hook
+        #[arg(long)]
+        force: bool,
+        #[arg(short = 'C', long)]
+        root: Option<PathBuf>,
+    },
+    /// Remove gitscale's git hooks
+    Uninstall {
+        #[arg(long, conflicts_with_all = ["global", "local"])]
+        system: bool,
+        #[arg(long, conflicts_with_all = ["system", "local"])]
+        global: bool,
+        #[arg(long, conflicts_with_all = ["system", "global"])]
+        local: bool,
+        #[arg(short = 'C', long)]
+        root: Option<PathBuf>,
+    },
+    /// Show where hooks are installed and whether anything shadows them
+    Status {
+        #[arg(short = 'C', long)]
+        root: Option<PathBuf>,
+    },
+    /// Run the pull for a git hook (invoked by the installed hook)
+    Run {
+        name: String,
+        #[arg(short = 'C', long)]
+        root: Option<PathBuf>,
+    },
+}
+
+fn hook_scope(system: bool, global: bool, _local: bool) -> commands::hook::Scope {
+    if system {
+        commands::hook::Scope::System
+    } else if global {
+        commands::hook::Scope::Global
+    } else {
+        commands::hook::Scope::Local
+    }
 }
 
 pub struct CliOutput {
@@ -189,5 +247,29 @@ fn run_cli_inner(
         Commands::Remove { directory, root } => {
             commands::remove::run(&directory, root.as_deref(), out)
         }
+        Commands::Hook { action } => match action {
+            HookAction::Install {
+                system,
+                global,
+                local,
+                force,
+                root,
+            } => commands::hook::install(
+                hook_scope(system, global, local),
+                root.as_deref(),
+                force,
+                out,
+            ),
+            HookAction::Uninstall {
+                system,
+                global,
+                local,
+                root,
+            } => commands::hook::uninstall(hook_scope(system, global, local), root.as_deref(), out),
+            HookAction::Status { root } => commands::hook::status(root.as_deref(), out),
+            HookAction::Run { name, root } => {
+                commands::hook::run(&name, root.as_deref(), verbose, interactive, out, err)
+            }
+        },
     }
 }
