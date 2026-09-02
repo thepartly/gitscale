@@ -1468,9 +1468,15 @@ fn commit_then_push_propagates() {
     let out = env.run(&["push"]);
     assert!(out.success, "push stderr: {}", out.stderr);
 
-    // The bare remote's main branch now carries our commit.
+    // The bare remote's main branch now carries our commit. Name the git dir
+    // explicitly: discovery-based access to a bare repo is refused when the
+    // developer has `safe.bareRepository = explicit` set.
+    let bare_str = bare.to_str().unwrap();
     assert_eq!(
-        git_stdout(&bare, &["log", "-1", "--pretty=%s", "main"]),
+        git_stdout(
+            &bare,
+            &["--git-dir", bare_str, "log", "-1", "--pretty=%s", "main"]
+        ),
         "propagated"
     );
 }
