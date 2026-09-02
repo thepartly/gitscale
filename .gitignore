@@ -24,3 +24,8 @@ tests/repos-remote/
 tests/artefacts-remote/
 
 demo/system/gsdemo-core/
+demo/system/gsdemo-argocd/
+demo/system/gsdemo-compose/
+demo/system/gsdemo-frontend/
+demo/system/gsdemo-sharedlibs/
+demo/system/gsdemo-sso/
