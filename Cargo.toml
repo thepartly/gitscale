@@ -1,6 +1,6 @@
 [package]
 name = "gitscale"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 description = "Toolkit enabling development and releases across multiple git repositories."
 license = "MIT"
