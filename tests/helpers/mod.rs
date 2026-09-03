@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use gitscale::run_cli;
+use gitscale::run_cli_with;
 pub use gitscale::CliOutput;
 
 /// Root dir for all test runtime artefacts, relative to workspace root.
@@ -25,6 +25,13 @@ pub struct TestEnv {
 impl TestEnv {
     pub fn new(name: &str) -> Self {
         let base = tests_base();
+        // Scope the on-disk directories to this process. Test names are unique
+        // within a binary, but two concurrent `cargo test` invocations would
+        // otherwise share `tests/playground/<name>` and wipe each other's
+        // clones mid-run via the `remove_dir_all` below — surfacing as flaky
+        // snapshot failures in the multi-repo tests.
+        let name = format!("{}-{}", std::process::id(), name);
+        let name = name.as_str();
         let playground = base.join("playground").join(name);
         let repos_remote = base.join("repos-remote").join(name);
         let artefacts_remote = base.join("artefacts-remote").join(name);
@@ -156,7 +163,10 @@ impl TestEnv {
             full_args.push(self.playground.to_str().unwrap());
             full_args.extend_from_slice(rest);
         }
-        run_cli(&full_args)
+        // Force plain, sequential rendering: the harness may run under a TTY,
+        // and interactive mode would emit parallel progress bars to stderr
+        // instead of the deterministic stdout the snapshots capture.
+        run_cli_with(&full_args, false)
     }
 
     /// Run the real gitscale binary as a subprocess with the allowlist the

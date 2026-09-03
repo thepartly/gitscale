@@ -28,6 +28,11 @@ fn credential_fill(auth: &CiAuth, host: &str, token: &str) -> Output {
         .args(["credential", "fill"])
         .env("CI_JOB_TOKEN", token)
         .env("GIT_TERMINAL_PROMPT", "0")
+        // An inherited askpass (e.g. an editor's helper) would let git block
+        // on a GUI prompt for an unscoped host instead of failing fast, which
+        // is exactly what the "other host" case must exercise.
+        .env_remove("GIT_ASKPASS")
+        .env_remove("SSH_ASKPASS")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

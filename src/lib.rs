@@ -167,9 +167,17 @@ pub struct CliOutput {
 }
 
 pub fn run_cli(args: &[&str]) -> CliOutput {
+    run_cli_with(args, progress::is_interactive())
+}
+
+/// Like [`run_cli`], but with the interactive/plain rendering chosen explicitly
+/// rather than sniffed from the process's stdout. Tests use this so their
+/// captured output does not depend on whether the harness happens to run under
+/// a TTY (which would otherwise switch the multi-repo commands to parallel
+/// progress bars on stderr and leave the captured stdout empty).
+pub fn run_cli_with(args: &[&str], interactive: bool) -> CliOutput {
     let mut stdout_buf = Vec::new();
     let mut stderr_buf = Vec::new();
-    let interactive = progress::is_interactive();
 
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
