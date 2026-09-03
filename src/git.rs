@@ -177,6 +177,18 @@ pub fn reconcile_remote(entry: &RepoEntry, root: &Path) -> Result<bool> {
     Ok(true)
 }
 
+/// The `origin` URL of the repository `dir` belongs to, or `None` if it is not
+/// in one or has no such remote. Resolved by git rather than by looking for a
+/// `.git` directory, so a path inside a repository answers for that repository.
+pub fn origin_url(dir: &Path) -> Option<String> {
+    let output = run_git(&["remote", "get-url", "origin"], Some(dir), false).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = stdout_str(&output);
+    (!url.is_empty()).then_some(url)
+}
+
 /// The URL to use as `origin` for `entry`: the configured one, unless CI
 /// credentials cover its host and can fetch it over HTTPS instead.
 pub fn remote_url(entry: &RepoEntry) -> String {

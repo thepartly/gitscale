@@ -5,10 +5,15 @@ Manage multiple sub-repositories from a single config file. An alternative to gi
 ## Install
 
 ```
-pip install gitscale
+cargo install gitscale
 ```
 
-Requires Python 3.12+.
+Requires a stable Rust toolchain. To build from a checkout instead:
+
+```
+git clone https://github.com/thepartly/gitscale.git
+cd gitscale && cargo install --path .
+```
 
 ## Quick start
 
@@ -191,11 +196,15 @@ checkout or merge changes the working tree. See [Git hooks](#git-hooks).
 
 ```
 gitscale hook install --local     # this repository only (default)
-gitscale hook install --global    # every repo for the current user
-gitscale hook install --system    # every repo for every user on the machine
-gitscale hook status              # where hooks are installed, and what shadows them
+gitscale hook install --global --allow 'github.com/acme/*'   # every repo for the current user
+gitscale hook install --system --allow 'github.com/acme/*'   # every repo for every user
+gitscale hook status              # where hooks are installed, what they allow, what shadows them
 gitscale hook uninstall --local
 ```
+
+`--allow` takes comma-separated glob patterns naming the repositories whose
+`[hooks]` commands the installed hook may run. It is required for `--global`
+and `--system`; see [hook allowlist](#hook-allowlist).
 
 ### Global options
 
@@ -386,10 +395,83 @@ post_sync = "make install"
 on_pull_error = "warn"
 ```
 
-- **post_sync** — Runs after `pull` and `sync` complete (executed via `sh -c` in the config root directory). Fails the command if the hook exits non-zero.
+- **post_sync** — Runs after `pull` and `sync` complete (executed via `sh -c` in the config root directory). Fails the command if the hook exits non-zero. When a [git hook](#git-hooks) triggers it, only for repositories on that hook's [allowlist](#hook-allowlist).
 - **on_pull_error** — What a [git-hook-triggered](#git-hooks) pull should do when it fails: `"fail"` returns non-zero, failing the git operation; `"warn"` reports and lets it succeed. Defaults to `"fail"` under CI and `"warn"` otherwise.
 
 Not to be confused with [Git hooks](#git-hooks) below, which is how gitscale hooks *into git*.
+
+### Hook allowlist
+
+`.gitscale.toml` lives *inside* the repository, so its `[hooks]` table is
+written by whoever wrote the branch — including someone who has only opened a
+merge request. A `--global` or `--system` [git hook](#git-hooks) turns every
+`git clone` and `git checkout` on the machine into a trigger for it: cloning a
+branch to review it would run their command with your shell, your SSH keys and
+your tokens.
+
+So `gitscale hook install` takes an allowlist, and bakes it into the hook it
+writes:
+
+```
+gitscale hook install --global --allow 'github.com/acme/*,git.internal.example/*'
+```
+
+Comma-separated glob patterns, where `*` stands for any run of characters and
+`?` for exactly one. They are matched, case-insensitively, against the
+`host/owner/repo` of the workspace's `origin` — so the SSH and HTTPS spellings
+of one repository are the same pattern:
+
+| Pattern | Allows |
+|---------|--------|
+| `github.com/acme/gitscale` | that one repository |
+| `github.com/acme/*` | every repository under that owner, subgroups included |
+| `github.com/*` | every repository on that host |
+| `*/acme/*` | that owner on any host |
+| `*` | everything (the pre-0.3 behaviour) |
+| `/srv/workspaces/*` | matched against the workspace path, for a workspace with no remote |
+
+`*` deliberately crosses `/`, so `gitlab.com/acme/*` covers a nested subgroup.
+The flip side is that a pattern must be ended deliberately: `github.com/acme/*`
+does not match `github.com/acme-evil/x`, but `github.com/acme*` does.
+
+There is no config file. The patterns live in the hook script itself, in
+`~/.config/gitscale/hooks/` or `/etc/gitscale/hooks/`, which the shim passes to
+gitscale in `GITSCALE_HOOK_ALLOW`. That is what makes them trustworthy: no
+branch can reach that file, so a repository cannot vouch for itself.
+
+`gitscale hook status` prints the patterns in effect and whether the current
+repository is inside them.
+
+Some consequences worth knowing:
+
+- **`--allow` is required for `--global` and `--system`.** There is no default,
+  because guessing one is the bug this exists to prevent. Re-installing without
+  `--allow` keeps whatever the previous hook allowed, so upgrading does not
+  silently widen or narrow anything.
+- **`--local` allows its own repository** without being asked. Installing into
+  one repo's `.git/hooks` is already a decision about that repo, and git never
+  transfers `.git/hooks`, so the file cannot reach anyone else.
+- **A hook installed by gitscale before 0.3 passes no allowlist**, and gitscale
+  refuses to run rather than assuming the old behaviour. Re-run
+  `gitscale hook install` to choose.
+- **A `gitscale pull` or `sync` you type yourself is not restricted.** You chose
+  the directory and the moment; the allowlist belongs to the hook that fires
+  without being asked. If you clone an untrusted branch and then run `gitscale
+  pull` in it by hand, its `post_sync` will run — the checks in the next section
+  are what still apply there.
+
+### Values gitscale refuses to pass to git
+
+A `.gitscale.toml` from an untrusted branch can also try to reach git's own
+command execution, which no hook allowlist would cover. These are rejected when
+the config is loaded, by every command:
+
+- **Remote helper URLs** — `url = "ext::sh -c '…'"` makes git run the rest of
+  the URL as a command. Any `helper::` prefix is refused.
+- **Option-shaped values** — a `url` or `revision` starting with `-` reaches
+  git as a flag, and flags like `--upload-pack=` name a program to run.
+- **Directories that escape the workspace** — a repo directory must be relative
+  and free of `..`, so a config cannot decide to check out over `~/.ssh`.
 
 ## Git hooks
 
@@ -405,6 +487,10 @@ anything.
 | `--local` (default) | a hook file in this repo's hooks directory | one repository; repos where a global install is shadowed |
 | `--global` | `core.hooksPath` in `~/.gitconfig` | every repo for the current user |
 | `--system` | `core.hooksPath` in `/etc/gitconfig` | build machines, where every user should get it |
+
+`--global` and `--system` require `--allow` — see the
+[hook allowlist](#hook-allowlist) — because they fire on clones of repositories
+nobody has vetted.
 
 `--local` does **not** survive a fresh clone — git never transfers `.git/hooks`
 — so it cannot bootstrap a brand-new checkout. Use `--global` or `--system` for
@@ -447,6 +533,10 @@ run `gitscale pull` as an explicit step after checkout.
 
 ### Caveats
 
+- A `--global` or `--system` hook makes `git clone` and `git checkout` run
+  gitscale against whatever config the branch carries. The
+  [hook allowlist](#hook-allowlist) baked into the hook is what keeps that from
+  being an invitation.
 - A repository that sets its own `core.hooksPath` (husky, lefthook, pre-commit)
   overrides the global one, so a `--global` install does not run there. This is
   silent — `gitscale hook status` reports it, and `--local` is the fix.

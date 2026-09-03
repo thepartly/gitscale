@@ -623,9 +623,17 @@ fn sync_full() {
 // Hooks
 // ---------------------------------------------------------------------------
 
+/// A workspace whose own `origin` gives the allowlist something to match on.
+fn hook_env(name: &str, origin: &str) -> TestEnv {
+    let env = TestEnv::new(name);
+    env.init_playground_git();
+    env.set_playground_origin(origin);
+    env
+}
+
 #[test]
 fn hooks_post_sync() {
-    let env = TestEnv::new("hooks_post_sync");
+    let env = hook_env("hooks_post_sync", "https://github.com/thepartly/gitscale.git");
     let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "a")]);
 
     env.write_config(&format!(
@@ -638,7 +646,7 @@ post_sync = "touch .hook-ran"
         bare.display()
     ));
 
-    let out = env.run(&["pull"]);
+    let out = env.run_as_hook("github.com/thepartly/*", &["pull"]);
     assert!(out.success, "stderr: {}", out.stderr);
 
     // Hook should have created this file
@@ -647,7 +655,10 @@ post_sync = "touch .hook-ran"
 
 #[test]
 fn hooks_post_sync_failure() {
-    let env = TestEnv::new("hooks_post_sync_failure");
+    let env = hook_env(
+        "hooks_post_sync_failure",
+        "https://github.com/thepartly/gitscale.git",
+    );
     let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "a")]);
 
     env.write_config(&format!(
@@ -660,9 +671,132 @@ post_sync = "exit 1"
         bare.display()
     ));
 
-    let out = env.run(&["pull"]);
+    let out = env.run_as_hook("*", &["pull"]);
     assert!(!out.success);
     assert!(out.stderr.contains("post_sync hook failed"));
+}
+
+/// The reported attack: a branch carries its own `.gitscale.toml`, a developer
+/// clones it to review, and the shared hook runs the payload as them. The
+/// allowlist the hook was installed with is what has to stop it.
+#[test]
+fn hooks_post_sync_refused_for_unlisted_repo() {
+    let env = hook_env(
+        "hooks_post_sync_refused_for_unlisted_repo",
+        "https://gitlab.example.com/attacker/payload.git",
+    );
+
+    env.write_config("[hooks]\npost_sync = \"touch pwned\"\n");
+
+    let out = env.run_as_hook("github.com/thepartly/*", &["pull"]);
+    assert!(!out.success);
+    assert!(
+        !env.playground.join("pwned").exists(),
+        "the payload ran despite not being allowlisted"
+    );
+    assert!(
+        out.stderr.contains("refusing to run the post_sync hook"),
+        "stderr: {}",
+        out.stderr
+    );
+    // The refusal has to name the repository, or nobody can act on it.
+    assert!(
+        out.stderr.contains("gitlab.example.com/attacker/payload"),
+        "stderr: {}",
+        out.stderr
+    );
+}
+
+/// A repository must not be able to vouch for itself: the allowlist reaches
+/// gitscale from the hook shim, never from the `.gitscale.toml` under test.
+#[test]
+fn hooks_post_sync_config_cannot_allowlist_itself() {
+    let env = hook_env(
+        "hooks_post_sync_config_cannot_allowlist_itself",
+        "https://gitlab.example.com/attacker/payload.git",
+    );
+
+    env.write_config(
+        r#"[hooks]
+post_sync = "touch pwned"
+
+[trust]
+allow = "*"
+"#,
+    );
+
+    let out = env.run_as_hook("github.com/thepartly/*", &["pull"]);
+    assert!(!env.playground.join("pwned").exists());
+    assert!(
+        out.stderr.contains("refusing to run the post_sync hook"),
+        "stderr: {}",
+        out.stderr
+    );
+}
+
+/// An owner pattern ends at the slash, so a lookalike owner is a different
+/// owner. This is the whole value of the allowlist.
+#[test]
+fn hooks_post_sync_lookalike_owner_is_refused() {
+    let env = hook_env(
+        "hooks_post_sync_lookalike_owner_is_refused",
+        "https://github.com/thepartly-evil/gitscale.git",
+    );
+
+    env.write_config("[hooks]\npost_sync = \"touch pwned\"\n");
+
+    let out = env.run_as_hook("github.com/thepartly/*", &["pull"]);
+    assert!(!out.success);
+    assert!(!env.playground.join("pwned").exists());
+}
+
+/// A workspace with no remote has no host or owner to match on, so only a path
+/// pattern can name it.
+#[test]
+fn hooks_post_sync_local_workspace_matches_on_path() {
+    let env = TestEnv::new("hooks_post_sync_local_workspace_matches_on_path");
+    env.init_playground_git();
+    env.write_config("[hooks]\npost_sync = \"touch .hook-ran\"\n");
+
+    let out = env.run_as_hook("github.com/*", &["pull"]);
+    assert!(!out.success);
+    assert!(!env.playground.join(".hook-ran").exists());
+
+    let pattern = format!("{}/*", env.playground.parent().unwrap().display());
+    let out = env.run_as_hook(&pattern, &["pull"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(env.playground.join(".hook-ran").exists());
+}
+
+/// A hook installed with an empty allowlist runs nothing at all, rather than
+/// reading as "unrestricted".
+#[test]
+fn hooks_post_sync_empty_allowlist_refuses_everything() {
+    let env = hook_env(
+        "hooks_post_sync_empty_allowlist_refuses_everything",
+        "https://github.com/thepartly/gitscale.git",
+    );
+    env.write_config("[hooks]\npost_sync = \"touch pwned\"\n");
+
+    let out = env.run_as_hook("", &["pull"]);
+    assert!(!out.success);
+    assert!(!env.playground.join("pwned").exists());
+}
+
+/// A `gitscale pull` the user typed is not a drive-by: they chose the
+/// directory and the moment, so the allowlist — which belongs to the installed
+/// hook — does not apply.
+#[test]
+fn hooks_post_sync_runs_when_invoked_directly() {
+    let env = hook_env(
+        "hooks_post_sync_runs_when_invoked_directly",
+        "https://gitlab.example.com/attacker/payload.git",
+    );
+    env.write_config("[hooks]\npost_sync = \"touch .hook-ran\"\n");
+
+    let out = env.run_binary_plain(&["pull"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(env.playground.join(".hook-ran").exists());
 }
 
 // ---------------------------------------------------------------------------

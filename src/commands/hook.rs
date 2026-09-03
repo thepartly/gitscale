@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::config::{load_config_optional, OnHookError, CONFIG_FILENAME};
+use crate::trust;
 
 /// The git hooks gitscale installs.
 pub const HOOKS: [&str; 2] = ["post-checkout", "post-merge"];
@@ -49,11 +50,15 @@ impl Scope {
 
 const SHIM_MARKER: &str = "# installed by gitscale";
 
-/// Body of the installed hook. Both the gitscale binary and the chained hook
-/// are baked in at install time: resolving them at run time would mean asking
-/// git where hooks live, and `git rev-parse --git-path hooks/<name>` honours
-/// `core.hooksPath` — which resolves right back to this shim.
-fn shim_source(hook: &str, binary: &Path, chain: Option<&Path>) -> String {
+/// Body of the installed hook. The gitscale binary, the chained hook and the
+/// allowlist are all baked in at install time: resolving them at run time would
+/// mean asking git where hooks live, and `git rev-parse --git-path hooks/<name>`
+/// honours `core.hooksPath` — which resolves right back to this shim.
+///
+/// Baking the allowlist in is also what makes it trustworthy. The shim sits in
+/// the user's config directory or in /etc, so no branch can reach it; a
+/// repository therefore cannot say anything about whether its own hooks may run.
+fn shim_source(hook: &str, binary: &Path, chain: Option<&Path>, allow: &str) -> String {
     format!(
         r#"#!/bin/sh
 {marker} — regenerate with `gitscale hook install`, do not edit.
@@ -61,6 +66,11 @@ set -u
 GITSCALE_BIN='{binary}'
 CHAIN='{chain}'
 HOOK='{hook}'
+
+# Which repositories may run the [hooks] commands in their own .gitscale.toml.
+# Comma-separated glob patterns, matched against host/owner/repo. Change it with
+# `gitscale hook install --allow ...`, never by editing this line.
+ALLOW='{allow}'
 
 # The repository's own hook runs first and decides the exit status. A global
 # core.hooksPath replaces .git/hooks rather than adding to it, so without this
@@ -89,13 +99,15 @@ if [ ! -x "$GITSCALE_BIN" ]; then
     exit $RC
 fi
 
-GITSCALE_HOOK="$HOOK" "$GITSCALE_BIN" hook run "$HOOK" -C "$ROOT" || RC=$?
+GITSCALE_HOOK="$HOOK" {allow_env}="$ALLOW" "$GITSCALE_BIN" hook run "$HOOK" -C "$ROOT" || RC=$?
 exit $RC
 "#,
         marker = SHIM_MARKER,
         binary = binary.display(),
         chain = chain.map(|p| p.display().to_string()).unwrap_or_default(),
         hook = hook,
+        allow = allow,
+        allow_env = trust::ALLOW_ENV,
         config = CONFIG_FILENAME,
     )
 }
@@ -138,23 +150,45 @@ fn git_stdout(args: &[&str], cwd: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// The directory git will actually look in for this repo's hooks, and whether
-/// that location was chosen by the repository itself. A repo-local
-/// `core.hooksPath` (husky, lefthook, pre-commit) overrides a global one, so a
-/// global install is invisible in such repos — hence the flag.
-fn effective_hooks_dir(repo: &Path) -> Result<(PathBuf, bool)> {
+/// Where a `--local` install writes, and whether the repository chose it. A
+/// repo-local `core.hooksPath` (husky, lefthook, pre-commit) overrides a global
+/// one, so a global install is invisible in such repos — hence the flag.
+///
+/// Deliberately blind to a global or system `core.hooksPath`: `--local` means
+/// this repository, and must not end up writing into the shared hooks directory
+/// just because one is configured.
+fn local_hooks_dir(repo: &Path) -> Result<(PathBuf, bool)> {
     if let Some(local) = git_config_get(Some(Scope::Local), "core.hooksPath", Some(repo)) {
-        // A relative hooksPath is resolved against the worktree root.
-        let path = PathBuf::from(&local);
-        let abs = if path.is_absolute() {
-            path
-        } else {
-            repo.join(path)
-        };
-        return Ok((abs, true));
+        return Ok((resolve_hooks_path(repo, &local), true));
     }
     let git_dir = git_stdout(&["rev-parse", "--absolute-git-dir"], repo)?;
     Ok((PathBuf::from(git_dir).join("hooks"), false))
+}
+
+/// The directory git will actually run this repo's hooks from — asked of git
+/// unscoped, so a global or system `core.hooksPath` counts. This is what
+/// `status` must report: anything else would say "not installed" about a hook
+/// that is demonstrably running.
+fn active_hooks_dir(repo: &Path) -> Result<(PathBuf, bool)> {
+    let repo_chose_it =
+        git_config_get(Some(Scope::Local), "core.hooksPath", Some(repo)).is_some();
+    match git_config_get(None, "core.hooksPath", Some(repo)) {
+        Some(path) => Ok((resolve_hooks_path(repo, &path), repo_chose_it)),
+        None => {
+            let git_dir = git_stdout(&["rev-parse", "--absolute-git-dir"], repo)?;
+            Ok((PathBuf::from(git_dir).join("hooks"), repo_chose_it))
+        }
+    }
+}
+
+/// A relative `core.hooksPath` is resolved against the worktree root.
+fn resolve_hooks_path(repo: &Path, configured: &str) -> PathBuf {
+    let path = PathBuf::from(configured);
+    if path.is_absolute() {
+        path
+    } else {
+        repo.join(path)
+    }
 }
 
 fn worktree_root(start: Option<&Path>) -> Result<PathBuf> {
@@ -198,7 +232,13 @@ fn make_executable(_path: &Path) -> Result<()> {
 // install
 // ---------------------------------------------------------------------------
 
-pub fn install(scope: Scope, root: Option<&Path>, force: bool, out: &mut dyn Write) -> Result<()> {
+pub fn install(
+    scope: Scope,
+    root: Option<&Path>,
+    force: bool,
+    allow: Option<&str>,
+    out: &mut dyn Write,
+) -> Result<()> {
     let binary = gitscale_binary()?;
 
     // Validate before writing anything: a refused install must not leave hook
@@ -220,7 +260,7 @@ pub fn install(scope: Scope, root: Option<&Path>, force: bool, out: &mut dyn Wri
     let dir = match scope {
         Scope::Local => {
             let repo = worktree_root(root)?;
-            let (dir, repo_chose_it) = effective_hooks_dir(&repo)?;
+            let (dir, repo_chose_it) = local_hooks_dir(&repo)?;
             if repo_chose_it {
                 writeln!(
                     out,
@@ -232,6 +272,8 @@ pub fn install(scope: Scope, root: Option<&Path>, force: bool, out: &mut dyn Wri
         }
         Scope::Global | Scope::System => managed_hooks_dir(scope)?,
     };
+
+    let allow = resolve_allow(scope, &dir, allow)?;
 
     std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
 
@@ -268,7 +310,7 @@ pub fn install(scope: Scope, root: Option<&Path>, force: bool, out: &mut dyn Wri
             chain = existing_chain(&target);
         }
 
-        std::fs::write(&target, shim_source(hook, &binary, chain.as_deref()))
+        std::fs::write(&target, shim_source(hook, &binary, chain.as_deref(), &allow))
             .with_context(|| format!("cannot write {}", target.display()))?;
         make_executable(&target)?;
         writeln!(out, "  installed {}", target.display())?;
@@ -278,15 +320,68 @@ pub fn install(scope: Scope, root: Option<&Path>, force: bool, out: &mut dyn Wri
         set_hooks_path(scope, &dir, out)?;
     }
 
+    writeln!(out, "  allowing {}", allow)?;
     writeln!(out, "gitscale hooks installed ({})", scope.label())?;
     Ok(())
 }
 
+/// Decide the allowlist to bake in.
+///
+/// A `--global` or `--system` install arms every `git clone` on the machine, so
+/// it has to be told what to trust — there is no sensible default, and guessing
+/// one is the whole bug. A `--local` install is already a statement about one
+/// repository, and its hook file cannot travel to anyone else, so it allows that
+/// repository. Re-installing keeps whatever the previous shim allowed, so an
+/// upgrade does not silently widen or narrow anything.
+fn resolve_allow(scope: Scope, dir: &Path, requested: Option<&str>) -> Result<String> {
+    if let Some(spec) = requested {
+        trust::validate_spec(spec)?;
+        return Ok(spec.to_string());
+    }
+    if let Some(existing) = existing_allow(dir) {
+        return Ok(existing);
+    }
+    if scope == Scope::Local {
+        return Ok(trust::ALLOW_ANY.to_string());
+    }
+    bail!(
+        "--allow is required for a {} install.\n\n\
+         A {} hook runs on every clone and checkout on this machine, including of a \
+         branch\nyou are only reviewing — and a branch can carry its own .gitscale.toml \
+         with a\n[hooks] command in it. --allow decides which repositories those commands \
+         may come\nfrom, as comma-separated glob patterns matched against host/owner/repo:\n\n\
+         \x20   gitscale hook install --{} --allow 'github.com/acme/*,git.internal.example/*'\n\n\
+         Use --allow '{}' to allow every repository.",
+        scope.label(),
+        scope.label(),
+        scope.label(),
+        trust::ALLOW_ANY
+    )
+}
+
+/// Read the allowlist out of a shim we previously wrote.
+fn existing_allow(dir: &Path) -> Option<String> {
+    HOOKS.iter().find_map(|hook| {
+        let target = dir.join(hook);
+        is_shim(&target).then(|| shim_field(&target, "ALLOW")).flatten()
+    })
+}
+
+/// Pull a single-quoted assignment back out of a shim.
+fn shim_field(shim: &Path, name: &str) -> Option<String> {
+    let text = std::fs::read_to_string(shim).ok()?;
+    let prefix = format!("{}='", name);
+    let line = text.lines().find(|l| l.starts_with(&prefix))?;
+    Some(
+        line.trim_start_matches(&prefix)
+            .trim_end_matches('\'')
+            .to_string(),
+    )
+}
+
 /// Read the chained hook out of a shim we previously wrote.
 fn existing_chain(shim: &Path) -> Option<PathBuf> {
-    let text = std::fs::read_to_string(shim).ok()?;
-    let line = text.lines().find(|l| l.starts_with("CHAIN='"))?;
-    let value = line.trim_start_matches("CHAIN='").trim_end_matches('\'');
+    let value = shim_field(shim, "CHAIN")?;
     (!value.is_empty()).then(|| PathBuf::from(value))
 }
 
@@ -329,7 +424,7 @@ pub fn uninstall(scope: Scope, root: Option<&Path>, out: &mut dyn Write) -> Resu
     let dir = match scope {
         Scope::Local => {
             let repo = worktree_root(root)?;
-            effective_hooks_dir(&repo)?.0
+            local_hooks_dir(&repo)?.0
         }
         Scope::Global | Scope::System => managed_hooks_dir(scope)?,
     };
@@ -390,7 +485,7 @@ pub fn status(root: Option<&Path>, out: &mut dyn Write) -> Result<()> {
         writeln!(out, "\nNot inside a git repository.")?;
         return Ok(());
     };
-    let (dir, repo_chose_it) = effective_hooks_dir(&repo)?;
+    let (dir, repo_chose_it) = active_hooks_dir(&repo)?;
     writeln!(out, "\nrepo     {}", repo.display())?;
     writeln!(out, "hooks    {}", dir.display())?;
 
@@ -418,8 +513,43 @@ pub fn status(root: Option<&Path>, out: &mut dyn Write) -> Result<()> {
         writeln!(out, "  {:<14} {}", hook, state)?;
     }
 
+    report_trust(&repo, &dir, out)?;
+
     if let Some(note) = read_breadcrumb(&repo)? {
         writeln!(out, "\nLast hook-triggered pull FAILED:\n  {}", note.trim())?;
+    }
+    Ok(())
+}
+
+/// What the installed hook allows, and whether this repository is inside it —
+/// the question people have once a hook has been refused.
+fn report_trust(repo: &Path, dir: &Path, out: &mut dyn Write) -> Result<()> {
+    let Some(spec) = existing_allow(dir) else {
+        return Ok(());
+    };
+    let allowlist = trust::Allowlist::parse(&spec);
+
+    writeln!(out, "\nhook allowlist")?;
+    if allowlist.patterns().is_empty() {
+        writeln!(out, "  (empty — no repository may run [hooks] commands)")?;
+    }
+    for pattern in allowlist.patterns() {
+        writeln!(out, "  {}", pattern)?;
+    }
+
+    let workspace = trust::Workspace::probe(repo);
+    match allowlist.matched_by(&workspace) {
+        Some(pattern) => writeln!(
+            out,
+            "\nthis repo  {} — allowed by '{}'",
+            workspace.describe(),
+            pattern
+        )?,
+        None => writeln!(
+            out,
+            "\nthis repo  {} — NOT allowed; a [hooks] command here would be refused",
+            workspace.describe()
+        )?,
     }
     Ok(())
 }
@@ -462,6 +592,20 @@ pub fn run(
             "unknown hook '{}' (gitscale installs: {})",
             hook,
             HOOKS.join(", ")
+        );
+    }
+
+    // Every shim exports this, so its absence means one of two things: a shim
+    // written by a gitscale that predates the allowlist, or someone running the
+    // subcommand by hand. Both are refused rather than run wide open — an
+    // upgrade must not leave the old behaviour quietly in place.
+    if std::env::var(trust::ALLOW_ENV).is_err() {
+        bail!(
+            "`gitscale hook run` is invoked by the installed hook, which passes {} to it.\n\
+             That variable is not set, so this hook was installed by an older gitscale.\n\
+             Reinstall it to choose what it may run:\n\n    \
+             gitscale hook install --global --allow 'github.com/acme/*'",
+            trust::ALLOW_ENV
         );
     }
 

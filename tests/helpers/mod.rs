@@ -159,6 +159,48 @@ impl TestEnv {
         run_cli(&full_args)
     }
 
+    /// Run the real gitscale binary as a subprocess with the allowlist the
+    /// installed hook shim would have passed it.
+    ///
+    /// The in-process `run` cannot be used for this: the test harness runs
+    /// tests on threads of one process, and setting an environment variable
+    /// there would be visible to every other test at once.
+    pub fn run_as_hook(&self, allow: &str, args: &[&str]) -> CliOutput {
+        self.run_binary(Some(allow), args)
+    }
+
+    /// The same, without an allowlist — a `gitscale` command the user typed.
+    pub fn run_binary_plain(&self, args: &[&str]) -> CliOutput {
+        self.run_binary(None, args)
+    }
+
+    fn run_binary(&self, allow: Option<&str>, args: &[&str]) -> CliOutput {
+        let mut full_args: Vec<String> = Vec::new();
+        if let Some((subcmd, rest)) = args.split_first() {
+            full_args.push(subcmd.to_string());
+            full_args.push("-C".to_string());
+            full_args.push(self.playground.to_str().unwrap().to_string());
+            full_args.extend(rest.iter().map(|a| a.to_string()));
+        }
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_gitscale"));
+        cmd.args(&full_args).env_remove("GITSCALE_HOOK_ALLOW");
+        if let Some(allow) = allow {
+            cmd.env("GITSCALE_HOOK_ALLOW", allow);
+        }
+        let output = cmd.output().expect("failed to run the gitscale binary");
+        CliOutput {
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            success: output.status.success(),
+        }
+    }
+
+    /// Point the playground's own repo at `url`, so the hook allowlist has a
+    /// deterministic host/owner/repo to judge it by.
+    pub fn set_playground_origin(&self, url: &str) {
+        run_git(&self.playground, &["remote", "add", "origin", url]);
+    }
+
     /// Init the playground as a git repo (needed for status to show self ".")
     pub fn init_playground_git(&self) {
         run_git(&self.playground, &["init"]);

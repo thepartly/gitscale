@@ -6,6 +6,7 @@ pub mod hooks;
 pub mod progress;
 pub mod resolve;
 pub mod storage;
+pub mod trust;
 pub mod urls;
 
 use anyhow::Result;
@@ -116,6 +117,12 @@ enum HookAction {
         /// Replace an existing core.hooksPath or displaced hook
         #[arg(long)]
         force: bool,
+        /// Repositories whose .gitscale.toml [hooks] commands this hook may
+        /// run: comma-separated glob patterns matched against host/owner/repo,
+        /// e.g. 'github.com/acme/*,git.internal.example/*'. Required for
+        /// --global and --system; use '*' to allow every repository.
+        #[arg(long, value_name = "PATTERNS")]
+        allow: Option<String>,
         #[arg(short = 'C', long)]
         root: Option<PathBuf>,
     },
@@ -254,11 +261,13 @@ fn run_cli_inner(
                 global,
                 local,
                 force,
+                allow,
                 root,
             } => commands::hook::install(
                 hook_scope(system, global, local),
                 root.as_deref(),
                 force,
+                allow.as_deref(),
                 out,
             ),
             HookAction::Uninstall {
