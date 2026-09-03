@@ -4,6 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+use crate::ci;
 use crate::config::RepoEntry;
 
 pub fn is_ci() -> bool {
@@ -14,6 +15,12 @@ pub fn is_ci() -> bool {
 
 fn run_git(args: &[&str], cwd: Option<&Path>, check: bool) -> Result<std::process::Output> {
     let mut cmd = Command::new("git");
+    // Under CI, teach git how to authenticate to the CI server. Scoped to that
+    // one host, and carrying the name of the token variable rather than the
+    // token, so nothing secret reaches argv or a config file.
+    if let Some(auth) = ci::active() {
+        cmd.args(auth.git_config_args());
+    }
     cmd.args(args);
     cmd.stdin(Stdio::null());
     cmd.env("GIT_TERMINAL_PROMPT", "0");
@@ -32,7 +39,7 @@ fn run_git(args: &[&str], cwd: Option<&Path>, check: bool) -> Result<std::proces
         .with_context(|| format!("failed to run: git {}", args.join(" ")))?;
     if check && !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("{}", git_error_line(&stderr));
+        bail!("{}", git_failure(&stderr, ci::active()));
     }
     Ok(output)
 }
@@ -47,6 +54,19 @@ fn git_error_line(stderr: &str) -> &str {
         .find(|l| l.contains("fatal:") || l.contains("error:"))
         .or_else(|| trimmed.lines().last())
         .unwrap_or("unknown error")
+}
+
+/// The message to report for a failed git call. A 403 from the CI server is
+/// the failure people actually hit: the token is valid but the target project
+/// has not allowed this one to read it, and git's own wording gives no clue.
+fn git_failure(stderr: &str, auth: Option<&crate::ci::CiAuth>) -> String {
+    let line = git_error_line(stderr);
+    match auth {
+        Some(auth) if stderr.contains("403") => {
+            format!("{}\nhint: {}", line, auth.forbidden_hint())
+        }
+        _ => line.to_string(),
+    }
 }
 
 fn stdout_str(output: &std::process::Output) -> String {
@@ -73,7 +93,7 @@ fn shallow_clone_at_sha(entry: &RepoEntry, dest: &Path, verbose: bool) -> Result
     fs::create_dir_all(dest).with_context(|| format!("cannot create {}", dest.display()))?;
     run_git(&["init", "--quiet"], Some(dest), true)?;
     run_git(
-        &["remote", "add", "origin", &entry.repo_url],
+        &["remote", "add", "origin", &remote_url(entry)],
         Some(dest),
         true,
     )?;
@@ -111,7 +131,8 @@ pub fn clone_repo(entry: &RepoEntry, root: &Path, verbose: bool, shallow: bool) 
         }
     } else {
         let dest_str = dest.to_string_lossy().to_string();
-        let mut args: Vec<&str> = vec!["clone", &entry.repo_url, &dest_str];
+        let url = remote_url(entry);
+        let mut args: Vec<&str> = vec!["clone", &url, &dest_str];
         if shallow && !entry.revision.is_empty() {
             args.extend_from_slice(&["--depth", "1", "--branch", &entry.revision]);
         } else if shallow {
@@ -148,15 +169,37 @@ pub fn reconcile_remote(entry: &RepoEntry, root: &Path) -> Result<bool> {
     if !current.status.success() {
         return Ok(false);
     }
-    if stdout_str(&current) == entry.repo_url {
+    let url = remote_url(entry);
+    if stdout_str(&current) == url {
         return Ok(false);
     }
-    run_git(
-        &["remote", "set-url", "origin", &entry.repo_url],
-        Some(&dest),
-        true,
-    )?;
+    run_git(&["remote", "set-url", "origin", &url], Some(&dest), true)?;
     Ok(true)
+}
+
+/// The URL to use as `origin` for `entry`: the configured one, unless CI
+/// credentials cover its host and can fetch it over HTTPS instead.
+pub fn remote_url(entry: &RepoEntry) -> String {
+    ci::remote_url(&entry.repo_url)
+}
+
+/// Repoint an existing clone at the CI server's HTTPS URL before a network
+/// operation. A no-op outside CI, and for any host the CI server doesn't own:
+/// a workspace cloned over SSH (restored from cache, or checked out by the
+/// runner itself) otherwise keeps failing on an SSH key the job doesn't have.
+fn ensure_ci_remote(entry: &RepoEntry, dest: &Path) -> Result<()> {
+    let Some(auth) = ci::active() else {
+        return Ok(());
+    };
+    let Some(url) = auth.remote_url(&entry.repo_url) else {
+        return Ok(());
+    };
+    let current = run_git(&["remote", "get-url", "origin"], Some(dest), false)?;
+    if !current.status.success() || stdout_str(&current) == url {
+        return Ok(());
+    }
+    run_git(&["remote", "set-url", "origin", &url], Some(dest), true)?;
+    Ok(())
 }
 
 pub fn checkout_revision(entry: &RepoEntry, root: &Path) -> Result<()> {
@@ -197,6 +240,7 @@ pub fn is_shallow(dest: &Path) -> bool {
 
 pub fn fetch_repo(entry: &RepoEntry, root: &Path) -> Result<()> {
     let dest = root.join(&entry.directory);
+    ensure_ci_remote(entry, &dest)?;
     if is_shallow(&dest) {
         run_git(&["fetch", "--depth", "1", "--quiet"], Some(&dest), true)?;
     } else {
@@ -329,6 +373,8 @@ pub fn pull_repo(entry: &RepoEntry, root: &Path, verbose: bool, shallow: bool) -
         restore_writable(&dest)?;
     }
 
+    ensure_ci_remote(entry, &dest)?;
+
     let result = (|| -> Result<()> {
         if is_shallow(&dest) {
             if looks_like_sha(&entry.revision) {
@@ -378,6 +424,7 @@ pub fn push_repo(entry: &RepoEntry, root: &Path, _verbose: bool) -> Result<()> {
     if !dest.exists() {
         return Ok(());
     }
+    ensure_ci_remote(entry, &dest)?;
     run_git(&["push", "--quiet"], Some(&dest), true)?;
     Ok(())
 }
@@ -721,12 +768,14 @@ pub fn get_artefact_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::git_error_line;
+    use super::{git_error_line, git_failure};
+    use crate::ci::CiAuth;
+    use std::collections::HashMap;
 
     #[test]
     fn picks_fatal_line_over_leading_warning() {
         let stderr = "** WARNING: connection is not using a post-quantum key exchange algorithm.\n\
-                       git@gitlab.partly.pro: Permission denied (publickey).\n\
+                       git@gitlab.example.com: Permission denied (publickey).\n\
                        fatal: Could not read from remote repository.\n\
                        \n\
                        Please make sure you have the correct access rights\n\
@@ -746,5 +795,33 @@ mod tests {
     #[test]
     fn falls_back_to_unknown_error_when_empty() {
         assert_eq!(git_error_line(""), "unknown error");
+    }
+
+    #[test]
+    fn explains_a_403_from_the_ci_server() {
+        let auth = CiAuth::from_map(&HashMap::from([
+            ("CI_JOB_TOKEN", "tok"),
+            ("CI_SERVER_URL", "https://gitlab.example.com"),
+        ]))
+        .unwrap();
+        let stderr = "fatal: unable to access \
+                      'https://gitlab.example.com/acme/payments.git/': \
+                      The requested URL returned error: 403";
+        let message = git_failure(stderr, Some(&auth));
+        assert!(message.starts_with("fatal: unable to access"));
+        assert!(message.contains("Job token permissions"));
+        // Without CI credentials there is nothing useful to add.
+        assert!(!git_failure(stderr, None).contains("hint:"));
+    }
+
+    #[test]
+    fn leaves_unrelated_failures_unannotated() {
+        let auth = CiAuth::from_map(&HashMap::from([
+            ("CI_JOB_TOKEN", "tok"),
+            ("CI_SERVER_URL", "https://gitlab.example.com"),
+        ]))
+        .unwrap();
+        let stderr = "fatal: repository 'https://gitlab.example.com/x.git/' not found";
+        assert!(!git_failure(stderr, Some(&auth)).contains("hint:"));
     }
 }

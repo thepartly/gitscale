@@ -258,6 +258,73 @@ Some git servers refuse to serve an arbitrary commit. If the fetch is rejected, 
 
 **Trade-off:** a `revision` of 7–64 hexadecimal characters is treated as a commit SHA. A branch or tag whose name happens to be entirely hexadecimal (e.g. `abcdef1`) therefore takes the SHA path as well. It still resolves and checks out the right commit, but the clone ends up detached rather than on the branch — rename the ref or use a longer name if you need to stay on it.
 
+## CI authentication
+
+CI runners have a token for the forge they run on, but no SSH key. An entry declared as `git@gitlab.example.com:group/repo.git` clones fine on a laptop and fails inside a job.
+
+GitScale derives the fix from the job environment. On **GitLab CI** (`CI_JOB_TOKEN` plus `CI_SERVER_URL`, or `CI_SERVER_HOST`/`CI_SERVER_PROTOCOL`/`CI_SERVER_PORT`) and on **GitHub Actions** (`GITHUB_ACTIONS` plus `GITHUB_TOKEN` or `GH_TOKEN`, with `GITHUB_SERVER_URL`), every entry **hosted on that same server** is fetched over HTTPS with the job token instead of over SSH:
+
+```toml
+"libs/payments" = { url = "git@gitlab.example.com:acme/payments.git", revision = "main" }
+```
+```
+# inside a GitLab job, with no pipeline setup:
+https://gitlab.example.com/acme/payments.git   authenticated as gitlab-ci-token
+```
+
+Both SSH spellings are recognised — `git@host:group/repo.git` and `ssh://git@host/group/repo.git` — and nested subgroups are preserved. An existing clone whose `origin` still points at SSH (a cached workspace, or the runner's own checkout) is repointed before the next fetch.
+
+Nothing else is touched:
+
+- **Other hosts are never offered the token.** A dependency on a different server is fetched exactly as configured. Its host has to match the CI server's for the credential to apply at all.
+- **The token never lands on disk or in argv.** GitScale passes git a credential helper scoped to the CI server that reads the token variable when git asks for the password, so only the *variable name* appears in the command line.
+- **Nothing sensitive is persisted.** The credential setup lives on the git command line for the duration of the call. The only thing written to `.git/config` is the plain HTTPS remote URL, which carries no credentials.
+
+Set `GITSCALE_NO_CI_AUTH=1` to switch this off and fetch exactly what the config says.
+
+### GitLab job token allowlists
+
+Detection cannot grant access. On GitLab, the target project must list the calling project under **Settings → CI/CD → Job token permissions**, or the clone returns 403 no matter how it authenticates. GitScale spells this out when it sees one:
+
+```
+FAIL  libs/payments: fatal: unable to access 'https://gitlab.example.com/acme/payments.git/': The requested URL returned error: 403
+hint: the GitLab job token (CI_JOB_TOKEN) was rejected. Add this project to the target project's Settings -> CI/CD -> 'Job token permissions' allowlist, or give the job a token with read access.
+```
+
+### GitHub Actions token scope
+
+GitHub has no equivalent of the allowlist. The built-in `GITHUB_TOKEN` is a freshly minted installation token for the GitHub Actions app, and that installation is scoped to exactly **one repository** — the one the workflow lives in. It expires when the job ends.
+
+| Entry | Result |
+|-------|--------|
+| The workflow's own repository | works |
+| Any public repository | works (readable without credentials anyway) |
+| A **private** repository, even in the same org | 403 |
+
+The workflow's `permissions:` block only widens or narrows *which scopes* the token holds on its own repository (`contents`, `packages`, `id-token`, …). It cannot extend the token to a second repository. `contents: read` is simply the scope a clone needs.
+
+For a private cross-repo dependency, supply a token that does cover it:
+
+| Option | Notes |
+|--------|-------|
+| GitHub App token | Install an app on both repositories and mint a short-lived token in the job. No user account involved, expires within the hour. |
+| Fine-grained PAT | Grant **Contents: Read** on the specific repositories, store as a repo or org secret. Tied to a user account. |
+| Deploy key | An SSH key registered on the target repository. Per-repo, and keeps you on SSH rather than HTTPS. |
+
+GitScale reads whichever token is in `GITHUB_TOKEN` or `GH_TOKEN` and does not care where it came from, so exporting a better token under that name is the whole change:
+
+```yaml
+- uses: actions/create-github-app-token@v1
+  id: app-token
+  with:
+    app-id: ${{ vars.APP_ID }}
+    private-key: ${{ secrets.APP_PRIVATE_KEY }}
+    owner: acme
+- run: gitscale sync
+  env:
+    GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+```
+
 ## Artefact storage
 
 ### Setup
@@ -448,6 +515,7 @@ GitScale occupies the same space as several multi-repo and vendoring tools. The 
 - **Native S3 storage.** Signing and transfer are built in (no `aws` CLI or SDK required); works with AWS, MinIO, R2, B2, Spaces, GCS, or a local directory.
 - **Transitive dedup via symlinks.** When two nested configs depend on the same repo, GitScale checks it out once at the root and symlinks the rest, avoiding duplicate clones. Submodules and repo produce independent nested copies.
 - **CI-aware shallow cloning.** Automatically shallow-clones everything under `CI=1`, and readonly repos are always shallow — faster, smaller checkouts without extra flags.
+- **CI credentials without pipeline setup.** Inside a GitLab or GitHub job, entries hosted on that same server are fetched over HTTPS with the job token — scoped to that host, with the token never written to `.git/config` or a command line. No `insteadOf` rewriting in `.gitlab-ci.yml`.
 - **Rich, single-glance status.** One `status` table (with JSON output) surfaces ahead/behind, detached, ref-mismatch, dirty, stale, and broken-symlink states across every repo.
 - **One human-readable config.** A single TOML file versus `.gitmodules` + gitlink entries, XML manifests, or Python `DEPS`.
 

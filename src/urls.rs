@@ -19,6 +19,25 @@ pub fn extract_hostname(repo_url: &str) -> Result<String> {
     bail!("Cannot extract hostname from URL: {}", repo_url)
 }
 
+/// The repository path of a URL, without a leading slash and with any `.git`
+/// suffix kept — the part that survives a change of transport.
+pub fn extract_path(repo_url: &str) -> Result<String> {
+    // SSH: git@hostname:owner/repo.git
+    let ssh_re = Regex::new(r"^[\w-]+@[\w.\-]+:(.*)").unwrap();
+    let path = if let Some(caps) = ssh_re.captures(repo_url) {
+        caps[1].to_string()
+    } else if let Ok(parsed) = Url::parse(repo_url) {
+        parsed.path().to_string()
+    } else {
+        bail!("Cannot extract path from URL: {}", repo_url)
+    };
+    let path = path.trim_matches('/');
+    if path.is_empty() {
+        bail!("Cannot extract path from URL: {}", repo_url);
+    }
+    Ok(path.to_string())
+}
+
 pub fn extract_owner_repo(repo_url: &str) -> Result<(String, String)> {
     // SSH: git@hostname:owner/repo.git
     let ssh_re = Regex::new(r"^[\w-]+@[\w.\-]+:(.*)").unwrap();

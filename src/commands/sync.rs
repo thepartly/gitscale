@@ -49,7 +49,12 @@ fn reconcile_remotes(root: Option<&Path>, names: &[String], out: &mut dyn Write)
                 writeln!(out, "Reconciling remotes...")?;
                 header_done = true;
             }
-            writeln!(out, "  update  {} -> {}", entry.directory, entry.repo_url)?;
+            writeln!(
+                out,
+                "  update  {} -> {}",
+                entry.directory,
+                crate::git::remote_url(entry)
+            )?;
         }
     }
     Ok(())
