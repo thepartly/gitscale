@@ -34,7 +34,7 @@ pub fn resolve_recursive(
     // Build normalized URL -> root entry lookup
     let url_to_root: HashMap<String, &RepoEntry> = root_repos
         .iter()
-        .map(|e| (normalize_url(&e.repo_url), e))
+        .map(|e| (crate::urls::normalize(&e.repo_url), e))
         .collect();
 
     for root_entry in root_repos {
@@ -53,7 +53,7 @@ pub fn resolve_recursive(
         let child_config = load_config(&child_config_path)?;
 
         for child_dep in &child_config.repos {
-            let norm_url = normalize_url(&child_dep.repo_url);
+            let norm_url = crate::urls::normalize(&child_dep.repo_url);
 
             let Some(matched_root) = url_to_root.get(&norm_url) else {
                 bail!(
@@ -341,23 +341,6 @@ fn relative_path(from: &Path, to: &Path) -> PathBuf {
     result
 }
 
-/// Canonicalize a git remote URL so that different transport forms of the same
-/// repository (e.g. `git@github.com:org/repo.git` and
-/// `https://github.com/org/repo`) compare as equal.
-///
-/// When the host and owner/repo can be extracted, the canonical form is
-/// `host/owner/repo` (lowercased). Otherwise we fall back to stripping a
-/// trailing `.git` and lowercasing.
-fn normalize_url(url: &str) -> String {
-    match (
-        crate::urls::extract_hostname(url),
-        crate::urls::extract_owner_repo(url),
-    ) {
-        (Ok(host), Ok((owner, repo))) => format!("{}/{}/{}", host, owner, repo).to_lowercase(),
-        _ => url.strip_suffix(".git").unwrap_or(url).to_lowercase(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,25 +364,6 @@ mod tests {
         let from = Path::new("");
         let to = Path::new("repoB");
         assert_eq!(relative_path(from, to), PathBuf::from("repoB"));
-    }
-
-    #[test]
-    fn test_normalize_url() {
-        // SSH and HTTPS forms of the same repo canonicalize identically.
-        assert_eq!(
-            normalize_url("git@github.com:org/repo.git"),
-            "github.com/org/repo"
-        );
-        assert_eq!(
-            normalize_url("https://github.com/ORG/Repo"),
-            "github.com/org/repo"
-        );
-        assert_eq!(
-            normalize_url("git@github.com:org/repo.git"),
-            normalize_url("https://github.com/org/repo.git")
-        );
-        // Unparseable URLs fall back to strip-.git + lowercase.
-        assert_eq!(normalize_url("file:///Tmp/Repo.git"), "file:///tmp/repo");
     }
 
     #[test]

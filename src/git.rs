@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 
 use crate::ci;
 use crate::config::RepoEntry;
+use crate::share::Reference;
 
 pub fn is_ci() -> bool {
     std::env::var("CI")
@@ -113,7 +114,18 @@ fn shallow_clone_at_sha(entry: &RepoEntry, dest: &Path, verbose: bool) -> Result
     Ok(true)
 }
 
-pub fn clone_repo(entry: &RepoEntry, root: &Path, verbose: bool, shallow: bool) -> Result<()> {
+/// Clone `entry` into `root`.
+///
+/// `reference` names a copy already on this machine whose objects the new
+/// clone may take instead of downloading them. See [`crate::share`] for how
+/// one is found; passing `None` always produces an ordinary clone.
+pub fn clone_repo(
+    entry: &RepoEntry,
+    root: &Path,
+    verbose: bool,
+    shallow: bool,
+    reference: Option<&Reference>,
+) -> Result<()> {
     if entry.is_artefact() {
         return Ok(());
     }
@@ -123,20 +135,31 @@ pub fn clone_repo(entry: &RepoEntry, root: &Path, verbose: bool, shallow: bool) 
     }
 
     if shallow && looks_like_sha(&entry.revision) {
+        // This path builds the repository with `init` + a one-commit `fetch`
+        // rather than `clone`, and there is no `--reference` for fetch. Little
+        // is lost: a depth-1 fetch of a single commit transfers about as much
+        // as wiring up an alternate would save.
         if !shallow_clone_at_sha(entry, &dest, verbose)? {
             // Remote would not serve the bare commit; retry unshallowed.
             fs::remove_dir_all(&dest)
                 .with_context(|| format!("cannot clean up {}", dest.display()))?;
-            return clone_repo(entry, root, verbose, false);
+            return clone_repo(entry, root, verbose, false, reference);
         }
     } else {
         let dest_str = dest.to_string_lossy().to_string();
         let url = remote_url(entry);
+        let reference_path = reference.map(|r| r.path.to_string_lossy().to_string());
         let mut args: Vec<&str> = vec!["clone", &url, &dest_str];
         if shallow && !entry.revision.is_empty() {
             args.extend_from_slice(&["--depth", "1", "--branch", &entry.revision]);
         } else if shallow {
             args.extend_from_slice(&["--depth", "1"]);
+        }
+        if let (Some(reference), Some(path)) = (reference, reference_path.as_deref()) {
+            args.extend_from_slice(&["--reference", path]);
+            if reference.dissociate {
+                args.push("--dissociate");
+            }
         }
         if verbose {
             args.push("--progress");
@@ -345,7 +368,7 @@ pub fn sync_repo(entry: &RepoEntry, root: &Path, verbose: bool, shallow: bool) -
     }
     let dest = root.join(&entry.directory);
     if !dest.exists() {
-        return clone_repo(entry, root, verbose, shallow);
+        return clone_repo(entry, root, verbose, shallow, None);
     }
 
     if entry.is_readonly() {
@@ -372,13 +395,22 @@ pub fn sync_repo(entry: &RepoEntry, root: &Path, verbose: bool, shallow: bool) -
     result
 }
 
-pub fn pull_repo(entry: &RepoEntry, root: &Path, verbose: bool, shallow: bool) -> Result<()> {
+/// Bring `entry` up to date, cloning it first if it is not there yet — which
+/// is the usual case in a freshly created worktree, where the hook-triggered
+/// pull is the first thing to run. `reference` is used only for that clone.
+pub fn pull_repo(
+    entry: &RepoEntry,
+    root: &Path,
+    verbose: bool,
+    shallow: bool,
+    reference: Option<&Reference>,
+) -> Result<()> {
     if entry.is_artefact() {
         return Ok(());
     }
     let dest = root.join(&entry.directory);
     if !dest.exists() {
-        return clone_repo(entry, root, verbose, shallow);
+        return clone_repo(entry, root, verbose, shallow, reference);
     }
 
     if entry.is_readonly() {

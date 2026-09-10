@@ -67,6 +67,15 @@ pub enum OnHookError {
 }
 
 impl OnHookError {
+    /// The spelling `[hooks].on_pull_error` accepts, so a config that is read
+    /// and written back keeps the value it had.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fail => "fail",
+            Self::Warn => "warn",
+        }
+    }
+
     /// Unconfigured, CI fails fast; interactive use only warns, so a broken
     /// pull cannot make unrelated `git checkout` calls look like failures.
     pub fn resolved(configured: Option<Self>) -> Self {
@@ -84,11 +93,25 @@ pub struct Hooks {
     pub on_pull_error: Option<OnHookError>,
 }
 
-#[derive(Debug, Clone)]
+/// How a clone may reuse a copy of a sub-repository already on this machine.
+#[derive(Debug, Clone, Default)]
+pub struct Share {
+    /// Copy borrowed objects in and drop the link once the clone is made.
+    ///
+    /// Off by default: borrowing is what saves the disk, and the workspace
+    /// borrowed from is normally the long-lived one. Turn it on where the
+    /// source may be pruned, moved or garbage-collected out from under the
+    /// clones — `git gc` there can delete objects only a borrower still
+    /// needs, and nothing warns when it does.
+    pub dissociate: bool,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct GitScaleConfig {
     pub repos: Vec<RepoEntry>,
     pub storage_url: String,
     pub hooks: Hooks,
+    pub share: Share,
 }
 
 #[derive(Deserialize)]
@@ -96,6 +119,12 @@ struct RawConfig {
     storage: Option<RawStorage>,
     repos: Option<BTreeMap<String, RawRepo>>,
     hooks: Option<RawHooks>,
+    share: Option<RawShare>,
+}
+
+#[derive(Deserialize)]
+struct RawShare {
+    dissociate: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -147,11 +176,19 @@ pub fn load_config(config_path: &Path) -> Result<GitScaleConfig> {
     let storage_url = parse_storage(raw.storage.as_ref(), config_path)?;
     let repos = parse_repos(raw.repos.as_ref(), config_path)?;
     let hooks = parse_hooks(raw.hooks.as_ref(), config_path)?;
+    let share = Share {
+        dissociate: raw
+            .share
+            .as_ref()
+            .and_then(|s| s.dissociate)
+            .unwrap_or(false),
+    };
 
     Ok(GitScaleConfig {
         repos,
         storage_url,
         hooks,
+        share,
     })
 }
 
@@ -322,30 +359,87 @@ fn parse_hooks(raw: Option<&RawHooks>, config_path: &Path) -> Result<Hooks> {
     })
 }
 
-pub fn write_config(config_path: &Path, entries: &[RepoEntry], storage_url: &str) -> Result<()> {
+/// Render a value as a TOML basic string.
+///
+/// Nothing here is validated against quoting: a `post_sync` command is an
+/// arbitrary shell line, and `check_url` rejects option-like and remote-helper
+/// URLs without caring about quotes. Emitting any of them raw would produce a
+/// file that no longer parses — silently losing the rest of the config on the
+/// next read.
+fn toml_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            // Remaining control characters have no short escape and are
+            // illegal bare in a basic string.
+            c if (c as u32) < 0x20 || c == '\u{7f}' => {
+                out.push_str(&format!("\\u{:04X}", c as u32))
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Rewrite the config file from `config`.
+///
+/// Takes the whole config rather than the parts a caller happens to be
+/// changing: this replaces the file wholesale, so every table it does not
+/// write is a table it deletes.
+pub fn write_config(config_path: &Path, config: &GitScaleConfig) -> Result<()> {
     let mut lines: Vec<String> = Vec::new();
 
-    if !storage_url.is_empty() {
-        lines.push("[storage]".to_string());
-        lines.push(format!("url = \"{}\"", storage_url));
+    if config.share.dissociate {
+        lines.push("[share]".to_string());
+        lines.push("dissociate = true".to_string());
         lines.push(String::new());
     }
 
-    if !entries.is_empty() {
+    if !config.storage_url.is_empty() {
+        lines.push("[storage]".to_string());
+        lines.push(format!("url = {}", toml_string(&config.storage_url)));
+        lines.push(String::new());
+    }
+
+    if config.hooks.post_sync.is_some() || config.hooks.on_pull_error.is_some() {
+        lines.push("[hooks]".to_string());
+        if let Some(cmd) = &config.hooks.post_sync {
+            lines.push(format!("post_sync = {}", toml_string(cmd)));
+        }
+        if let Some(policy) = config.hooks.on_pull_error {
+            lines.push(format!("on_pull_error = {}", toml_string(policy.as_str())));
+        }
+        lines.push(String::new());
+    }
+
+    if !config.repos.is_empty() {
         lines.push("[repos]".to_string());
-        for entry in entries {
-            let mut parts = vec![format!("url = \"{}\"", entry.repo_url)];
+        for entry in &config.repos {
+            let mut parts = vec![format!("url = {}", toml_string(&entry.repo_url))];
             if !entry.revision.is_empty() {
-                parts.push(format!("revision = \"{}\"", entry.revision));
+                parts.push(format!("revision = {}", toml_string(&entry.revision)));
             }
             if entry.mode != RepoMode::Readwrite {
-                parts.push(format!("mode = \"{}\"", entry.mode));
+                parts.push(format!("mode = {}", toml_string(&entry.mode.to_string())));
             }
             if !entry.recursive {
                 parts.push("recursive = false".to_string());
             }
             let inline = parts.join(", ");
-            lines.push(format!("\"{}\" = {{ {} }}", entry.directory, inline));
+            lines.push(format!(
+                "{} = {{ {} }}",
+                toml_string(&entry.directory),
+                inline
+            ));
         }
     }
 

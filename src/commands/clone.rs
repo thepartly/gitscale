@@ -6,6 +6,7 @@ use std::path::Path;
 use crate::config::{find_config, load_config, RepoEntry};
 use crate::git::{clone_repo, is_ci};
 use crate::progress::{run_parallel, RepoStatus};
+use crate::share;
 use crate::storage::clone_artefact;
 
 pub fn run(
@@ -31,6 +32,10 @@ pub fn run(
     let dir_names: Vec<String> = selected.iter().map(|e| e.directory.clone()).collect();
     let storage_url = &config.storage_url;
     let ci = is_ci();
+    // Resolved once: every entry is mapped onto the same source workspace, and
+    // the lookup shells out to git.
+    let source = share::source_workspace(&config_root);
+    let dissociate = config.share.dissociate;
 
     let failed = run_parallel(
         "Cloning missing repos...",
@@ -71,7 +76,10 @@ pub fn run(
             }
 
             let shallow = ci || entry.is_readonly();
-            match clone_repo(entry, &config_root, verbose, shallow) {
+            let reference = source
+                .as_deref()
+                .and_then(|source| share::reference_for(source, entry, dissociate));
+            match clone_repo(entry, &config_root, verbose, shallow, reference.as_ref()) {
                 Ok(()) => RepoStatus::Ok(name.to_string()),
                 Err(e) => RepoStatus::Fail(format!("{}: {}", name, e)),
             }

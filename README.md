@@ -78,6 +78,16 @@ url = "https://my-bucket.s3.us-east-1.amazonaws.com/gitscale"
 
 See [Artefact storage](#artefact-storage) below.
 
+### Share
+
+```toml
+[share]
+dissociate = true
+```
+
+Controls how a clone reuses a copy of a sub-repository already on this machine.
+See [Reusing a local copy](#reusing-a-local-copy) below. Off by default.
+
 ## Commands
 
 ### `gitscale clone [NAMES...]`
@@ -266,6 +276,57 @@ The result is a shallow clone with a **detached HEAD** at exactly the pinned com
 Some git servers refuse to serve an arbitrary commit. If the fetch is rejected, GitScale falls back to a full clone and checks the revision out normally. GitHub and GitLab both permit it.
 
 **Trade-off:** a `revision` of 7–64 hexadecimal characters is treated as a commit SHA. A branch or tag whose name happens to be entirely hexadecimal (e.g. `abcdef1`) therefore takes the SHA path as well. It still resolves and checks out the right commit, but the clone ends up detached rather than on the branch — rename the ref or use a longer name if you need to stay on it.
+
+## Reusing a local copy
+
+A second worktree of a workspace, or a workspace cloned with `--reference`,
+sits beside one that already downloaded every sub-repository. GitScale finds
+that earlier workspace and clones each sub-repository from it with
+`git clone --reference`, so the objects are copied off local disk instead of
+fetched over the network.
+
+This matters most with [git hooks](#git-hooks) installed: `git worktree add`
+fires `post-checkout`, which pulls, which clones every declared repository into
+the new worktree. That is the command it makes fast.
+
+Nothing is shared implicitly — git has no way to connect a fresh clone to a
+sibling, and its worktree metadata says nothing about the repositories declared
+inside a workspace. GitScale works the source out itself:
+
+| How the workspace was made | What identifies the source |
+|---|---|
+| `git worktree add` | the main worktree, from `git worktree list` |
+| `git clone --reference` | `objects/info/alternates` |
+| an ordinary clone | nothing — sub-repositories clone normally |
+
+The source is always the **main** worktree, never a sibling. Sibling worktrees
+are routinely deleted once their branch merges, and an alternate that
+disappears leaves the borrowing repository unable to read its own history.
+
+A copy is only borrowed from when its `origin` matches the configured `url`.
+Occupying the same relative path is not enough: two unrelated workspaces may
+both keep something at `libs/core`. Symlinked paths (those
+[`resolve` creates](#recursive-dependencies) to dedupe a recursive dependency)
+and artefact entries are skipped, and anything unsuitable simply clones
+normally.
+
+### dissociate
+
+```toml
+[share]
+dissociate = true
+```
+
+By default the new clone keeps a pointer to the source and does not copy its
+objects, which saves disk as well as network. With `dissociate = true` the
+borrowed objects are copied in and the pointer is dropped once the clone is
+made: the network saving remains, the disk saving does not, and the result no
+longer depends on the source.
+
+Turn it on where the source may be moved, deleted or garbage-collected. `git gc`
+in the source repository does not know it has borrowers and can delete objects
+one still needs — nothing warns when that happens, and the borrowing clone is
+left unable to read its own history.
 
 ## CI authentication
 
@@ -613,29 +674,34 @@ GitScale occupies the same space as several multi-repo and vendoring tools. The 
 * should work completely automatically (i.e not require --include-submodules or --recursive flags alike on checkout)
 * should have great DX, default choices are super easy to understand and use, status is clear, automation is an addon but not a replacement for workflows people are used to
 
+**R8 — Work with git worktrees, and reuse what is already on disk**
+* a second worktree of the workspace should come up populated, without a manual per-dependency step after `git worktree add`
+* checkout time should not scale with the number of worktrees — an existing local copy of a dependency should be reused instead of re-fetched
+* the reuse must be safe to undo, since a borrowed copy that is later deleted or garbage-collected breaks the checkouts that borrowed from it
+
 Baseline for every candidate: *should rely and work with git repositories.*
 
 ### Coverage
 
 `✔` covered · `~` partial or with caveats · `✘` not covered
 
-| Tool | Config | Approach | R1 any content | R2 large prebuilt | R3 partial share | R4 versions | R5 deps: transitive, dedup, mismatch | R6 SDK ↔ full stack | R7 auto + DX |
-|------|--------|----------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| **GitScale** | single `.gitscale.toml` | separate clones + symlinks | ✔ | ✔ S3 artefacts | ✔ artefact mode | ✔ one pinned config | ✔ recursive, symlink dedup, errors on conflicting revisions | ✔ readonly/artefact ↔ readwrite | ✔ git hooks, shallow, one status |
-| git submodules | `.gitmodules` + gitlink | separate clones | ✔ | ✘ | ✘ whole repo only | ✔ pinned SHA | `~` recursive, but nested copies and silent divergence | ✘ | ✘ needs `--recursive` |
-| git subtree | none (in-tree) | merged into main tree | ✔ | ✘ | `~` per-prefix | `~` SHA buried in merges | ✘ | ✘ | `~` in-tree, awkward updates |
-| [git-subrepo](https://github.com/ingydotnet/git-subrepo) | `.gitrepo` per subdir | merged into main tree | ✔ | ✘ | `~` per-subdir | ✔ `.gitrepo` records commit | ✘ | ✘ | `~` in-tree, extra binary |
-| [Google repo](https://gerrit.googlesource.com/git-repo) | `manifest.xml` | separate clones | ✔ | ✘ | ✘ | ✔ manifest snapshot | ✘ flat manifest, no transitive | ✘ | ✘ manual `repo sync` |
-| [vcstool](https://github.com/dirk-thomas/vcstool) | `.repos` YAML | separate clones | ✔ | ✘ | ✘ | ✔ `.repos` pins | ✘ flat list, no transitive | ✘ | `~` manual `vcs import` |
-| [west](https://github.com/zephyrproject-rtos/west) | `west.yml` | separate clones | `~` mostly | ✘ | ✘ | ✔ `west.yml` | `~` manifest imports, name clashes error, no dedup | ✘ | `~` manual `west update` |
-| [myrepos (mr)](https://myrepos.branchable.com/) | `.mrconfig` | separate clones, any VCS | ✔ | ✘ | ✘ | ✘ no pinning | ✘ | ✘ | `~` status only |
-| [meta](https://github.com/mateodelnorte/meta) | `.meta` JSON | separate clones + plugins | ✔ | ✘ | ✘ | ✘ no pinning | ✘ | ✘ | `~` plugin-dependent |
-| [gclient](https://chromium.googlesource.com/chromium/tools/depot_tools) | `DEPS` (Python) | separate clones + hooks | `~` mostly | `~` CIPD/GCS via hooks | ✘ | ✔ `DEPS` pins | `~` recursive DEPS, conflicts error, dedup is path-keyed | ✘ | ✘ manual sync, Python config |
-| Yarn workspaces | `package.json` | JS/TS monorepo workspace | ✘ JS/TS only | `~` registry tarballs | `~` published subset | ✔ lockfile | ✔ hoisting + range/peer checks, package-level | `~` `link` / resolutions | n/a single repo |
-| Cargo workspaces | `Cargo.toml` | Rust multi-crate workspace | ✘ Rust only | ✘ | `~` published crate | ✔ lockfile | ✔ semver unification, not repo dedup | `~` `[patch]` / path override | n/a single repo |
-| Go workspaces | `go.work` | Go multi-module workspace | ✘ Go only | ✘ | `~` published module | ✔ `go.mod` / `go.sum` | ✔ MVS picks one version, not repo dedup | `~` `go.work use` | n/a single repo |
+| Tool | Config | Approach | R1 any content | R2 large prebuilt | R3 partial share | R4 versions | R5 deps: transitive, dedup, mismatch | R6 SDK ↔ full stack | R7 auto + DX | R8 worktrees + local reuse |
+|------|--------|----------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **GitScale** | single `.gitscale.toml` | separate clones + symlinks | ✔ | ✔ S3 artefacts | ✔ artefact mode | ✔ one pinned config | ✔ recursive, symlink dedup, errors on conflicting revisions | ✔ readonly/artefact ↔ readwrite | ✔ git hooks, shallow, one status | ✔ auto-populated by hook, `--reference` reuse, opt-in `dissociate` |
+| git submodules | `.gitmodules` + gitlink | separate clones | ✔ | ✘ | ✘ whole repo only | ✔ pinned SHA | `~` recursive, but nested copies and silent divergence | ✘ | ✘ needs `--recursive` | `~` `--reference` propagates, but `worktree add` leaves empty dirs |
+| git subtree | none (in-tree) | merged into main tree | ✔ | ✘ | `~` per-prefix | `~` SHA buried in merges | ✘ | ✘ | `~` in-tree, awkward updates | ✔ in-tree — nothing extra to clone |
+| [git-subrepo](https://github.com/ingydotnet/git-subrepo) | `.gitrepo` per subdir | merged into main tree | ✔ | ✘ | `~` per-subdir | ✔ `.gitrepo` records commit | ✘ | ✘ | `~` in-tree, extra binary | ✔ in-tree — nothing extra to clone |
+| [Google repo](https://gerrit.googlesource.com/git-repo) | `manifest.xml` | separate clones | ✔ | ✘ | ✘ | ✔ manifest snapshot | ✘ flat manifest, no transitive | ✘ | ✘ manual `repo sync` | ✔ `--reference`, `--dissociate`, `--worktree` |
+| [vcstool](https://github.com/dirk-thomas/vcstool) | `.repos` YAML | separate clones | ✔ | ✘ | ✘ | ✔ `.repos` pins | ✘ flat list, no transitive | ✘ | `~` manual `vcs import` | `~` `--shallow` only, no local reuse |
+| [west](https://github.com/zephyrproject-rtos/west) | `west.yml` | separate clones | `~` mostly | ✘ | ✘ | ✔ `west.yml` | `~` manifest imports, name clashes error, no dedup | ✘ | `~` manual `west update` | `~` `update.auto-cache` reference cache, no worktree mode |
+| [myrepos (mr)](https://myrepos.branchable.com/) | `.mrconfig` | separate clones, any VCS | ✔ | ✘ | ✘ | ✘ no pinning | ✘ | ✘ | `~` status only | ✘ |
+| [meta](https://github.com/mateodelnorte/meta) | `.meta` JSON | separate clones + plugins | ✔ | ✘ | ✘ | ✘ no pinning | ✘ | ✘ | `~` plugin-dependent | ✘ |
+| [gclient](https://chromium.googlesource.com/chromium/tools/depot_tools) | `DEPS` (Python) | separate clones + hooks | `~` mostly | `~` CIPD/GCS via hooks | ✘ | ✔ `DEPS` pins | `~` recursive DEPS, conflicts error, dedup is path-keyed | ✘ | ✘ manual sync, Python config | `~` `--cache-dir` shared clones, no worktree mode |
+| Yarn workspaces | `package.json` | JS/TS monorepo workspace | ✘ JS/TS only | `~` registry tarballs | `~` published subset | ✔ lockfile | ✔ hoisting + range/peer checks, package-level | `~` `link` / resolutions | n/a single repo | n/a single repo |
+| Cargo workspaces | `Cargo.toml` | Rust multi-crate workspace | ✘ Rust only | ✘ | `~` published crate | ✔ lockfile | ✔ semver unification, not repo dedup | `~` `[patch]` / path override | n/a single repo | n/a single repo |
+| Go workspaces | `go.work` | Go multi-module workspace | ✘ Go only | ✘ | `~` published module | ✔ `go.mod` / `go.sum` | ✔ MVS picks one version, not repo dedup | `~` `go.work use` | n/a single repo | n/a single repo |
 
-The three workspace managers work inside a single repo, so R7 never arises for them — they don't address multi-repo checkout at all.
+The three workspace managers work inside a single repo, so R7 and R8 never arise for them — they don't address multi-repo checkout at all.
 
 ### GitScale highlights
 
@@ -644,16 +710,18 @@ The three workspace managers work inside a single repo, so R7 never arises for t
 - **Native S3 storage.** Signing and transfer are built in (no `aws` CLI or SDK required); works with AWS, MinIO, R2, B2, Spaces, GCS, or a local directory.
 - **Transitive dedup via symlinks.** When two nested configs depend on the same repo, GitScale checks it out once at the root and symlinks the rest, avoiding duplicate clones. Submodules and repo produce independent nested copies.
 - **CI-aware shallow cloning.** Automatically shallow-clones everything under `CI=1`, and readonly repos are always shallow — faster, smaller checkouts without extra flags.
+- **Worktrees cost almost nothing.** A second worktree of the workspace populates itself (the `post-checkout` hook pulls), and each sub-repository is cloned from the copy the main worktree already has rather than re-fetched — see [Reusing a local copy](#reusing-a-local-copy). Submodules leave a new worktree full of empty directories until you run `git submodule update --init` by hand.
 - **CI credentials without pipeline setup.** Inside a GitLab or GitHub job, entries hosted on that same server are fetched over HTTPS with the job token — scoped to that host, with the token never written to `.git/config` or a command line. No `insteadOf` rewriting in `.gitlab-ci.yml`.
 - **Rich, single-glance status.** One `status` table (with JSON output) surfaces ahead/behind, detached, ref-mismatch, dirty, stale, and broken-symlink states across every repo.
 - **One human-readable config.** A single TOML file versus `.gitmodules` + gitlink entries, XML manifests, or Python `DEPS`.
 
 ### Design choices
 
-- **Separate history per repo.** subtree and git-subrepo vendor code *into* your main repo, so the dependency's file history lives directly in the parent repository. GitScale keeps sub-repos as separate working trees by design, while the parent repo tracks the selected dependency revision in `.gitscale.toml`.
+- **Separate history per repo.** subtree and git-subrepo vendor code *into* your main repo, so the dependency's file history lives directly in the parent repository. That is what earns them R8 for free — a worktree of the parent already contains everything — but the cost is paid once per clone of the parent instead, whose history now carries every dependency's. GitScale keeps sub-repos as separate working trees by design, while the parent repo tracks the selected dependency revision in `.gitscale.toml`.
 - **External binary.** Submodules and subtree ship with git and need no extra install; GitScale is a separate binary.
 - **Git-only.** myrepos handles Git, Mercurial, Bazaar, SVN, and more. GitScale targets Git (plus its own artefact archives).
 - **Simpler workflow model.** Google repo and west help coordinate branch creation, topic work, and release manifests across many repos. GitScale can pin each dependency to a branch, tag, or commit, but it does not try to manage a shared multi-repo branching lifecycle. When `.gitscale.toml` pins child repos to immutable tags or commit SHAs, that config effectively becomes the release manifest: the system version is defined as an assembly of specific subsystem versions.
+- **R8 follows Google repo's design.** `repo init` has offered `--reference`, `--dissociate` and a `--worktree` mode for years, and gclient solves the same problem with a shared `--cache-dir` mirror. GitScale's approach is the same idea with the configuration removed: no mirror to set up and no flag to remember, because it works out the source workspace from git itself. The tradeoff is less control — repo lets you point at an arbitrary mirror, GitScale only reuses a workspace this one was actually derived from.
 - **Self-contained tool.** meta has a plugin system and repo/gclient have larger surrounding ecosystems, while GitScale keeps the core workflow built into one tool. That simplifies operation and keeps behavior directly controllable for Partly's needs.
 - **Linux-first symlink dedup.** Symlink-based dedup is efficient and natural on Linux, which is the primary development environment for Partly engineers. The tradeoff is that it is more awkward on Windows without developer mode or elevated privileges.
 

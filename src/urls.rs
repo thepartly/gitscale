@@ -59,3 +59,41 @@ pub fn extract_owner_repo(repo_url: &str) -> Result<(String, String)> {
     }
     Ok((parts[0].to_string(), parts[1].to_string()))
 }
+
+/// Canonicalize a git remote URL so that different transport forms of the same
+/// repository (e.g. `git@github.com:org/repo.git` and
+/// `https://github.com/org/repo`) compare as equal.
+///
+/// When the host and owner/repo can be extracted, the canonical form is
+/// `host/owner/repo` (lowercased). Otherwise we fall back to stripping a
+/// trailing `.git` and lowercasing.
+pub fn normalize(url: &str) -> String {
+    match (extract_hostname(url), extract_owner_repo(url)) {
+        (Ok(host), Ok((owner, repo))) => format!("{}/{}/{}", host, owner, repo).to_lowercase(),
+        _ => url.strip_suffix(".git").unwrap_or(url).to_lowercase(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_url() {
+        // SSH and HTTPS forms of the same repo canonicalize identically.
+        assert_eq!(
+            normalize("git@github.com:org/repo.git"),
+            "github.com/org/repo"
+        );
+        assert_eq!(
+            normalize("https://github.com/ORG/Repo"),
+            "github.com/org/repo"
+        );
+        assert_eq!(
+            normalize("git@github.com:org/repo.git"),
+            normalize("https://github.com/org/repo.git")
+        );
+        // Unparseable URLs fall back to strip-.git + lowercase.
+        assert_eq!(normalize("file:///Tmp/Repo.git"), "file:///tmp/repo");
+    }
+}

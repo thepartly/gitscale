@@ -8,6 +8,7 @@ use crate::config::{find_config, load_config};
 use crate::git::{is_ci, pull_repo};
 use crate::hooks;
 use crate::progress::{run_parallel, RepoStatus};
+use crate::share;
 use crate::storage::pull_artefact;
 
 pub fn run(
@@ -59,6 +60,10 @@ fn pull_inner(
     let dir_names: Vec<String> = selected.iter().map(|e| e.directory.clone()).collect();
     let storage_url = &config.storage_url;
     let ci = is_ci();
+    // A hook-triggered pull is the first thing to run in a new worktree, so
+    // this is the path that populates it — and the one that benefits most.
+    let source = share::source_workspace(&config_root);
+    let dissociate = config.share.dissociate;
 
     let failed = run_parallel(
         "Pulling latest changes...",
@@ -85,7 +90,10 @@ fn pull_inner(
             }
 
             let shallow = ci || entry.is_readonly();
-            match pull_repo(entry, &config_root, verbose, shallow) {
+            let reference = source
+                .as_deref()
+                .and_then(|source| share::reference_for(source, entry, dissociate));
+            match pull_repo(entry, &config_root, verbose, shallow, reference.as_ref()) {
                 Ok(()) => RepoStatus::Ok(name.to_string()),
                 Err(e) => RepoStatus::Fail(format!("{}: {}", name, e)),
             }

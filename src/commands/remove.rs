@@ -6,16 +6,12 @@ use crate::config::{find_config, load_config, write_config};
 
 pub fn run(directory: &str, root: Option<&Path>, out: &mut dyn Write) -> Result<()> {
     let config_path = find_config(root)?;
-    let config = load_config(&config_path)?;
+    let mut config = load_config(&config_path)?;
     let orig_len = config.repos.len();
 
-    let remaining: Vec<_> = config
-        .repos
-        .into_iter()
-        .filter(|e| e.directory != directory)
-        .collect();
+    config.repos.retain(|e| e.directory != directory);
 
-    if remaining.len() == orig_len {
+    if config.repos.len() == orig_len {
         anyhow::bail!(
             "'{}' is not declared in {}",
             directory,
@@ -23,7 +19,7 @@ pub fn run(directory: &str, root: Option<&Path>, out: &mut dyn Write) -> Result<
         );
     }
 
-    write_config(&config_path, &remaining, &config.storage_url)?;
+    write_config(&config_path, &config)?;
     writeln!(out, "Removed {}", directory)?;
     Ok(())
 }

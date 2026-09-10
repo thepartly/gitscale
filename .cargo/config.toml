@@ -1,0 +1,16 @@
+# Test isolation: keep the developer's machine out of the test suite.
+#
+# gitscale installs itself as a git hook, and a --system install writes
+# core.hooksPath to /etc/gitconfig — outside $HOME, so the usual trick of
+# isolating HOME does not hide it. On a machine that has one, the installed
+# gitscale fires on any `git worktree add` or `git clone` of a fixture holding
+# a .gitscale.toml and populates it before the test's own code runs. Nothing
+# errors; the test just silently measures the released binary instead of this
+# one. `gitscale hook status` also then reports a path its fixtures know
+# nothing about.
+#
+# Cargo applies this to every process it launches, so `cargo run` sees it too:
+# to exercise gitscale against this machine's real system config, run the built
+# binary directly (`./target/debug/gitscale ...`) rather than through cargo.
+[env]
+GIT_CONFIG_NOSYSTEM = "1"

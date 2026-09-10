@@ -5,6 +5,7 @@ pub mod git;
 pub mod hooks;
 pub mod progress;
 pub mod resolve;
+pub mod share;
 pub mod storage;
 pub mod trust;
 pub mod urls;

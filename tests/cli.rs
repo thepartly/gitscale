@@ -1690,7 +1690,7 @@ fn shallow_clone_pinned_to_sha() {
     let sha = bare_git_stdout(&bare, &["rev-parse", "main"]);
 
     let entry = shallow_entry(&url, &sha);
-    gitscale::git::clone_repo(&entry, &env.playground, false, true)
+    gitscale::git::clone_repo(&entry, &env.playground, false, true, None)
         .expect("shallow clone of a SHA-pinned revision should succeed");
 
     let dest = env.playground.join("libs/mylib");
@@ -1713,7 +1713,7 @@ fn shallow_clone_pinned_to_branch_still_works() {
     let url = format!("file://{}", bare.display());
 
     let entry = shallow_entry(&url, "main");
-    gitscale::git::clone_repo(&entry, &env.playground, false, true)
+    gitscale::git::clone_repo(&entry, &env.playground, false, true, None)
         .expect("shallow clone of a branch revision should succeed");
 
     let dest = env.playground.join("libs/mylib");
@@ -1732,14 +1732,14 @@ fn shallow_pull_pinned_to_sha_moves_to_new_sha() {
     let first = bare_git_stdout(&bare, &["rev-parse", "main"]);
 
     let entry = shallow_entry(&url, &first);
-    gitscale::git::clone_repo(&entry, &env.playground, false, true).unwrap();
+    gitscale::git::clone_repo(&entry, &env.playground, false, true, None).unwrap();
 
     // Add a second commit upstream and re-pin the config to it.
     let second = commit_to_bare(&bare, "main", "a.txt", "v2");
     assert_ne!(first, second);
 
     let entry = shallow_entry(&url, &second);
-    gitscale::git::pull_repo(&entry, &env.playground, false, true)
+    gitscale::git::pull_repo(&entry, &env.playground, false, true, None)
         .expect("shallow pull to a new SHA should succeed");
 
     let dest = env.playground.join("libs/mylib");
