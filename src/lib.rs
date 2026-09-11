@@ -70,6 +70,20 @@ enum Commands {
         message: String,
         names: Vec<String>,
     },
+    /// Remove untracked files from the workspace and its sub-repositories
+    Clean {
+        #[arg(short = 'C', long)]
+        root: Option<PathBuf>,
+        /// Actually delete. Without it, clean only lists what would go.
+        #[arg(short = 'f', long)]
+        force: bool,
+        /// A path to keep, in .gitignore syntax, anchored at each repo's root.
+        /// Applies to every repo cleaned; repeatable. Patterns that belong to
+        /// one repo go in that repo's own [clean] exclude instead.
+        #[arg(short = 'e', long = "exclude", value_name = "PATTERN")]
+        exclude: Vec<String>,
+        names: Vec<String>,
+    },
     /// Show status of repos declared in .gitscale.toml
     Status {
         #[arg(short = 'C', long)]
@@ -234,14 +248,34 @@ fn run_cli_inner(
         Commands::Push { root, names } => {
             commands::push::run(root.as_deref(), &names, verbose, interactive, out, err)
         }
-        Commands::Sync { root, force, names } => {
-            commands::sync::run(root.as_deref(), &names, verbose, force, interactive, out, err)
-        }
+        Commands::Sync { root, force, names } => commands::sync::run(
+            root.as_deref(),
+            &names,
+            verbose,
+            force,
+            interactive,
+            out,
+            err,
+        ),
         Commands::Commit {
             root,
             message,
             names,
         } => commands::commit::run(root.as_deref(), &names, &message, interactive, out, err),
+        Commands::Clean {
+            root,
+            force,
+            exclude,
+            names,
+        } => commands::clean::run(
+            root.as_deref(),
+            &names,
+            &exclude,
+            force,
+            interactive,
+            out,
+            err,
+        ),
         Commands::Status {
             root,
             fetch,

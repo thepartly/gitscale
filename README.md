@@ -65,7 +65,7 @@ Each entry maps a local directory to a git repo:
   - `readwrite` (default) — Normal clone, full access
   - `readonly` — Cloned, but all files have write permissions removed
   - `artefact` — No git clone. Artefact archive synced via cloud storage
-- **recursive** — Scan the repo for a nested `.gitscale.toml` and resolve transitive deps (default: `true`)
+- **recursive** — Read the repo's nested `.gitscale.toml`: resolve its transitive deps, and clean it according to its own `[clean]` rules. With `recursive = false` gitscale does not read that config, and `clean` skips the repo rather than cleaning it blind (default: `true`)
 
 ### Storage
 
@@ -87,6 +87,40 @@ dissociate = true
 
 Controls how a clone reuses a copy of a sub-repository already on this machine.
 See [Reusing a local copy](#reusing-a-local-copy) below. Off by default.
+
+### Clean
+
+What `gitscale clean` keeps:
+
+```toml
+[clean]
+exclude = [".vscode", ".idea", ".env", "envs/", "tmp"]
+```
+
+Patterns use `.gitignore` syntax and are anchored at the root of the repo whose
+config they appear in — not at the workspace root. So `tmp` matches at any
+depth, `/tmp` only at the top, and `envs/` only directories.
+
+**A `[clean]` table speaks for its own repo and nothing below it.** The root's
+exclusions apply to the workspace repo's own working tree; a sub-repository
+declares its own in the `.gitscale.toml` in its checkout. A repo that is not a
+workspace can carry a config with nothing but a `[clean]` table in it:
+
+```toml
+# core/.gitscale.toml — core keeps its own scaffolding
+[clean]
+exclude = ["envs/", ".env"]
+```
+
+This is deliberate. A sub-repository knows what its build leaves behind; a root
+config enumerating that on its behalf goes stale the moment the sub-repository
+changes. For a repo you cannot add a config to, pass `--exclude` on the command
+line instead — it applies to every repo cleaned.
+
+Reading a sub-repository's `[clean]` is gated on its `recursive` flag, like
+every other nested-config read. A repo with `recursive = false` is skipped by
+`clean` entirely: with its keep-list out of reach, leaving it alone beats
+cleaning it with no idea what it wanted kept.
 
 ## Commands
 
@@ -139,6 +173,44 @@ gitscale sync                   # sync all
 gitscale sync libs/core         # sync one
 gitscale sync --force           # also relink modified clones / remove valid-target orphans
 ```
+
+### `gitscale clean [NAMES...]`
+
+Remove untracked files from the workspace repo and each sub-repository, the way
+`git clean -xd` does in one repo. Without `-f` it only lists what would go.
+
+```
+gitscale clean                  # dry run: list what would be removed
+gitscale clean -f               # remove it
+gitscale clean -f core          # just this repo
+gitscale clean -f .             # just the workspace repo
+gitscale clean -f -e 'dist/'    # keep dist/ in every repo cleaned
+```
+
+Each repo is cleaned with its own exclusions — see [Clean](#clean) above.
+Beyond those, clean always keeps:
+
+- **The declared checkouts**, at every level. A sub-repository directory is an
+  untracked directory to the repo holding it, so an unguarded `git clean -xdf`
+  at the root deletes the whole workspace — and one declared inside another
+  repo (`core` and `core/vendor`) goes the same way when that repo is cleaned.
+  Clean excludes them wherever they sit.
+- **Managed symlinks.** The links `resolve` plants for [recursive
+  dependencies](#recursive-dependencies) are untracked files to git. Orphaned
+  gitscale symlinks are *not* protected — those are removed, as `sync` would.
+- **`.gitscale.toml`**, even when it has not been committed yet.
+
+Repos are skipped, not cleaned, when they are `recursive = false` (keep-list
+out of reach), artefact mode (no working tree), not cloned, or a symlink to a
+checkout outside the workspace. The dry run names the reason for each.
+
+Cleaning runs top down: the workspace repo first, then each declared
+checkout once. A repo reachable both as a checkout and through a recursive
+dependency's symlink is still cleaned once, on its own rules.
+
+Nested git repositories gitscale does not manage — a clone someone made by
+hand, say — are reported rather than deleted: clean does not pass `git clean`'s
+second `-f`. Remove those by hand.
 
 ### `gitscale status`
 

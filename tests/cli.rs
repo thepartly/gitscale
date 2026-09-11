@@ -633,7 +633,10 @@ fn hook_env(name: &str, origin: &str) -> TestEnv {
 
 #[test]
 fn hooks_post_sync() {
-    let env = hook_env("hooks_post_sync", "https://github.com/thepartly/gitscale.git");
+    let env = hook_env(
+        "hooks_post_sync",
+        "https://github.com/thepartly/gitscale.git",
+    );
     let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "a")]);
 
     env.write_config(&format!(
@@ -1563,9 +1566,16 @@ fn commit_commits_dirty_repo() {
         "expected clean working tree after commit"
     );
     // The commit has our message and includes the untracked file (git add -A).
-    assert_eq!(git_stdout(&clone, &["log", "-1", "--pretty=%s"]), "test commit");
+    assert_eq!(
+        git_stdout(&clone, &["log", "-1", "--pretty=%s"]),
+        "test commit"
+    );
     let files = git_stdout(&clone, &["show", "--name-only", "--pretty=format:", "HEAD"]);
-    assert!(files.contains("new.txt"), "expected new.txt in commit: {}", files);
+    assert!(
+        files.contains("new.txt"),
+        "expected new.txt in commit: {}",
+        files
+    );
 }
 
 #[test]
@@ -1614,7 +1624,6 @@ fn commit_then_push_propagates() {
         "propagated"
     );
 }
-
 
 // ---------------------------------------------------------------------------
 // Shallow clones (CI forces --depth 1)
@@ -1748,4 +1757,351 @@ fn shallow_pull_pinned_to_sha_moves_to_new_sha() {
         second,
         "pull should move a SHA-pinned shallow clone to the new commit"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Clean
+// ---------------------------------------------------------------------------
+
+/// A workspace that is itself a git repo, with one readwrite repo cloned in.
+fn clean_env(name: &str) -> TestEnv {
+    let env = TestEnv::new(name);
+    let core = env.create_bare_repo("core", "main", &[("README.md", "core")]);
+    env.write_config(&format!(
+        "[repos]\n\"core\" = {{ url = \"{}\", revision = \"main\" }}\n",
+        core.to_str().unwrap()
+    ));
+    env.init_playground_git();
+    let out = env.run(&["clone"]);
+    assert!(out.success, "clone failed: {}", out.stderr);
+    env
+}
+
+#[test]
+fn clean_removes_untracked_and_keeps_checkouts() {
+    let env = clean_env("clean_removes_untracked_and_keeps_checkouts");
+    std::fs::write(env.playground.join("junk.txt"), "x").unwrap();
+    std::fs::create_dir_all(env.playground.join("build")).unwrap();
+    std::fs::write(env.playground.join("build/out"), "x").unwrap();
+    std::fs::write(env.playground.join("core/scratch.txt"), "x").unwrap();
+
+    let out = env.run(&["clean", "-f"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+
+    assert!(!env.playground.join("junk.txt").exists());
+    assert!(!env.playground.join("build").exists());
+    assert!(!env.playground.join("core/scratch.txt").exists());
+    // The checkout is untracked as far as the workspace repo is concerned, so
+    // an unguarded clean at the root would have taken it.
+    assert!(env.playground.join("core/README.md").exists());
+    assert!(env.playground.join(".gitscale.toml").exists());
+}
+
+#[test]
+fn clean_dry_run_removes_nothing() {
+    let env = clean_env("clean_dry_run_removes_nothing");
+    std::fs::write(env.playground.join("junk.txt"), "x").unwrap();
+
+    let out = env.run(&["clean"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(
+        env.playground.join("junk.txt").exists(),
+        "a dry run deleted files"
+    );
+    assert!(out.stdout.contains("junk.txt"), "stdout: {}", out.stdout);
+    assert!(out.stdout.contains("dry run"), "stdout: {}", out.stdout);
+}
+
+#[test]
+fn an_uncommitted_workspace_config_survives_its_own_clean() {
+    let env = TestEnv::new("an_uncommitted_workspace_config_survives_its_own_clean");
+    env.init_playground_git();
+    // Written after the initial commit, so it is untracked.
+    env.write_config("[repos]\n");
+
+    let out = env.run(&["clean", "-f"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(env.playground.join(".gitscale.toml").exists());
+}
+
+#[test]
+fn root_clean_excludes_do_not_reach_subrepos() {
+    let env = clean_env("root_clean_excludes_do_not_reach_subrepos");
+    let existing = std::fs::read_to_string(env.playground.join(".gitscale.toml")).unwrap();
+    std::fs::write(
+        env.playground.join(".gitscale.toml"),
+        format!("[clean]\nexclude = [\".env\"]\n\n{}", existing),
+    )
+    .unwrap();
+    helpers::run_git_pub(&env.playground, &["add", "."]);
+    helpers::run_git_pub(&env.playground, &["commit", "-m", "clean rules"]);
+
+    std::fs::write(env.playground.join(".env"), "root").unwrap();
+    std::fs::write(env.playground.join("core/.env"), "child").unwrap();
+
+    let out = env.run(&["clean", "-f"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(
+        env.playground.join(".env").exists(),
+        "the root's own exclude was ignored"
+    );
+    assert!(
+        !env.playground.join("core/.env").exists(),
+        "a root exclude leaked into a sub-repo"
+    );
+}
+
+#[test]
+fn subrepo_clean_excludes_come_from_its_own_config() {
+    let env = TestEnv::new("subrepo_clean_excludes_come_from_its_own_config");
+    // A `[clean]`-only config: core declares what it keeps without being a
+    // workspace itself.
+    let core = env.create_bare_repo(
+        "core",
+        "main",
+        &[
+            ("README.md", "core"),
+            (".gitscale.toml", "[clean]\nexclude = [\"envs/\"]\n"),
+        ],
+    );
+    env.write_config(&format!(
+        "[repos]\n\"core\" = {{ url = \"{}\", revision = \"main\" }}\n",
+        core.to_str().unwrap()
+    ));
+    env.init_playground_git();
+    assert!(env.run(&["clone"]).success);
+
+    std::fs::create_dir_all(env.playground.join("core/envs")).unwrap();
+    std::fs::write(env.playground.join("core/envs/dev"), "x").unwrap();
+    std::fs::write(env.playground.join("core/build.out"), "x").unwrap();
+
+    let out = env.run(&["clean", "-f"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(
+        env.playground.join("core/envs/dev").exists(),
+        "core's own exclude was ignored"
+    );
+    assert!(!env.playground.join("core/build.out").exists());
+}
+
+#[test]
+fn recursive_false_leaves_a_subrepo_alone() {
+    let env = TestEnv::new("recursive_false_leaves_a_subrepo_alone");
+    let core = env.create_bare_repo(
+        "core",
+        "main",
+        &[
+            ("README.md", "core"),
+            (".gitscale.toml", "[clean]\nexclude = [\"envs/\"]\n"),
+        ],
+    );
+    env.write_config(&format!(
+        "[repos]\n\"core\" = {{ url = \"{}\", revision = \"main\", recursive = false }}\n",
+        core.to_str().unwrap()
+    ));
+    env.init_playground_git();
+    assert!(env.run(&["clone"]).success);
+
+    std::fs::create_dir_all(env.playground.join("core/envs")).unwrap();
+    std::fs::write(env.playground.join("core/envs/dev"), "x").unwrap();
+    std::fs::write(env.playground.join("core/build.out"), "x").unwrap();
+    std::fs::write(env.playground.join("junk.txt"), "x").unwrap();
+
+    let out = env.run(&["clean", "-f"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    // Its keep-list is unreadable by design, so the whole repo is left alone
+    // rather than cleaned blind.
+    assert!(env.playground.join("core/envs/dev").exists());
+    assert!(
+        env.playground.join("core/build.out").exists(),
+        "recursive = false should have skipped the repo entirely"
+    );
+    assert!(
+        out.stdout.contains("recursive = false"),
+        "stdout: {}",
+        out.stdout
+    );
+    // The rest of the workspace is cleaned as usual.
+    assert!(!env.playground.join("junk.txt").exists());
+}
+
+#[test]
+fn clean_keeps_managed_symlinks() {
+    let env = TestEnv::new("clean_keeps_managed_symlinks");
+    let shared = env.create_bare_repo("sharedlibs", "main", &[("lib.txt", "shared")]);
+    let child_config = format!(
+        "[repos]\n\"libs/shared\" = {{ url = \"{}\", revision = \"main\" }}\n",
+        shared.to_str().unwrap()
+    );
+    let core = env.create_bare_repo(
+        "core",
+        "main",
+        &[("README.md", "core"), (".gitscale.toml", &child_config)],
+    );
+    env.write_config(&format!(
+        "[repos]\n\"core\" = {{ url = \"{}\", revision = \"main\" }}\n\
+         \"sharedlibs\" = {{ url = \"{}\", revision = \"main\" }}\n",
+        core.to_str().unwrap(),
+        shared.to_str().unwrap()
+    ));
+    env.init_playground_git();
+    assert!(env.run(&["clone"]).success);
+
+    let link = env.playground.join("core/libs/shared");
+    assert!(
+        link.is_symlink(),
+        "expected resolve to have created the link"
+    );
+
+    let out = env.run(&["clean", "-f"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(
+        link.is_symlink(),
+        "clean removed a gitscale-managed symlink"
+    );
+    assert!(env.playground.join("core/libs/shared/lib.txt").exists());
+}
+
+#[test]
+fn cli_exclude_applies_to_every_repo() {
+    let env = clean_env("cli_exclude_applies_to_every_repo");
+    std::fs::write(env.playground.join("keep.me"), "x").unwrap();
+    std::fs::write(env.playground.join("core/keep.me"), "x").unwrap();
+    std::fs::write(env.playground.join("core/drop.me"), "x").unwrap();
+
+    let out = env.run(&["clean", "-f", "-e", "keep.me"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(env.playground.join("keep.me").exists());
+    assert!(env.playground.join("core/keep.me").exists());
+    assert!(!env.playground.join("core/drop.me").exists());
+}
+
+#[test]
+fn clean_names_select_repos_and_the_root() {
+    let env = clean_env("clean_names_select_repos_and_the_root");
+    std::fs::write(env.playground.join("junk.txt"), "x").unwrap();
+    std::fs::write(env.playground.join("core/scratch.txt"), "x").unwrap();
+
+    let out = env.run(&["clean", "-f", "core"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(
+        env.playground.join("junk.txt").exists(),
+        "naming a repo should leave the root alone"
+    );
+    assert!(!env.playground.join("core/scratch.txt").exists());
+
+    let out = env.run(&["clean", "-f", "."]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(!env.playground.join("junk.txt").exists());
+}
+
+#[test]
+fn clean_works_in_a_readonly_repo() {
+    let env = TestEnv::new("clean_works_in_a_readonly_repo");
+    let core = env.create_bare_repo("core", "main", &[("README.md", "core")]);
+    env.write_config(&format!(
+        "[repos]\n\"core\" = {{ url = \"{}\", revision = \"main\", mode = \"readonly\" }}\n",
+        core.to_str().unwrap()
+    ));
+    env.init_playground_git();
+    assert!(env.run(&["clone"]).success);
+
+    // readonly mode clears the write bit on files; unlinking one needs write
+    // permission on its directory rather than on the file.
+    let scratch = env.playground.join("core/scratch.txt");
+    std::fs::write(&scratch, "x").unwrap();
+    let mut perms = std::fs::metadata(&scratch).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o444);
+    std::fs::set_permissions(&scratch, perms).unwrap();
+
+    let out = env.run(&["clean", "-f"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(!scratch.exists());
+}
+
+#[test]
+fn clean_skips_artefact_repos() {
+    let env = TestEnv::new("clean_skips_artefact_repos");
+    env.create_artefact("https://github.com/org/svc.git", "main", &[("a.txt", "x")]);
+    env.write_config(&format!(
+        "[storage]\nurl = \"{}\"\n\n[repos]\n\
+         \"meta/svc\" = {{ url = \"https://github.com/org/svc.git\", revision = \"main\", mode = \"artefact\" }}\n",
+        env.storage_url()
+    ));
+    env.init_playground_git();
+    assert!(env.run(&["clone"]).success);
+
+    let out = env.run(&["clean", "-f"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(
+        env.playground.join("meta/svc/a.txt").exists(),
+        "an artefact checkout has no working tree to clean"
+    );
+}
+
+#[test]
+fn add_preserves_clean_rules() {
+    let env = TestEnv::new("add_preserves_clean_rules");
+    env.write_config(
+        "[clean]\nexclude = [\".env\", \"envs/\"]\n\n[repos]\n\
+         \"libs/a\" = { url = \"https://github.com/org/a.git\", revision = \"main\" }\n",
+    );
+
+    let out = env.run(&["add", "libs/b", "https://github.com/org/b.git", "main"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+
+    let config = std::fs::read_to_string(env.playground.join(".gitscale.toml")).unwrap();
+    assert!(
+        config.contains("[clean]") && config.contains("envs/"),
+        "add dropped the [clean] table:\n{}",
+        config
+    );
+}
+
+#[test]
+fn option_like_clean_pattern_is_refused() {
+    let env = TestEnv::new("option_like_clean_pattern_is_refused");
+    env.write_config("[clean]\nexclude = [\"--upload-pack=payload\"]\n");
+    env.init_playground_git();
+
+    let out = env.run(&["clean"]);
+    assert!(!out.success);
+    assert!(
+        out.stderr.contains("command-line option"),
+        "stderr: {}",
+        out.stderr
+    );
+}
+
+#[test]
+fn clean_keeps_a_checkout_nested_inside_another_repo() {
+    let env = TestEnv::new("clean_keeps_a_checkout_nested_inside_another_repo");
+    let core = env.create_bare_repo("core", "main", &[("README.md", "core")]);
+    // An artefact checkout has no `.git`, so git's own refusal to delete a
+    // nested repository would not save it.
+    env.create_artefact(
+        "https://github.com/org/vendor.git",
+        "main",
+        &[("v.txt", "x")],
+    );
+    env.write_config(&format!(
+        "[storage]\nurl = \"{}\"\n\n[repos]\n\
+         \"core\" = {{ url = \"{}\", revision = \"main\" }}\n\
+         \"core/vendor\" = {{ url = \"https://github.com/org/vendor.git\", revision = \"main\", mode = \"artefact\" }}\n",
+        env.storage_url(),
+        core.to_str().unwrap()
+    ));
+    env.init_playground_git();
+    assert!(env.run(&["clone"]).success);
+    assert!(env.playground.join("core/vendor/v.txt").exists());
+
+    std::fs::write(env.playground.join("core/scratch.tmp"), "x").unwrap();
+
+    let out = env.run(&["clean", "-f"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(
+        env.playground.join("core/vendor/v.txt").exists(),
+        "cleaning core deleted a checkout declared inside it"
+    );
+    assert!(!env.playground.join("core/scratch.tmp").exists());
 }

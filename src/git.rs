@@ -492,6 +492,35 @@ pub fn commit_path(dir: &Path, message: &str) -> Result<bool> {
 
 /// Returns true when `dir` is the top level of its own git repository (not
 /// merely nested inside some ancestor git repo).
+/// Remove untracked files from `dir`'s working tree, returning the paths
+/// removed (or, when `force` is false, the paths that would be).
+///
+/// `excludes` are gitignore-syntax patterns handed to `git clean -e`
+/// unchanged, so each one means what the same text on a `.gitignore` line
+/// means — matching at any depth unless it is anchored with a leading `/`,
+/// and directories only when it ends in `/`.
+///
+/// `-ff` is deliberately not passed. Without it git reports a nested git
+/// repository instead of deleting it, which is the right side of that mistake
+/// to be on: a stray clone someone forgot about is recoverable only while it
+/// still exists.
+pub fn clean_repo(dir: &Path, excludes: &[String], force: bool) -> Result<Vec<String>> {
+    let mut args: Vec<&str> = vec!["clean", "-xd", if force { "-f" } else { "-n" }];
+    for pattern in excludes {
+        args.push("-e");
+        args.push(pattern);
+    }
+    let output = run_git(&args, Some(dir), true)?;
+    Ok(stdout_str(&output)
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("Removing ")
+                .or_else(|| line.strip_prefix("Would remove "))
+                .map(str::to_string)
+        })
+        .collect())
+}
+
 pub fn is_repo_root(dir: &Path) -> bool {
     run_git(&["rev-parse", "--show-toplevel"], Some(dir), false)
         .ok()

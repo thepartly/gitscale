@@ -1,4 +1,5 @@
 pub mod add;
+pub mod clean;
 pub mod clone;
 pub mod commit;
 pub mod fetch;
