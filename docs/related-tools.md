@@ -5,7 +5,7 @@
 - [Design choices](#design-choices)
 - [When to pick GitScale](#when-to-pick-gitscale)
 
-GitScale occupies the same space as several multi-repo and vendoring tools. The comparison table includes a few rows of language-specific workspace managers for context rather than direct one-to-one equivalents.
+GitScale occupies the same space as several multi-repo and vendoring tools. The comparison table also includes a build system whose external-dependency mechanism covers overlapping ground, and a few rows of language-specific workspace managers, for context rather than as direct one-to-one equivalents.
 
 ## The requirements we have to cover, grouped
 
@@ -61,17 +61,19 @@ Baseline for every candidate: *should rely and work with git repositories.*
 | [myrepos (mr)](https://myrepos.branchable.com/) | `.mrconfig` | separate clones, any VCS | ✔ | ✘ | ✘ | ✘ no pinning | ✘ | ✘ | `~` status only | ✘ |
 | [meta](https://github.com/mateodelnorte/meta) | `.meta` JSON | separate clones + plugins | ✔ | ✘ | ✘ | ✘ no pinning | ✘ | ✘ | `~` plugin-dependent | ✘ |
 | [gclient](https://chromium.googlesource.com/chromium/tools/depot_tools) | `DEPS` (Python) | separate clones + hooks | `~` mostly | `~` CIPD/GCS via hooks | ✘ | ✔ `DEPS` pins | `~` recursive DEPS, conflicts error, dedup is path-keyed | ✘ | ✘ manual sync, Python config | `~` `--cache-dir` shared clones, no worktree mode |
+| [Bazel (bzlmod)](https://bazel.build/external/module) | `MODULE.bazel` + lockfile | build graph + fetched external repos | `~` build-graph inputs, not editable source | ✔ `http_archive` + remote cache | `~` published archive, no readonly | ✔ `MODULE.bazel.lock` | ✔ MVS resolves conflicts, one version per module | ✔ `local_path_override` | `~` fetch is automatic, but BUILD files for everything | `~` shared repository cache, per-worktree output base |
 | Yarn workspaces | `package.json` | JS/TS monorepo workspace | ✘ JS/TS only | `~` registry tarballs | `~` published subset | ✔ lockfile | ✔ hoisting + range/peer checks, package-level | `~` `link` / resolutions | n/a single repo | n/a single repo |
 | Cargo workspaces | `Cargo.toml` | Rust multi-crate workspace | ✘ Rust only | ✘ | `~` published crate | ✔ lockfile | ✔ semver unification, not repo dedup | `~` `[patch]` / path override | n/a single repo | n/a single repo |
 | Go workspaces | `go.work` | Go multi-module workspace | ✘ Go only | ✘ | `~` published module | ✔ `go.mod` / `go.sum` | ✔ MVS picks one version, not repo dedup | `~` `go.work use` | n/a single repo | n/a single repo |
 
-The three workspace managers work inside a single repo, so R7 and R8 never arise for them — they don't address multi-repo checkout at all.
+The three language workspace managers work inside a single repo, so R7 and R8 never arise for them — they don't address multi-repo checkout at all. Bazel does span repositories, but it fetches them for the build rather than checking them out for you; the bullet below covers the distinction.
 
 ## Design choices
 
 - **Separate history per repo.** subtree and git-subrepo vendor code *into* your main repo, so the dependency's file history lives directly in the parent repository. That is what earns them R8 for free — a worktree of the parent already contains everything — but the cost is paid once per clone of the parent instead, whose history now carries every dependency's. GitScale keeps sub-repos as separate working trees by design, while the parent repo tracks the selected dependency revision in `.gitscale.toml`.
 - **External binary.** Submodules and subtree ship with git and need no extra install; GitScale is a separate binary.
 - **Git-only.** myrepos handles Git, Mercurial, Bazaar, SVN, and more. GitScale targets Git (plus its own artefact archives).
+- **Source on disk, not a build graph.** Bazel's `MODULE.bazel` covers much of the same ground, and beats GitScale in places: MVS actually *resolves* conflicting transitive versions where GitScale only reports them as an error, `http_archive` plus a remote cache is a more mature answer to large prebuilt payloads than artefact mode, and `local_path_override` is exactly the SDK ↔ full-stack switch. The difference is what a dependency *is*. Bazel fetches external repos as inputs to the build graph; GitScale puts ordinary checkouts in the workspace, where an editor, `grep`, `kubectl`, docker-compose or an LLM agent reads them without knowing GitScale exists. That gap is widest for the R1 content no build system consumes — kustomize overlays, helm charts, nix shells, conventions. The second cost is adoption: reaching that coverage means BUILD files for every target and every toolchain wired through `rules_*`, which is a replacement for the workflows people already have rather than an addition to them.
 - **Simpler workflow model.** Google repo and west help coordinate branch creation, topic work, and release manifests across many repos. GitScale can pin each dependency to a branch, tag, or commit, but it does not try to manage a shared multi-repo branching lifecycle. When `.gitscale.toml` pins child repos to immutable tags or commit SHAs, that config effectively becomes the release manifest: the system version is defined as an assembly of specific subsystem versions.
 - **R8 follows Google repo's design.** `repo init` has offered `--reference`, `--dissociate` and a `--worktree` mode for years, and gclient solves the same problem with a shared `--cache-dir` mirror. GitScale's approach is the same idea with the configuration removed: no mirror to set up and no flag to remember, because it works out the source workspace from git itself. The tradeoff is less control — repo lets you point at an arbitrary mirror, GitScale only reuses a workspace this one was actually derived from.
 - **Self-contained tool.** meta has a plugin system and repo/gclient have larger surrounding ecosystems, while GitScale keeps the core workflow built into one tool. That simplifies operation and keeps behavior directly controllable for Partly's needs.
@@ -79,7 +81,7 @@ The three workspace managers work inside a single repo, so R7 and R8 never arise
 
 ## When to pick GitScale
 
-Choose GitScale when you want submodule-style separate checkouts but with a friendlier single config, enforced-readonly vendoring, prebuilt artefact delivery, and automatic deduplication of shared transitive dependencies. Prefer subtree/git-subrepo if you need everything in one repo and one history, or Google repo/west if you're managing a very large manifest-driven project with heavy multi-branch workflows.
+Choose GitScale when you want submodule-style separate checkouts but with a friendlier single config, enforced-readonly vendoring, prebuilt artefact delivery, and automatic deduplication of shared transitive dependencies. Prefer subtree/git-subrepo if you need everything in one repo and one history, or Google repo/west if you're managing a very large manifest-driven project with heavy multi-branch workflows. If you already build everything with Bazel, check what `MODULE.bazel` covers first — what GitScale adds on top of it is editable checkouts, readonly vendoring, and content the build graph never sees.
 
 ---
 
