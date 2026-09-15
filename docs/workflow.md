@@ -2,7 +2,7 @@
 
 - [How the multi-repo commands behave](#how-the-multi-repo-commands-behave)
 - [clone](#clone)
-  - [Bootstrapping a workspace from a URL](#bootstrapping-a-workspace-from-a-url)
+  - [Cloning a workspace from a URL](#cloning-a-workspace-from-a-url)
 - [fetch](#fetch)
 - [pull](#pull)
 - [push](#push)
@@ -69,10 +69,24 @@ the *child* config, so the command to run is `gitscale clone imports/shared` fro
 inside that child repository, not from the workspace root. `sync` at the root
 does the opposite and relinks it.
 
-### Bootstrapping a workspace from a URL
+### Cloning a workspace from a URL
 
-Given a URL instead of entry names, `clone` sets up a whole workspace from cold:
-it clones the root repository, then everything its `.gitscale.toml` declares.
+**The normal way to set up a workspace is `git clone`.** With a `--global` or
+`--system` [git hook](hooks.md#git-hooks) installed, the `post-checkout` that
+git fires at the end of the clone runs `gitscale pull`, which materialises every
+declared repository — and, with
+[`[cache] adopt_root`](caching.md#adopting-a-root-repository) set, relinks the
+root repository to the object cache at the same time. Nobody has to know
+GitScale is involved:
+
+```
+git clone https://github.com/org/root.git
+```
+
+`gitscale clone` accepts a URL for the cases where that does not apply — no hook
+installed, a hook whose [allowlist](hooks.md#the-hook-allowlist) does not cover
+the repository, or a one-off checkout on a machine you do not administer. It
+clones the root repository, then everything its `.gitscale.toml` declares:
 
 ```
 gitscale clone https://github.com/org/root.git         # into ./root
@@ -87,13 +101,15 @@ spell it `file://…` or absolutely. At most one further argument is accepted, t
 directory to create; without it, git's own rule applies and the repository name
 is used.
 
-The root repository goes through the [object cache](caching.md) like everything
-else, so a second workspace of it costs nothing over the wire, and the clone is
-linked to the cache from birth — which is why
-[`adopt_root`](caching.md#adopting-a-root-repository) is not needed here. There
-is no config to read yet, so only the environment and `--no-cache` decide
-whether the cache is used; the `[cache]` table inside the cloned repository
-governs every step after that.
+One thing it does that `git clone` cannot: the root repository goes through the
+[object cache](caching.md) like everything else, so it is linked to the cache
+from birth and a second workspace of it costs nothing over the wire. Git knows
+nothing about the cache, so a plain `git clone` always pays the root's full
+download and then joins the cache after the fact, if `adopt_root` says to.
+
+There is no config to read yet at that point, so only the environment and
+`--no-cache` decide whether the cache is used; the `[cache]` table inside the
+cloned repository governs every step after that.
 
 If the cloned repository has no `.gitscale.toml`, GitScale says so and stops.
 
@@ -210,7 +226,8 @@ in that repository's `.gitignore` — see
 
 | You want to | Use |
 |---|---|
-| Set up a workspace from a repository URL | `gitscale clone <url>` |
+| Set up a workspace | `git clone <url>`, with a [git hook](hooks.md#git-hooks) installed |
+| Set up a workspace with no hook installed | `gitscale clone <url>` |
 | Materialise entries added to the config | `gitscale clone` |
 | See what changed upstream, safely | `gitscale fetch` then `gitscale status` |
 | Get up to date | `gitscale pull` |

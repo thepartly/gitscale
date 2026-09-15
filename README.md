@@ -57,7 +57,33 @@ gitscale status
 ⤷     imports/shared   ../s   readonly    main   main       symlink
 ```
 
-Bootstrapping a workspace from cold works from the repository URL alone:
+## Cloning a workspace
+
+Everyone else just clones the repository. With a `--global` or `--system`
+[git hook](docs/hooks.md#git-hooks) installed, the `post-checkout` git fires at
+the end of the clone materialises every declared repository, and
+[`[cache] adopt_root`](docs/caching.md#adopting-a-root-repository) puts the root
+itself on the object cache:
+
+```
+git clone https://github.com/org/root.git
+```
+
+That needs the hook installed once per machine, and `adopt_root` in the
+workspace config:
+
+```
+gitscale hook install --global --allow 'github.com/org/*'
+```
+
+```toml
+# .gitscale.toml
+[cache]
+adopt_root = true
+```
+
+Where no hook is installed, `gitscale clone` takes the URL instead and does the
+same work explicitly:
 
 ```
 gitscale clone https://github.com/org/root.git

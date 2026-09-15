@@ -29,7 +29,7 @@ command.
 
 | Command | Purpose |
 |---|---|
-| [`clone`](#gitscale-clone) | Create missing checkouts, or bootstrap a workspace from a URL |
+| [`clone`](#gitscale-clone) | Create missing checkouts, or clone a whole workspace from a URL |
 | [`fetch`](#gitscale-fetch) | Update remote state without touching working trees |
 | [`pull`](#gitscale-pull) | Bring every checkout up to date, cloning what is missing |
 | [`push`](#gitscale-push) | Push each writable checkout |
@@ -84,13 +84,17 @@ gitscale clone [OPTIONS] [NAMES...]
 gitscale clone [OPTIONS] <URL> [DIRECTORY]
 ```
 
-Create the checkouts that do not exist yet, or — given a URL — bootstrap a whole
+Create the checkouts that do not exist yet, or — given a URL — clone a whole
 workspace. Full behaviour: [workflow → clone](workflow.md#clone).
+
+The URL form is not the usual way to set a workspace up: with a
+[git hook](hooks.md#git-hooks) installed, a plain `git clone` does it. Use this
+where no hook applies.
 
 | Argument | Meaning |
 |---|---|
 | `NAMES...` | Declared directories to clone. Empty means all |
-| `URL [DIRECTORY]` | A repository to bootstrap from, and optionally the directory to create (default: the repository name) |
+| `URL [DIRECTORY]` | A repository to clone the workspace from, and optionally the directory to create (default: the repository name) |
 
 The first argument is read as a URL when it has a scheme, is an scp-style SSH
 address, or is an absolute path.

@@ -73,6 +73,12 @@ merge changes the working tree. A fresh clone, a `git checkout` that moves the
 declared revisions, or a `git worktree add` then materialises the
 sub-repositories without anyone remembering to run anything.
 
+This is how a workspace is normally set up: `git clone` and nothing else. The
+pull the hook fires also honours
+[`[cache] adopt_root`](caching.md#adopting-a-root-repository), so the root
+repository joins the [object cache](caching.md) on the way — something plain
+`git clone` cannot do for itself.
+
 ### Scopes
 
 | Scope | What it writes | Use for |

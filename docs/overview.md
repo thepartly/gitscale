@@ -4,6 +4,7 @@
 - [Why](#why)
 - [What it looks like](#what-it-looks-like)
 - [Install](#install)
+- [Getting a workspace](#getting-a-workspace)
 - [Where to go next](#where-to-go-next)
 
 ## What GitScale is
@@ -92,6 +93,20 @@ cd gitscale && cargo install --path .
 
 Two binaries are installed: `gitscale`, and `git-scale`, which lets git dispatch
 to it — so `git scale status` and `gitscale status` are the same command.
+
+## Getting a workspace
+
+Authoring one means writing a `.gitscale.toml`, gitignoring the checkout
+directory, and running `gitscale clone` — see
+[declaring dependencies](dependencies.md).
+
+Using one means `git clone`, and nothing else. A `--global` or `--system`
+[git hook](hooks.md#git-hooks), installed once per machine, materialises every
+declared repository at the end of the clone, and
+[`[cache] adopt_root`](caching.md#adopting-a-root-repository) puts the root
+repository on the object cache while it is there. Where no hook applies,
+[`gitscale clone <url>`](workflow.md#cloning-a-workspace-from-a-url) does the
+same work explicitly.
 
 ## Where to go next
 

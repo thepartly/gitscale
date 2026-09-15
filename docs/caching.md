@@ -96,8 +96,8 @@ anything that poisons one entry a machine-wide reach. `dir` still points
 wherever you say, including somewhere shared by other means — that is an
 arrangement you make, not a mode GitScale sets up.
 
-A workspace being bootstrapped by `gitscale clone <url>` has no config to read
-yet, so its root repository uses the environment alone.
+A workspace being cloned by `gitscale clone <url>` has no config to read yet, so
+its root repository uses the environment alone.
 
 ## Mirrors and snapshots
 
@@ -218,11 +218,18 @@ source workspace is an ordinary repository somebody may run `git gc` in.
 adopt_root = true
 ```
 
-A workspace root created by `gitscale clone <url>` is linked to the cache from
-birth. One created by plain `git clone` holds its own full copy and shares
-nothing. With `adopt_root`, the next `gitscale clone` or `pull` seeds an entry
-from it — locally, no network — points the repository at that entry, and repacks
-away the objects it no longer needs to own.
+Git knows nothing about the object cache, so a workspace root created by plain
+`git clone` — which is how people normally clone one — holds its own full copy
+and shares nothing. With `adopt_root`, the next `gitscale clone` or `pull` seeds
+an entry from it — locally, no network — points the repository at that entry,
+and repacks away the objects it no longer needs to own.
+
+That next `pull` is usually the one an installed
+[git hook](hooks.md#git-hooks) fires at the end of the clone, so with both in
+place a plain `git clone` ends up with a fully materialised workspace whose root
+is on the cache like everything else. A root created by
+[`gitscale clone <url>`](workflow.md#cloning-a-workspace-from-a-url) is linked
+from birth and needs none of this.
 
 **Opt-in, and it stays opt-in.** The reclaim step deletes the repository's own
 objects and converts something that stood on its own into something that depends
@@ -234,6 +241,11 @@ overwriting that pointer and repacking would leave it unable to read objects it
 never owned — and when the workspace root is not itself the top of a git
 repository. It is not needed in CI, where the runner clones the root itself and
 the workspace is discarded at the end.
+
+Note what it does and does not buy. It reclaims the root's duplicate objects and
+gives every later worktree and workspace on the machine something to borrow. It
+does not make the *next* `git clone` of that root cheaper — git will not consult
+the cache, so only `gitscale clone <url>` saves that download.
 
 ## Seeing what the cache is doing
 
