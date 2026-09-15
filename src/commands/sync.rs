@@ -7,19 +7,21 @@ use crate::config::{find_config, load_config, load_config_optional, CONFIG_FILEN
 use crate::hooks;
 use crate::resolve::{create_symlinks, resolve_recursive};
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     root: Option<&Path>,
     names: &[String],
     verbose: bool,
+    no_cache: bool,
     force: bool,
     interactive: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
-    crate::commands::clone::run(root, names, verbose, interactive, out, err)?;
+    crate::commands::clone::run(root, names, verbose, no_cache, interactive, out, err)?;
     reconcile_remotes(root, names, out)?;
     // pull runs its own post_sync hook, skip it here to avoid double-run
-    crate::commands::pull::run_no_hooks(root, names, verbose, interactive, out, err)?;
+    crate::commands::pull::run_no_hooks(root, names, verbose, no_cache, interactive, out, err)?;
 
     let config_path = find_config(root)?;
     let config_root = config_path.parent().unwrap().to_path_buf();

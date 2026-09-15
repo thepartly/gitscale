@@ -3,15 +3,20 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 
+use crate::cache;
+use crate::commands::cache as cache_cmd;
 use crate::commands::clone::filter_entries;
 use crate::config::{find_config, load_config};
-use crate::git::fetch_repo;
+use crate::git::{fetch_repo, is_ci};
 use crate::progress::{run_parallel, RepoStatus};
+use crate::share;
 use crate::storage::fetch_artefact;
 
 pub fn run(
     root: Option<&Path>,
     names: &[String],
+    verbose: bool,
+    no_cache: bool,
     interactive: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
@@ -32,6 +37,10 @@ pub fn run(
         .collect();
     let dir_names: Vec<String> = selected.iter().map(|e| e.directory.clone()).collect();
     let storage_url = &config.storage_url;
+    let ci = is_ci();
+    let workspace = share::source_workspace(&config_root);
+    let dissociate = config.share.dissociate;
+    let cache = cache_cmd::open(&config, no_cache);
 
     let failed = run_parallel(
         "Fetching...",
@@ -67,7 +76,18 @@ pub fn run(
                 return RepoStatus::Skip(format!("{} (not cloned)", name));
             }
 
-            match fetch_repo(entry, &config_root) {
+            // Updates the cache entry as well: a fetch that only advanced
+            // this workspace's refs would leave every other one to download
+            // the same objects again.
+            let from = cache::source_for(
+                cache.as_ref(),
+                workspace.as_deref(),
+                entry,
+                dissociate,
+                ci,
+                verbose,
+            );
+            match fetch_repo(entry, &config_root, &from) {
                 Ok(()) => RepoStatus::Ok(name.to_string()),
                 Err(e) => RepoStatus::Fail(format!("{}: {}", name, e)),
             }

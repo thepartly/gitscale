@@ -19,6 +19,7 @@ pub struct TestEnv {
     pub playground: PathBuf,
     pub repos_remote: PathBuf,
     pub artefacts_remote: PathBuf,
+    pub cache: PathBuf,
     name: String,
 }
 
@@ -35,11 +36,13 @@ impl TestEnv {
         let playground = base.join("playground").join(name);
         let repos_remote = base.join("repos-remote").join(name);
         let artefacts_remote = base.join("artefacts-remote").join(name);
+        let cache = base.join("cache").join(name);
 
         // Clean slate
         let _ = fs::remove_dir_all(&playground);
         let _ = fs::remove_dir_all(&repos_remote);
         let _ = fs::remove_dir_all(&artefacts_remote);
+        let _ = fs::remove_dir_all(&cache);
 
         fs::create_dir_all(&playground).unwrap();
         fs::create_dir_all(&repos_remote).unwrap();
@@ -49,6 +52,7 @@ impl TestEnv {
             playground,
             repos_remote,
             artefacts_remote,
+            cache,
             name: name.to_string(),
         }
     }
@@ -144,8 +148,56 @@ impl TestEnv {
     }
 
     /// Write a .gitscale.toml config in the playground directory.
+    ///
+    /// A `[cache]` table is prepended unless the caller wrote one, so each
+    /// test gets a cache of its own — created on demand, removed on drop, and
+    /// never the one the developer's own workspaces use.
     pub fn write_config(&self, config_content: &str) {
-        fs::write(self.playground.join(".gitscale.toml"), config_content).unwrap();
+        let text = if config_content.contains("[cache]") {
+            config_content.to_string()
+        } else {
+            format!(
+                "[cache]\ndir = \"{}\"\n\n{}",
+                self.cache.display(),
+                config_content
+            )
+        };
+        fs::write(self.playground.join(".gitscale.toml"), text).unwrap();
+    }
+
+    /// The cache entries that exist right now, by directory name.
+    pub fn cache_entries(&self, kind: &str) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(self.cache.join(kind))
+            .map(|listing| {
+                listing
+                    .flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    /// The single cache entry for `url`, which must exist.
+    pub fn cache_entry(&self, kind: &str, url: &str) -> PathBuf {
+        let path = self.cache.join(kind).join(gitscale::cache::entry_name(url));
+        assert!(
+            path.is_dir(),
+            "no {} entry for {} at {}",
+            kind,
+            url,
+            path.display()
+        );
+        path
+    }
+
+    /// Run the real gitscale binary with extra environment variables — the
+    /// only way to exercise anything that reads the process environment (`CI`,
+    /// say), since the in-process runner shares one environment across every
+    /// test thread.
+    pub fn run_with_env(&self, vars: &[(&str, &str)], args: &[&str]) -> CliOutput {
+        self.run_binary_with(None, vars, args)
     }
 
     /// Storage URL pointing to local artefact dir.
@@ -185,6 +237,15 @@ impl TestEnv {
     }
 
     fn run_binary(&self, allow: Option<&str>, args: &[&str]) -> CliOutput {
+        self.run_binary_with(allow, &[], args)
+    }
+
+    fn run_binary_with(
+        &self,
+        allow: Option<&str>,
+        vars: &[(&str, &str)],
+        args: &[&str],
+    ) -> CliOutput {
         let mut full_args: Vec<String> = Vec::new();
         if let Some((subcmd, rest)) = args.split_first() {
             full_args.push(subcmd.to_string());
@@ -196,6 +257,9 @@ impl TestEnv {
         cmd.args(&full_args).env_remove("GITSCALE_HOOK_ALLOW");
         if let Some(allow) = allow {
             cmd.env("GITSCALE_HOOK_ALLOW", allow);
+        }
+        for (name, value) in vars {
+            cmd.env(name, value);
         }
         let output = cmd.output().expect("failed to run the gitscale binary");
         CliOutput {
@@ -233,6 +297,7 @@ impl Drop for TestEnv {
         let _ = fs::remove_dir_all(base.join("playground").join(&self.name));
         let _ = fs::remove_dir_all(base.join("repos-remote").join(&self.name));
         let _ = fs::remove_dir_all(base.join("artefacts-remote").join(&self.name));
+        let _ = fs::remove_dir_all(base.join("cache").join(&self.name));
     }
 }
 

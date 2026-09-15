@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 mod helpers;
 
 use helpers::{strip_ansi, TestEnv};
@@ -523,6 +524,81 @@ fn status_table_ok() {
     insta::assert_snapshot!("status_table_ok_stdout", plain);
 }
 
+/// A tag or a SHA is checked out detached, so REF reads as a commit while
+/// EXPECTED reads as the tag. That is not a mismatch, and status must not dress
+/// it as one — the yellow REF and a `ref-mismatch` flag both have to key off
+/// where HEAD actually is.
+#[test]
+fn status_tag_pinned_is_not_a_mismatch() {
+    let env = TestEnv::new("status_tag_pinned");
+    let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "a")]);
+    helpers::run_git_pub(&bare, &["tag", "demo-v1", "main"]);
+
+    env.write_config(&format!(
+        r#"[repos]
+"libs/mylib" = {{ url = "{}", revision = "demo-v1" }}
+"#,
+        bare.display()
+    ));
+    assert!(env.run(&["clone"]).success);
+
+    let out = env.run(&["status"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    let plain = strip_ansi(&out.stdout);
+    assert!(plain.contains("detached"), "{}", plain);
+    assert!(
+        !plain.contains("ref-mismatch"),
+        "a checkout at the pinned tag is on the right commit: {}",
+        plain
+    );
+    assert!(
+        !out.stdout.contains("\x1b[33m"),
+        "nothing here is amber: {:?}",
+        out.stdout
+    );
+}
+
+/// The other side of the same rule: detached somewhere the revision does not
+/// point is a mismatch, which comparing the two columns as text used to miss
+/// for exactly the repos that are pinned.
+#[test]
+fn status_flags_a_pin_the_checkout_has_not_followed() {
+    let env = TestEnv::new("status_tag_moved");
+    let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "v1")]);
+    helpers::run_git_pub(&bare, &["tag", "demo-v1", "main"]);
+    // Both tags exist before the clone, so the checkout knows demo-v2 and can
+    // be told it is not on it. A revision the clone has never heard of is a
+    // different thing, and status says nothing about those rather than
+    // guessing.
+    commit_to_bare(&bare, "main", "a.txt", "v2");
+    helpers::run_git_pub(&bare, &["tag", "demo-v2", "main"]);
+
+    env.write_config(&format!(
+        r#"[repos]
+"libs/mylib" = {{ url = "{}", revision = "demo-v1" }}
+"#,
+        bare.display()
+    ));
+    assert!(env.run(&["clone"]).success);
+
+    // The config moves on to the later tag; the checkout has not.
+    env.write_config(&format!(
+        r#"[repos]
+"libs/mylib" = {{ url = "{}", revision = "demo-v2" }}
+"#,
+        bare.display()
+    ));
+
+    let out = env.run(&["status"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    let plain = strip_ansi(&out.stdout);
+    assert!(
+        plain.contains("ref-mismatch"),
+        "the checkout is not where the revision points: {}",
+        plain
+    );
+}
+
 #[test]
 fn status_json() {
     let env = TestEnv::new("status_json");
@@ -545,6 +621,8 @@ fn status_json() {
     // Redact dynamic fields for stable snapshots
     insta::assert_json_snapshot!("status_json_output", parsed, {
         "[].current_ref" => "[ref]",
+        "[].cache_dir" => "[cache-dir]",
+        "[].bytes" => "[bytes]",
     });
 }
 
@@ -1690,6 +1768,12 @@ fn shallow_entry(url: &str, revision: &str) -> gitscale::config::RepoEntry {
     }
 }
 
+/// A depth-1 clone straight from the remote — no cache entry, no borrowing.
+#[cfg(test)]
+fn shallow_source() -> gitscale::share::Source {
+    gitscale::share::Source::remote(None, true)
+}
+
 #[test]
 fn shallow_clone_pinned_to_sha() {
     let env = TestEnv::new("shallow_clone_sha");
@@ -1699,7 +1783,7 @@ fn shallow_clone_pinned_to_sha() {
     let sha = bare_git_stdout(&bare, &["rev-parse", "main"]);
 
     let entry = shallow_entry(&url, &sha);
-    gitscale::git::clone_repo(&entry, &env.playground, false, true, None)
+    gitscale::git::clone_repo(&entry, &env.playground, false, &shallow_source())
         .expect("shallow clone of a SHA-pinned revision should succeed");
 
     let dest = env.playground.join("libs/mylib");
@@ -1722,7 +1806,7 @@ fn shallow_clone_pinned_to_branch_still_works() {
     let url = format!("file://{}", bare.display());
 
     let entry = shallow_entry(&url, "main");
-    gitscale::git::clone_repo(&entry, &env.playground, false, true, None)
+    gitscale::git::clone_repo(&entry, &env.playground, false, &shallow_source())
         .expect("shallow clone of a branch revision should succeed");
 
     let dest = env.playground.join("libs/mylib");
@@ -1741,14 +1825,14 @@ fn shallow_pull_pinned_to_sha_moves_to_new_sha() {
     let first = bare_git_stdout(&bare, &["rev-parse", "main"]);
 
     let entry = shallow_entry(&url, &first);
-    gitscale::git::clone_repo(&entry, &env.playground, false, true, None).unwrap();
+    gitscale::git::clone_repo(&entry, &env.playground, false, &shallow_source()).unwrap();
 
     // Add a second commit upstream and re-pin the config to it.
     let second = commit_to_bare(&bare, "main", "a.txt", "v2");
     assert_ne!(first, second);
 
     let entry = shallow_entry(&url, &second);
-    gitscale::git::pull_repo(&entry, &env.playground, false, true, None)
+    gitscale::git::pull_repo(&entry, &env.playground, false, &shallow_source())
         .expect("shallow pull to a new SHA should succeed");
 
     let dest = env.playground.join("libs/mylib");

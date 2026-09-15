@@ -14,3 +14,10 @@
 # binary directly (`./target/debug/gitscale ...`) rather than through cargo.
 [env]
 GIT_CONFIG_NOSYSTEM = "1"
+
+# The object cache is on by default and lives in the user's data directory, so
+# without this every test run would populate — and leave entries in — the real
+# ~/.local/share/gitscale. Pointed inside target/ instead, where it is as
+# disposable as the rest of the build output. Tests that exercise the cache
+# itself set `[cache] dir` and get a directory of their own on top of this.
+GITSCALE_CACHE_DIR = { value = "target/gitscale-test-cache", relative = true }

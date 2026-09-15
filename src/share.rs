@@ -30,6 +30,59 @@ pub struct Reference {
     pub dissociate: bool,
 }
 
+/// A commit taken out of a snapshot cache entry, rather than borrowed from a
+/// mirror. CI clones it locally and copies the objects, so nothing it produces
+/// depends on the entry surviving the job.
+#[derive(Debug, Clone)]
+pub struct Pinned {
+    /// The bare snapshot entry holding the commit.
+    pub entry: PathBuf,
+    /// The ref inside it, as `git clone --branch` wants it: `pin/<sha>`.
+    pub reference: String,
+    /// The commit that ref points at.
+    pub sha: String,
+    /// Leave HEAD detached at `sha` afterwards. A branch revision keeps its
+    /// branch name, the way a `--depth 1 --branch` clone would; a tag or a
+    /// SHA detaches, which is what git does for those anyway.
+    pub detach: bool,
+}
+
+/// Where one checkout's objects and refs come from.
+///
+/// The default is the plain remote — what gitscale did before there was a
+/// cache, and what it still does when the cache is off or cannot serve an
+/// entry.
+#[derive(Debug, Clone, Default)]
+pub struct Source {
+    /// A local repository whose objects a new clone borrows, via
+    /// `git clone --reference`: the source workspace when it has this repo,
+    /// otherwise the cache mirror.
+    pub reference: Option<Reference>,
+    /// A local repository to fetch refs and objects from instead of the
+    /// remote. Always a cache entry, already brought up to date from the
+    /// remote — the step that makes everything after it free.
+    pub local: Option<PathBuf>,
+    /// CI's snapshot flow: local-clone this commit out of `local`.
+    pub pinned: Option<Pinned>,
+    /// Check out at depth 1. Follows the entry kind rather than the repo
+    /// mode: a snapshot is shallow by design, a mirror must not be, because
+    /// the workspace borrows from it and shallow borrows less cleanly.
+    pub shallow: bool,
+}
+
+impl Source {
+    /// Talk to the remote, borrowing from `reference` if there is one — the
+    /// no-cache path, where `shallow` is still decided by mode and CI.
+    pub fn remote(reference: Option<Reference>, shallow: bool) -> Self {
+        Self {
+            reference,
+            local: None,
+            pinned: None,
+            shallow,
+        }
+    }
+}
+
 /// The workspace `root` was derived from, if it was derived from one.
 ///
 /// Two different mechanisms can put an earlier copy next to this one, and they

@@ -583,6 +583,7 @@ pub fn run(
     hook: &str,
     root: Option<&Path>,
     verbose: bool,
+    no_cache: bool,
     interactive: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
@@ -621,7 +622,8 @@ pub fn run(
         OnHookError::resolved(configured)
     };
 
-    let result = crate::commands::pull::run(Some(&repo), &[], verbose, interactive, out, err);
+    let result =
+        crate::commands::pull::run(Some(&repo), &[], verbose, no_cache, interactive, out, err);
 
     let breadcrumb = breadcrumb_path(&repo)?;
     match result {

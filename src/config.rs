@@ -106,6 +106,42 @@ pub struct Share {
     pub dissociate: bool,
 }
 
+/// The object cache: whether to use one, where it lives, and what it may do.
+///
+/// Per-user only, deliberately. `dir` defaults to this user's own data
+/// directory and there is no system-wide scope: a cache several users write
+/// through would give anything that poisons one entry a machine-wide reach —
+/// the blast radius `hook install --system` gets only after an explicit
+/// `--allow`, and something on by default can never ask for.
+#[derive(Debug, Clone)]
+pub struct CacheSettings {
+    /// On by default. `--no-cache` and `enabled = false` opt out, leaving
+    /// every clone and fetch to talk to the remote directly.
+    pub enabled: bool,
+    /// Where entries live. Empty means the default location — see
+    /// [`crate::cache::resolve_dir`].
+    pub dir: String,
+    /// Copy borrowed objects into each workspace and drop the link, as
+    /// `[share] dissociate` does for a source workspace. Costs the disk
+    /// saving, keeps the network one.
+    pub dissociate: bool,
+    /// Relink a root repository that was cloned by plain `git clone` to the
+    /// cache, reclaiming its duplicate objects. Off by default: it converts a
+    /// repository that stood on its own into one that depends on the cache.
+    pub adopt_root: bool,
+}
+
+impl Default for CacheSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            dir: String::new(),
+            dissociate: false,
+            adopt_root: false,
+        }
+    }
+}
+
 /// Which untracked files `gitscale clean` keeps.
 ///
 /// Scoped to the repo whose config it appears in, and nothing below it: a
@@ -127,6 +163,7 @@ pub struct GitScaleConfig {
     pub hooks: Hooks,
     pub share: Share,
     pub clean: Clean,
+    pub cache: CacheSettings,
 }
 
 #[derive(Deserialize)]
@@ -136,6 +173,15 @@ struct RawConfig {
     hooks: Option<RawHooks>,
     share: Option<RawShare>,
     clean: Option<RawClean>,
+    cache: Option<RawCache>,
+}
+
+#[derive(Deserialize)]
+struct RawCache {
+    enabled: Option<bool>,
+    dir: Option<String>,
+    dissociate: Option<bool>,
+    adopt_root: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -206,6 +252,7 @@ pub fn load_config(config_path: &Path) -> Result<GitScaleConfig> {
     };
 
     let clean = parse_clean(raw.clean.as_ref(), config_path)?;
+    let cache = parse_cache(raw.cache.as_ref(), config_path)?;
 
     Ok(GitScaleConfig {
         repos,
@@ -213,6 +260,7 @@ pub fn load_config(config_path: &Path) -> Result<GitScaleConfig> {
         hooks,
         share,
         clean,
+        cache,
     })
 }
 
@@ -336,6 +384,24 @@ fn parse_clean(raw: Option<&RawClean>, config_path: &Path) -> Result<Clean> {
     Ok(Clean { exclude })
 }
 
+/// `[cache]`. `dir` reaches git as a path argument, so it gets the same
+/// option-like check as a URL: `--upload-pack=…` in that position is a shell.
+fn parse_cache(raw: Option<&RawCache>, config_path: &Path) -> Result<CacheSettings> {
+    let Some(cache) = raw else {
+        return Ok(CacheSettings::default());
+    };
+    let dir = cache.dir.clone().unwrap_or_default();
+    if !dir.is_empty() {
+        check_not_option_like(&dir, "cache.dir", config_path)?;
+    }
+    Ok(CacheSettings {
+        enabled: cache.enabled.unwrap_or(true),
+        dir,
+        dissociate: cache.dissociate.unwrap_or(false),
+        adopt_root: cache.adopt_root.unwrap_or(false),
+    })
+}
+
 fn parse_repos(
     raw: Option<&BTreeMap<String, RawRepo>>,
     config_path: &Path,
@@ -448,6 +514,24 @@ pub fn write_config(config_path: &Path, config: &GitScaleConfig) -> Result<()> {
     if config.share.dissociate {
         lines.push("[share]".to_string());
         lines.push("dissociate = true".to_string());
+        lines.push(String::new());
+    }
+
+    let cache = &config.cache;
+    if !cache.enabled || !cache.dir.is_empty() || cache.dissociate || cache.adopt_root {
+        lines.push("[cache]".to_string());
+        if !cache.enabled {
+            lines.push("enabled = false".to_string());
+        }
+        if !cache.dir.is_empty() {
+            lines.push(format!("dir = {}", toml_string(&cache.dir)));
+        }
+        if cache.dissociate {
+            lines.push("dissociate = true".to_string());
+        }
+        if cache.adopt_root {
+            lines.push("adopt_root = true".to_string());
+        }
         lines.push(String::new());
     }
 

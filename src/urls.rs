@@ -60,6 +60,19 @@ pub fn extract_owner_repo(repo_url: &str) -> Result<(String, String)> {
     Ok((parts[0].to_string(), parts[1].to_string()))
 }
 
+/// True for something that names a remote repository rather than a directory
+/// declared in the config.
+///
+/// A URL with a scheme, an scp-style SSH address, or an absolute path. Config
+/// directories are checked to be relative and free of `..` when the config is
+/// read, so the two cannot be confused. A remote given as a *relative* local
+/// path is the one shape that looks like a directory name; spell it
+/// `file://…` or absolutely to bootstrap from it.
+pub fn looks_like_remote(value: &str) -> bool {
+    static SSH: &str = r"^[\w-]+@[\w.\-]+:";
+    value.contains("://") || value.starts_with('/') || Regex::new(SSH).unwrap().is_match(value)
+}
+
 /// Canonicalize a git remote URL so that different transport forms of the same
 /// repository (e.g. `git@github.com:org/repo.git` and
 /// `https://github.com/org/repo`) compare as equal.
@@ -77,6 +90,16 @@ pub fn normalize(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_url_is_told_apart_from_a_declared_directory() {
+        assert!(looks_like_remote("https://github.com/org/repo.git"));
+        assert!(looks_like_remote("git@github.com:org/repo.git"));
+        assert!(looks_like_remote("file:///srv/mirrors/repo.git"));
+        assert!(looks_like_remote("/srv/mirrors/repo.git"));
+        assert!(!looks_like_remote("libs/core"));
+        assert!(!looks_like_remote("core"));
+    }
 
     #[test]
     fn test_normalize_url() {

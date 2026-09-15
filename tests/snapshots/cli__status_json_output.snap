@@ -6,6 +6,7 @@ expression: parsed
   {
     "ahead": 0,
     "behind": 0,
+    "cache": "mirror",
     "clean": true,
     "current_ref": "[ref]",
     "detached": false,
@@ -16,5 +17,10 @@ expression: parsed
     "stale": false,
     "symlink": false,
     "symlink_target": ""
+  },
+  {
+    "bytes": "[bytes]",
+    "cache_dir": "[cache-dir]",
+    "entries": 1
   }
 ]

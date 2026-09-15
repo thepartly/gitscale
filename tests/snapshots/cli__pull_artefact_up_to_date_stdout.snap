@@ -1,6 +1,5 @@
 ---
 source: tests/cli.rs
-assertion_line: 399
 expression: out.stdout
 ---
 Pulling latest changes...

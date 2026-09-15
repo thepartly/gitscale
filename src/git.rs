@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 
 use crate::ci;
 use crate::config::RepoEntry;
-use crate::share::Reference;
+use crate::share::{Pinned, Source};
 
 pub fn is_ci() -> bool {
     std::env::var("CI")
@@ -14,7 +14,11 @@ pub fn is_ci() -> bool {
         .unwrap_or(false)
 }
 
-fn run_git(args: &[&str], cwd: Option<&Path>, check: bool) -> Result<std::process::Output> {
+pub(crate) fn run_git(
+    args: &[&str],
+    cwd: Option<&Path>,
+    check: bool,
+) -> Result<std::process::Output> {
     let mut cmd = Command::new("git");
     // Under CI, teach git how to authenticate to the CI server. Scoped to that
     // one host, and carrying the name of the token variable rather than the
@@ -81,7 +85,7 @@ fn stdout_str(output: &std::process::Output) -> String {
 /// True if `revision` names a commit rather than a branch or tag. `git clone
 /// --branch` accepts only branch and tag names, so a SHA-pinned entry cannot
 /// be cloned shallowly the usual way.
-fn looks_like_sha(revision: &str) -> bool {
+pub(crate) fn looks_like_sha(revision: &str) -> bool {
     revision.len() >= 7 && revision.len() <= 64 && revision.chars().all(|c| c.is_ascii_hexdigit())
 }
 
@@ -116,16 +120,11 @@ fn shallow_clone_at_sha(entry: &RepoEntry, dest: &Path, verbose: bool) -> Result
 
 /// Clone `entry` into `root`.
 ///
-/// `reference` names a copy already on this machine whose objects the new
-/// clone may take instead of downloading them. See [`crate::share`] for how
-/// one is found; passing `None` always produces an ordinary clone.
-pub fn clone_repo(
-    entry: &RepoEntry,
-    root: &Path,
-    verbose: bool,
-    shallow: bool,
-    reference: Option<&Reference>,
-) -> Result<()> {
+/// `source` says where the objects come from: the remote, a copy already on
+/// this machine whose objects the new clone borrows, or a pinned commit in a
+/// snapshot cache entry. See [`crate::share`] and [`crate::cache`] for how one
+/// is worked out; [`Source::default`] always produces an ordinary clone.
+pub fn clone_repo(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source) -> Result<()> {
     if entry.is_artefact() {
         return Ok(());
     }
@@ -134,7 +133,9 @@ pub fn clone_repo(
         bail!("Directory already exists: {}", dest.display());
     }
 
-    if shallow && looks_like_sha(&entry.revision) {
+    if let Some(pinned) = &source.pinned {
+        clone_pinned(entry, root, &dest, pinned, verbose)?;
+    } else if source.shallow && looks_like_sha(&entry.revision) {
         // This path builds the repository with `init` + a one-commit `fetch`
         // rather than `clone`, and there is no `--reference` for fetch. Little
         // is lost: a depth-1 fetch of a single commit transfers about as much
@@ -143,19 +144,28 @@ pub fn clone_repo(
             // Remote would not serve the bare commit; retry unshallowed.
             fs::remove_dir_all(&dest)
                 .with_context(|| format!("cannot clean up {}", dest.display()))?;
-            return clone_repo(entry, root, verbose, false, reference);
+            let deep = Source {
+                shallow: false,
+                ..source.clone()
+            };
+            return clone_repo(entry, root, verbose, &deep);
         }
     } else {
         let dest_str = dest.to_string_lossy().to_string();
         let url = remote_url(entry);
-        let reference_path = reference.map(|r| r.path.to_string_lossy().to_string());
+        let reference_path = source
+            .reference
+            .as_ref()
+            .map(|r| r.path.to_string_lossy().to_string());
         let mut args: Vec<&str> = vec!["clone", &url, &dest_str];
-        if shallow && !entry.revision.is_empty() {
+        if source.shallow && !entry.revision.is_empty() {
             args.extend_from_slice(&["--depth", "1", "--branch", &entry.revision]);
-        } else if shallow {
+        } else if source.shallow {
             args.extend_from_slice(&["--depth", "1"]);
         }
-        if let (Some(reference), Some(path)) = (reference, reference_path.as_deref()) {
+        if let (Some(reference), Some(path)) =
+            (source.reference.as_ref(), reference_path.as_deref())
+        {
             args.extend_from_slice(&["--reference", path]);
             if reference.dissociate {
                 args.push("--dissociate");
@@ -168,13 +178,81 @@ pub fn clone_repo(
         }
         run_git(&args, None, true)?;
 
-        if !shallow && !entry.revision.is_empty() {
+        if !source.shallow && !entry.revision.is_empty() {
             checkout_revision(entry, root)?;
         }
     }
     if entry.is_readonly() {
         apply_readonly(&dest)?;
     }
+    Ok(())
+}
+
+/// Clone `url` into `dest`, borrowing objects from `reference` when there is
+/// one. Used to bootstrap a workspace, where there is no entry to describe the
+/// repository yet — only a URL the user typed.
+pub fn clone_url(url: &str, dest: &Path, reference: Option<&Path>, verbose: bool) -> Result<()> {
+    let dest_str = dest.to_string_lossy().to_string();
+    let reference_str = reference.map(|p| p.to_string_lossy().to_string());
+    let mut args: Vec<&str> = vec!["clone", url, &dest_str];
+    if let Some(path) = reference_str.as_deref() {
+        args.extend_from_slice(&["--reference", path]);
+    }
+    args.push(if verbose { "--progress" } else { "--quiet" });
+    run_git(&args, None, true)?;
+    Ok(())
+}
+
+/// Build a checkout from a snapshot cache entry.
+///
+/// An ordinary local clone of one pinned commit: it copies the objects instead
+/// of borrowing them, so the entry can be evicted — or the whole cache deleted
+/// — under a running job without it noticing. Git refuses a shallow repository
+/// as a `--reference`, so copying is not merely the safer choice here, it is
+/// the only one.
+fn clone_pinned(
+    entry: &RepoEntry,
+    root: &Path,
+    dest: &Path,
+    pinned: &Pinned,
+    verbose: bool,
+) -> Result<()> {
+    let progress = if verbose { "--progress" } else { "--quiet" };
+    let from = pinned.entry.to_string_lossy().to_string();
+    let dest_str = dest.to_string_lossy().to_string();
+    run_git(
+        &[
+            "clone",
+            // Without this the job clones every other pin in the entry too.
+            "--single-branch",
+            "--branch",
+            &pinned.reference,
+            progress,
+            &from,
+            &dest_str,
+        ],
+        None,
+        true,
+    )?;
+    // `origin` currently names the cache entry. The workspace's remote has to
+    // be the real one, for pushes and for anything the user runs by hand.
+    reconcile_remote(entry, root)?;
+    // Land where a `--depth 1 --branch` clone would have: on the branch the
+    // config names, or detached for a tag or a SHA.
+    if pinned.detach {
+        run_git(
+            &["checkout", "--detach", progress, &pinned.sha],
+            Some(dest),
+            true,
+        )?;
+    } else {
+        run_git(
+            &["checkout", progress, "-B", &entry.revision, &pinned.sha],
+            Some(dest),
+            true,
+        )?;
+    }
+    run_git(&["branch", "-D", &pinned.reference], Some(dest), false)?;
     Ok(())
 }
 
@@ -273,14 +351,52 @@ pub fn is_shallow(dest: &Path) -> bool {
         .unwrap_or(false)
 }
 
-pub fn fetch_repo(entry: &RepoEntry, root: &Path) -> Result<()> {
+pub fn fetch_repo(entry: &RepoEntry, root: &Path, source: &Source) -> Result<()> {
     let dest = root.join(&entry.directory);
+    if source.local.is_some() {
+        return fetch_from_cache(&dest, source);
+    }
     ensure_ci_remote(entry, &dest)?;
     if is_shallow(&dest) {
         run_git(&["fetch", "--depth", "1", "--quiet"], Some(&dest), true)?;
     } else {
         run_git(&["fetch", "--all", "--quiet"], Some(&dest), true)?;
     }
+    Ok(())
+}
+
+/// Step two of cache-first: take locally everything the entry just fetched
+/// from the remote.
+///
+/// `origin` in the workspace stays the real URL, so pushes and a hand-run
+/// `git fetch` still go where they always did — only gitscale's own refresh
+/// reads from the cache.
+fn fetch_from_cache(dest: &Path, source: &Source) -> Result<()> {
+    let Some(local) = &source.local else {
+        return Ok(());
+    };
+    let from = local.to_string_lossy().to_string();
+    if let Some(pinned) = &source.pinned {
+        run_git(
+            &["fetch", "--depth", "1", "--quiet", &from, &pinned.reference],
+            Some(dest),
+            true,
+        )?;
+        return Ok(());
+    }
+    let mut args = vec!["fetch", "--quiet"];
+    // A checkout that is already shallow keeps its shape. Deepening one
+    // behind the user's back is not this command's business — and a checkout
+    // made shallow before there was a cache is exactly what this meets.
+    if is_shallow(dest) {
+        args.extend_from_slice(&["--depth", "1"]);
+    }
+    args.extend_from_slice(&[
+        &from,
+        "+refs/heads/*:refs/remotes/origin/*",
+        "+refs/tags/*:refs/tags/*",
+    ]);
+    run_git(&args, Some(dest), true)?;
     Ok(())
 }
 
@@ -362,13 +478,13 @@ fn walkdir_recursive(root: &Path, dir: &Path, result: &mut Vec<WalkEntry>) {
     }
 }
 
-pub fn sync_repo(entry: &RepoEntry, root: &Path, verbose: bool, shallow: bool) -> Result<()> {
+pub fn sync_repo(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source) -> Result<()> {
     if entry.is_artefact() {
         return Ok(());
     }
     let dest = root.join(&entry.directory);
     if !dest.exists() {
-        return clone_repo(entry, root, verbose, shallow, None);
+        return clone_repo(entry, root, verbose, source);
     }
 
     if entry.is_readonly() {
@@ -376,14 +492,14 @@ pub fn sync_repo(entry: &RepoEntry, root: &Path, verbose: bool, shallow: bool) -
     }
 
     let result = (|| -> Result<()> {
-        fetch_repo(entry, root)?;
+        fetch_repo(entry, root, source)?;
         if is_shallow(&dest) {
             run_git(&["reset", "--hard", "@{upstream}"], Some(&dest), false)?;
         } else {
             checkout_revision(entry, root)?;
             let head_ref = get_current_ref(entry, root)?;
             if !head_ref.is_empty() && !is_detached(entry, root) {
-                run_git(&["pull", "--ff-only", "--quiet"], Some(&dest), false)?;
+                fast_forward(&dest, source)?;
             }
         }
         Ok(())
@@ -395,34 +511,65 @@ pub fn sync_repo(entry: &RepoEntry, root: &Path, verbose: bool, shallow: bool) -
     result
 }
 
+/// Fast-forward the checked-out branch to its upstream.
+///
+/// With a cache entry behind it the tracking ref was just updated from there,
+/// so this is a local move and `git pull` would only mean a second trip to the
+/// remote. Without one it is that trip. Either way a branch that has diverged
+/// is left alone rather than forced.
+fn fast_forward(dest: &Path, source: &Source) -> Result<()> {
+    if source.local.is_some() {
+        run_git(
+            &["merge", "--ff-only", "--quiet", "@{upstream}"],
+            Some(dest),
+            false,
+        )?;
+    } else {
+        run_git(&["pull", "--ff-only", "--quiet"], Some(dest), false)?;
+    }
+    Ok(())
+}
+
 /// Bring `entry` up to date, cloning it first if it is not there yet — which
 /// is the usual case in a freshly created worktree, where the hook-triggered
 /// pull is the first thing to run. `reference` is used only for that clone.
-pub fn pull_repo(
-    entry: &RepoEntry,
-    root: &Path,
-    verbose: bool,
-    shallow: bool,
-    reference: Option<&Reference>,
-) -> Result<()> {
+pub fn pull_repo(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source) -> Result<()> {
     if entry.is_artefact() {
         return Ok(());
     }
     let dest = root.join(&entry.directory);
     if !dest.exists() {
-        return clone_repo(entry, root, verbose, shallow, reference);
+        return clone_repo(entry, root, verbose, source);
     }
 
     if entry.is_readonly() {
         restore_writable(&dest)?;
     }
 
-    ensure_ci_remote(entry, &dest)?;
+    if source.local.is_none() {
+        ensure_ci_remote(entry, &dest)?;
+    }
 
     let result = (|| -> Result<()> {
+        if let Some(pinned) = &source.pinned {
+            // CI, cached: the commit comes out of the snapshot entry, so a job
+            // that runs after another has nothing at all to download.
+            fetch_from_cache(&dest, source)?;
+            run_git(
+                &["reset", "--hard", "--quiet", &pinned.sha],
+                Some(&dest),
+                true,
+            )?;
+            return Ok(());
+        }
         if is_shallow(&dest) {
             if looks_like_sha(&entry.revision) {
-                // Detached at a commit: there is no @{upstream} to reset to.
+                // Detached at a commit: there is no @{upstream} to reset to,
+                // and an arbitrary commit is not something a mirror serves by
+                // default, so this one asks the remote even with a cache.
+                if source.local.is_some() {
+                    ensure_ci_remote(entry, &dest)?;
+                }
                 run_git(
                     &[
                         "fetch",
@@ -440,17 +587,24 @@ pub fn pull_repo(
                     Some(&dest),
                     true,
                 )?;
+            } else if source.local.is_some() {
+                fetch_from_cache(&dest, source)?;
+                run_git(&["reset", "--hard", "@{upstream}"], Some(&dest), false)?;
             } else {
                 run_git(&["fetch", "--depth", "1", "--quiet"], Some(&dest), true)?;
                 run_git(&["reset", "--hard", "@{upstream}"], Some(&dest), false)?;
             }
-        } else {
-            let current = get_current_ref(entry, root)?;
-            if current != entry.revision {
-                checkout_revision(entry, root)?;
-            }
-            run_git(&["pull", "--ff-only", "--quiet"], Some(&dest), false)?;
+            return Ok(());
         }
+        // A full checkout: refs come from the cache when there is one, which
+        // makes the fast-forward below local; without one, nothing is fetched
+        // here and the fast-forward is the `git pull` it always was.
+        fetch_from_cache(&dest, source)?;
+        let current = get_current_ref(entry, root)?;
+        if current != entry.revision {
+            checkout_revision(entry, root)?;
+        }
+        fast_forward(&dest, source)?;
         Ok(())
     })();
 
@@ -535,6 +689,29 @@ pub fn is_repo_root(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Resolve a path inside `repo`'s git directory, the way git itself would.
+///
+/// Built by asking git rather than by joining `.git/…`: in a linked worktree
+/// `.git` is a file, so the hand-built path matches nothing and the caller
+/// quietly does the wrong thing instead of erroring.
+pub fn git_path(repo: &Path, name: &str) -> Option<std::path::PathBuf> {
+    let output = run_git(&["rev-parse", "--git-path", name], Some(repo), false).ok()?;
+    output
+        .status
+        .success()
+        .then(|| repo.join(stdout_str(&output)))
+}
+
+/// Repack `repo` against its alternates and drop what it no longer needs to
+/// own — the step that turns a full local copy into a thin borrower.
+///
+/// `-l` is what keeps this honest: only objects this repository actually has
+/// are repacked, and anything reachable through the alternate stays there.
+pub fn repack_local(repo: &Path) -> Result<()> {
+    run_git(&["repack", "-a", "-d", "-l", "--quiet"], Some(repo), true)?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Status
 // ---------------------------------------------------------------------------
@@ -555,6 +732,45 @@ pub struct RepoStatus {
     pub symlink_target: String,
     pub has_unlinked: bool,
     pub has_unlinked_modified: bool,
+    /// What the cache is doing for this checkout. Filled in by the caller,
+    /// which is the one that knows where the cache is.
+    pub cache: crate::cache::CacheUse,
+    /// The checkout sits on exactly the commit the configured revision names.
+    ///
+    /// Separate from comparing `current_ref` with `expected_ref` as text,
+    /// because a tag or a SHA leaves HEAD detached and git then spells the
+    /// answer as an abbreviated commit — a spelling the revision can never
+    /// match, however right the checkout is.
+    pub at_expected: bool,
+}
+
+/// Whether `dest` is at the commit `revision` names.
+///
+/// Both sides are resolved rather than compared as text. Anything that will
+/// not resolve — a shallow clone without the tag, a revision the remote has
+/// since deleted — answers `true`: status should not raise a complaint it
+/// cannot substantiate, and the flags that do cover those cases are separate.
+fn is_at_revision(dest: &Path, revision: &str) -> bool {
+    if revision.is_empty() {
+        return true;
+    }
+    let wanted = run_git(
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{}^{{commit}}", revision),
+        ],
+        Some(dest),
+        false,
+    );
+    let head = run_git(&["rev-parse", "HEAD"], Some(dest), false);
+    match (wanted, head) {
+        (Ok(wanted), Ok(head)) if wanted.status.success() && head.status.success() => {
+            stdout_str(&wanted) == stdout_str(&head)
+        }
+        _ => true,
+    }
 }
 
 pub fn get_current_ref(entry: &RepoEntry, root: &Path) -> Result<String> {
@@ -636,6 +852,8 @@ pub fn get_repo_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
             symlink_target: String::new(),
             has_unlinked: false,
             has_unlinked_modified: false,
+            cache: crate::cache::CacheUse::Unused,
+            at_expected: true,
         };
     }
     if symlink {
@@ -668,6 +886,8 @@ pub fn get_repo_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
             symlink_target: target,
             has_unlinked: false,
             has_unlinked_modified: false,
+            cache: crate::cache::CacheUse::Unused,
+            at_expected: true,
         };
     }
 
@@ -675,6 +895,7 @@ pub fn get_repo_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
     let detached = is_detached(entry, root);
     let clean = is_clean(entry, root);
     let shallow = is_shallow(&dest);
+    let at_expected = is_at_revision(&dest, &entry.revision);
 
     if shallow {
         let stale = is_stale(&dest);
@@ -693,6 +914,8 @@ pub fn get_repo_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
             symlink_target: String::new(),
             has_unlinked: false,
             has_unlinked_modified: false,
+            cache: crate::cache::CacheUse::Unused,
+            at_expected,
         };
     }
 
@@ -712,6 +935,8 @@ pub fn get_repo_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
         symlink_target: String::new(),
         has_unlinked: false,
         has_unlinked_modified: false,
+        cache: crate::cache::CacheUse::Unused,
+        at_expected,
     }
 }
 
@@ -768,6 +993,8 @@ pub fn get_self_status(root: &Path) -> Option<RepoStatus> {
         symlink_target: String::new(),
         has_unlinked: false,
         has_unlinked_modified: false,
+        cache: crate::cache::CacheUse::Unused,
+        at_expected: true,
     })
 }
 
@@ -796,6 +1023,8 @@ pub fn get_artefact_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
             symlink_target: target,
             has_unlinked: false,
             has_unlinked_modified: false,
+            cache: crate::cache::CacheUse::Unused,
+            at_expected: true,
         };
     }
 
@@ -836,6 +1065,8 @@ pub fn get_artefact_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
         symlink_target: String::new(),
         has_unlinked: false,
         has_unlinked_modified: false,
+        cache: crate::cache::CacheUse::Unused,
+        at_expected: true,
     }
 }
 

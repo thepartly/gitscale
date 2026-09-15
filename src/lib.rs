@@ -1,3 +1,4 @@
+pub mod cache;
 pub mod ci;
 pub mod commands;
 pub mod config;
@@ -24,16 +25,24 @@ struct Cli {
     #[arg(short, long, global = true)]
     verbose: bool,
 
+    /// Talk to remotes directly instead of through the object cache
+    #[arg(long, global = true)]
+    no_cache: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Clone sub-repositories from .gitscale config
+    /// Clone sub-repositories from .gitscale config, or bootstrap a whole
+    /// workspace from a repository URL
     Clone {
         #[arg(short = 'C', long)]
         root: Option<PathBuf>,
+        /// A repository URL to bootstrap a workspace from, optionally
+        /// followed by the directory to create; or the names of declared
+        /// sub-repositories to clone.
         names: Vec<String>,
     },
     /// Fetch latest remote state for sub-repositories
@@ -103,6 +112,11 @@ enum Commands {
         #[arg(short = 'C', long)]
         root: Option<PathBuf>,
     },
+    /// Inspect and maintain the object cache
+    Cache {
+        #[command(subcommand)]
+        action: CacheAction,
+    },
     /// Install or inspect gitscale's git hooks
     Hook {
         #[command(subcommand)]
@@ -113,6 +127,36 @@ enum Commands {
         directory: String,
         #[arg(short = 'C', long)]
         root: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum CacheAction {
+    /// Show what the cache holds: one line per entry, and every revision a
+    /// snapshot entry is keeping
+    Status {
+        #[arg(short = 'C', long)]
+        root: Option<PathBuf>,
+    },
+    /// Bring cache entries up to date, warming repos nobody has pulled yet
+    Update {
+        #[arg(short = 'C', long)]
+        root: Option<PathBuf>,
+        names: Vec<String>,
+    },
+    /// Re-create entries this workspace borrows from but that are gone
+    Repair {
+        #[arg(short = 'C', long)]
+        root: Option<PathBuf>,
+        names: Vec<String>,
+    },
+    /// Repack entries and evict the ones nothing has used lately
+    Compact {
+        #[arg(short = 'C', long)]
+        root: Option<PathBuf>,
+        /// How recently an entry must have been used to be kept, e.g. '2weeks'
+        #[arg(long, value_name = "PERIOD", default_value = "1month")]
+        keep_recent: String,
     },
 }
 
@@ -234,17 +278,36 @@ fn run_cli_inner(
     err: &mut dyn Write,
 ) -> Result<()> {
     let verbose = cli.verbose;
+    let no_cache = cli.no_cache;
 
     match cli.command {
-        Commands::Clone { root, names } => {
-            commands::clone::run(root.as_deref(), &names, verbose, interactive, out, err)
-        }
-        Commands::Fetch { root, names } => {
-            commands::fetch::run(root.as_deref(), &names, interactive, out, err)
-        }
-        Commands::Pull { root, names } => {
-            commands::pull::run(root.as_deref(), &names, verbose, interactive, out, err)
-        }
+        Commands::Clone { root, names } => commands::clone::run(
+            root.as_deref(),
+            &names,
+            verbose,
+            no_cache,
+            interactive,
+            out,
+            err,
+        ),
+        Commands::Fetch { root, names } => commands::fetch::run(
+            root.as_deref(),
+            &names,
+            verbose,
+            no_cache,
+            interactive,
+            out,
+            err,
+        ),
+        Commands::Pull { root, names } => commands::pull::run(
+            root.as_deref(),
+            &names,
+            verbose,
+            no_cache,
+            interactive,
+            out,
+            err,
+        ),
         Commands::Push { root, names } => {
             commands::push::run(root.as_deref(), &names, verbose, interactive, out, err)
         }
@@ -252,6 +315,7 @@ fn run_cli_inner(
             root.as_deref(),
             &names,
             verbose,
+            no_cache,
             force,
             interactive,
             out,
@@ -280,7 +344,7 @@ fn run_cli_inner(
             root,
             fetch,
             format,
-        } => commands::status::run(root.as_deref(), fetch, &format, verbose, out, err),
+        } => commands::status::run(root.as_deref(), fetch, &format, verbose, no_cache, out, err),
         Commands::Add {
             directory,
             repo_url,
@@ -298,6 +362,26 @@ fn run_cli_inner(
         Commands::Remove { directory, root } => {
             commands::remove::run(&directory, root.as_deref(), out)
         }
+        Commands::Cache { action } => match action {
+            CacheAction::Status { root } => {
+                commands::cache::status(root.as_deref(), verbose, no_cache, out)
+            }
+            CacheAction::Update { root, names } => commands::cache::update(
+                root.as_deref(),
+                &names,
+                verbose,
+                no_cache,
+                interactive,
+                out,
+                err,
+            ),
+            CacheAction::Repair { root, names } => {
+                commands::cache::repair(root.as_deref(), &names, no_cache, out)
+            }
+            CacheAction::Compact { root, keep_recent } => {
+                commands::cache::compact(root.as_deref(), &keep_recent, no_cache, out)
+            }
+        },
         Commands::Hook { action } => match action {
             HookAction::Install {
                 system,
@@ -320,9 +404,15 @@ fn run_cli_inner(
                 root,
             } => commands::hook::uninstall(hook_scope(system, global, local), root.as_deref(), out),
             HookAction::Status { root } => commands::hook::status(root.as_deref(), out),
-            HookAction::Run { name, root } => {
-                commands::hook::run(&name, root.as_deref(), verbose, interactive, out, err)
-            }
+            HookAction::Run { name, root } => commands::hook::run(
+                &name,
+                root.as_deref(),
+                verbose,
+                no_cache,
+                interactive,
+                out,
+                err,
+            ),
         },
     }
 }

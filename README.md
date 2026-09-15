@@ -44,6 +44,9 @@ gitscale status
 ⤷     libs/shared   ../s   readonly    main   main       symlink
 ```
 
+Objects are fetched once per machine rather than once per workspace: see
+[Object cache](#object-cache).
+
 ## Config file
 
 The `.gitscale.toml` file lives at the root of your project. GitScale searches upward from the current directory to find it.
@@ -88,6 +91,20 @@ dissociate = true
 Controls how a clone reuses a copy of a sub-repository already on this machine.
 See [Reusing a local copy](#reusing-a-local-copy) below. Off by default.
 
+### Cache
+
+The object cache, on by default:
+
+```toml
+[cache]
+enabled    = true
+dir        = "~/.local/share/gitscale"
+dissociate = false
+adopt_root = false
+```
+
+See [Object cache](#object-cache) below.
+
 ### Clean
 
 What `gitscale clean` keeps:
@@ -124,7 +141,7 @@ cleaning it with no idea what it wanted kept.
 
 ## Commands
 
-### `gitscale clone [NAMES...]`
+### `gitscale clone [NAMES...]` / `gitscale clone URL [DIRECTORY]`
 
 Clone sub-repositories that don't exist locally yet. Artefact entries are downloaded from cloud storage.
 
@@ -132,6 +149,20 @@ Clone sub-repositories that don't exist locally yet. Artefact entries are downlo
 gitscale clone                  # clone all
 gitscale clone libs/core        # clone one
 ```
+
+Given a repository URL instead, it bootstraps a whole workspace from cold:
+clone the root repository, then everything its `.gitscale.toml` declares.
+
+```
+gitscale clone https://github.com/org/root.git         # into ./root
+gitscale clone git@github.com:org/root.git my-ws       # into ./my-ws
+```
+
+The root repository goes through the [object cache](#object-cache) like any
+other, so the second workspace of it costs nothing over the wire. A first
+argument is read as a URL when it has a scheme, is an scp-style SSH address, or
+is an absolute path — declared directories are always relative, so the two
+cannot be confused.
 
 ### `gitscale fetch [NAMES...]`
 
@@ -227,7 +258,7 @@ Columns:
 | Column | Description |
 |--------|-------------|
 | REPO | Directory name of the managed repo |
-| PATH | Symlink target path (or `-` if not a symlink) |
+| PATH | Where a symlinked entry points, or `-` for an ordinary checkout. Only [recursive dependencies](#recursive-dependencies) deduped into one checkout are symlinks |
 | MODE | `readonly`, `readwrite`, or `artefact` |
 | REF | Current git ref (branch/tag/SHA) |
 | EXPECTED | Declared revision from `.gitscale.toml` |
@@ -247,6 +278,7 @@ Status icons and flags:
 | `!` | red | **dirty** | Uncommitted changes |
 | `≠` | red | **ref-mismatch** | On a different branch than declared |
 | `≠` | red | **stale** | Shallow clone: local differs from upstream |
+| `!` | red | **cache-broken** | Borrows objects from a cache entry that is gone — run [`gitscale cache repair`](#gitscale-cache-statusupdaterepaircompact) |
 | `⇑` | yellow | **+N** | Commits ahead of upstream |
 | `⇓` | yellow | **-N** | Commits behind upstream |
 | `⇅` | yellow | **+N, -N** | Diverged (ahead and behind) |
@@ -271,6 +303,58 @@ Remove an entry from `.gitscale.toml`.
 gitscale remove libs/core
 ```
 
+### `gitscale cache <status|update|repair|compact>`
+
+Own the [object cache](#object-cache) directly. Everything else touches it
+implicitly; these are for when that is not enough.
+
+```
+gitscale cache status                        # what the cache holds, entry by entry
+gitscale cache update                        # warm entries nobody has pulled yet
+gitscale cache update libs/core              # just this one
+gitscale cache repair                        # re-create entries this workspace borrows from
+gitscale cache compact                       # repack, evict what nothing used in a month
+gitscale cache compact --keep-recent 2weeks
+```
+
+`status` is one line per **repository**, named after the directory that declares
+it where this workspace declares one, with what each kind of entry costs it — a
+machine that both develops and runs jobs has a mirror and a snapshot for the
+same repo, and pays for both:
+
+```
+cache  /home/dev/.local/share/gitscale  (4 entries, 104.8 KiB)
+
+  REPO          MIRROR  SNAPSHOTS     TOTAL  REVS  LAST USED
+  libs/core   26.2 KiB          -  26.2 KiB     9  2 hours ago
+  libs/utils         -   26.2 KiB  26.2 KiB     2  just now
+      c6e8981d205b  just now
+      73739376c62a  6 days ago
+```
+
+| Column | Meaning |
+|--------|---------|
+| MIRROR | The mirror entry for this repository, or `-` if it has none |
+| SNAPSHOTS | The snapshot entry, holding every pinned commit CI has asked for |
+| TOTAL | Both together — what this one repository costs the cache |
+| REVS | Cached revisions: a mirror's branches and tags, a snapshot's pins |
+| LAST USED | When anything last read either entry |
+
+MIRROR and SNAPSHOTS are whole entries, not the revision checked out: one
+mirror holds every branch and tag the remote has, one snapshot holds every
+pinned commit, and a machine that both develops and runs jobs has one of each.
+The line above the table is the grand total across every entry, so the TOTAL
+column adds up to it.
+
+Pins are listed beneath their row, each with its own age, because that is what
+`compact` drops one at a time. A mirror's refs are counted in REVS but listed
+only under `-v`: a busy repository has hundreds of them, and that is not a
+summary.
+
+`compact` works from anywhere: the cache belongs to the user, not to any one
+workspace. A `.gitscale.toml` is used when there is one, so `[cache] dir` is
+honoured.
+
 ### `gitscale hook <install|uninstall|status|run>`
 
 Install gitscale as a git hook so `gitscale pull` runs automatically whenever a
@@ -291,6 +375,7 @@ and `--system`; see [hook allowlist](#hook-allowlist).
 ### Global options
 
 - `-v, --verbose` — Enable verbose output (must go before the subcommand)
+- `--no-cache` — Talk to remotes directly, ignoring the [object cache](#object-cache)
 - `--version` — Show version
 - `-C, --root PATH` — Override the root directory (available on all subcommands)
 
@@ -326,8 +411,16 @@ When the `CI` environment variable is set to `1` or `true` (as done by GitHub Ac
 
 | Context | readwrite | readonly | artefact |
 |---------|-----------|----------|----------|
-| Local | full clone | shallow | no git |
+| Local, `--no-cache` | full clone | shallow | no git |
+| Local, cached | full clone | full clone | no git |
 | CI (`CI=1`) | shallow | shallow | no git |
+
+With the [object cache](#object-cache) on — the default — depth follows the
+kind of cache entry serving the repo rather than the mode. A developer machine
+borrows from a full mirror, where shallow buys nothing and borrows less
+cleanly, so a readonly repo is cloned whole and its history is there to browse
+at no extra cost. CI is served by shallow snapshot entries and keeps the
+depth-1 checkout it has today.
 
 Shallow repos show `≠ stale` in status when the local commit differs from upstream (exact behind count is unavailable).
 
@@ -379,8 +472,11 @@ A copy is only borrowed from when its `origin` matches the configured `url`.
 Occupying the same relative path is not enough: two unrelated workspaces may
 both keep something at `libs/core`. Symlinked paths (those
 [`resolve` creates](#recursive-dependencies) to dedupe a recursive dependency)
-and artefact entries are skipped, and anything unsuitable simply clones
-normally.
+and artefact entries are skipped.
+
+Anything unsuitable falls through to the [object cache](#object-cache), which
+covers exactly these misses — a repo the source workspace does not have, or a
+workspace that came from nowhere in particular.
 
 ### dissociate
 
@@ -399,6 +495,198 @@ Turn it on where the source may be moved, deleted or garbage-collected. `git gc`
 in the source repository does not know it has borrowers and can delete objects
 one still needs — nothing warns when that happens, and the borrowing clone is
 left unable to read its own history.
+
+## Object cache
+
+A bare mirror per repository URL under `~/.local/share/gitscale`, borrowed from
+with `git clone --reference`. **On by default**; `--no-cache` or
+`[cache] enabled = false` opts out.
+
+One rule governs the direction: **the cache talks to the remote, the workspace
+talks to the cache.** Every clone, fetch and pull updates the cache entry
+first, then builds or updates the workspace from it:
+
+```
+1.  git -C <cache> remote update -p              # the only network call
+2.  git -C <workspace> fetch <cache> '+refs/heads/*:refs/remotes/origin/*'
+```
+
+Step 2 is local and free. N workspaces on the machine share step 1 — that is
+the whole saving, and it is why the entry is updated even when the workspace
+could have fetched for itself. Nothing ever flows back from a workspace, there
+is no timer and no TTL, and nothing depends on anyone running a maintenance
+command.
+
+`origin` in the workspace stays the real URL, so pushes and a hand-run
+`git fetch` still go where they always did; only gitscale's own refresh reads
+from the cache. Refs always come from the remote or from an entry that has just
+been updated from it, so **a stale cache changes how many bytes cross the wire,
+never which commit you land on**.
+
+Object sources are tried in order: the [source workspace](#reusing-a-local-copy)
+when it has the repo, then the cache entry, then the remote. A repo borrowed
+from a source workspace keeps that workspace as its alternate, and its cache
+entry is still updated on each pull — so a later workspace that has to fall
+back to the cache finds it current.
+
+| | Source workspace only | Cache | CI runner |
+|---|---|---|---|
+| First workspace on the machine | full clone per repo | full clone, lands in cache | full clone, lands in cache |
+| Each later workspace | free only for repos the source has | free | free |
+| `gitscale pull` | delta per repo **per workspace** | delta per repo **per machine** | none, unless the head moved |
+| SHA-pinned repos | full shallow fetch every time | free once cached | free once cached |
+| N cold starts at once | N downloads | 1 | 1 |
+
+### Per-user, and only per-user
+
+The cache lives in the invoking user's own data directory. There is no
+system-wide scope and no shared directory gitscale will create.
+
+A mirror several users write through is a machine-wide blast radius: one
+poisoned entry reaches every workspace on the box. That is the reach
+`gitscale hook install --system` earns only by naming an explicit
+[`--allow`](#hook-allowlist), and something that is on by default cannot ask for
+it. `dir` still points wherever you say, including somewhere shared by other
+means — that is your arrangement to make, not a mode gitscale sets up.
+
+The location is resolved in this order:
+
+| | |
+|---|---|
+| `[cache] dir` | as written, with a leading `~/` expanded |
+| `GITSCALE_CACHE_DIR` | used as-is |
+| `XDG_DATA_HOME` | `$XDG_DATA_HOME/gitscale` |
+| otherwise | `~/.local/share/gitscale` |
+
+A workspace bootstrapped with `gitscale clone <url>` has no config to read yet,
+so its root repository uses the environment alone.
+
+### Two kinds of entry
+
+Developer machines and CI want opposite things, so the cache holds both, and
+which one is used is decided by the environment rather than by the revision:
+CI takes snapshots, developer machines take mirrors.
+
+**Mirror** — `mirror/<entry>.git`. Full history, updated from the remote before
+each workspace operation, consumed with `--reference`. History to browse, and
+objects shared across every workspace on the machine.
+
+**Snapshot** — `snapshots/<entry>.git`. A shallow bare repo holding each pinned
+commit as `refs/heads/pin/<sha>`, consumed by an ordinary **local clone** after
+which `origin` is repointed at the real URL. That is the depth-1 checkout CI
+already uses, served from local disk.
+
+A SHA-pinned repo needs no network to resolve. A branch or tag costs one
+`git ls-remote` — a ref advertisement, no objects; if the head has not moved,
+the commit is already an entry ref and nothing further transfers.
+
+The two consume their entries differently, and it matters: a job **copies**
+what it takes, so evicting an entry — or deleting the whole cache — under a
+running job is harmless. Git also refuses a shallow repository as a
+`--reference`, so copying is not merely the safer choice for CI, it is the only
+one.
+
+Artefact entries are never cached: an unpacked archive has no object store.
+
+### CI
+
+The cache being on by default is what makes a shell runner with a persistent
+home directory work. The runner clones the root repository itself, so there is
+no source workspace to inherit from:
+
+| Action | Network |
+|---|---|
+| First job ever on the machine | one full download per repo |
+| Every later job | none for sub-repos |
+| SHA-pinned repo the cache has | none |
+| N parallel jobs, cold | one download total, not N |
+| Job ends, workspace wiped | the cache keeps everything the job fetched |
+
+That is one user on one machine — the sharing CI needs is between jobs, not
+between users.
+
+### Keeping it honest
+
+`gitscale cache status` is where the cache reports itself — where it is, how
+big, and what each repository costs it. `gitscale status` stays about the
+workspace and says nothing about the cache, with one exception: a checkout
+borrowing from an entry that has been deleted is flagged **cache-broken**,
+because it cannot read its own history and nothing else would tell you.
+
+`gitscale status --format json` carries the rest per repository, for anything
+that wants to see it without a column in the way:
+
+| `cache` | |
+|---------|---|
+| `-` | Nothing cached for this repository, and the checkout owns its objects |
+| `mirror` | Borrowing from a mirror entry |
+| `snapshot` | Built from a snapshot entry that holds this exact commit — CI's flow |
+| `workspace` | Borrowing from a [source workspace](#reusing-a-local-copy) instead |
+| `copy` | The checkout owns its objects, but an entry exists for the repository anyway |
+| `broken` | Borrowing from something that is no longer there |
+
+`copy` is what every checkout made before this machine had a cache looks like,
+and it is not a fault. `--reference` is a decision taken when a repository is
+cloned and nothing re-links a clone afterwards, so the objects sit in both
+places. The entry is still updated on every pull and still serves every other
+workspace on the machine — only *this* checkout pays for its own copy, and only
+in disk. Re-cloning it is all it takes to borrow instead.
+
+`snapshot` is the one claim here that is not a link on disk: a CI job clones
+locally out of a snapshot entry, which copies the objects. What is reported is
+that the entry holds the commit this checkout is on — which is what decides
+whether the next job pays for it again.
+
+`gitscale cache compact` repacks every entry and evicts the ones nothing has
+used for `--keep-recent`, a month by default. Each entry carries a last-used
+marker, touched on every hit, and each pinned commit carries its own — so a
+snapshot entry in daily use can still shed the pins that have gone cold.
+
+Mirrors are repacked but never pruned. `repack -d` is the one operation that can
+delete objects a live borrower still needs, and nothing warns when it does;
+`gc.auto = 0` is set on every entry at creation for the same reason. Snapshots
+have no borrowers, so those are pruned properly.
+
+A workspace whose entry is deleted cannot read its own history, and git reports
+nothing until something tries to read an object. `gitscale cache repair`
+re-creates the entries a workspace borrows from:
+
+```
+gitscale cache repair
+  repair libs/core
+  ok     libs/utils
+Repaired 1 entry.
+```
+
+### Copying instead of borrowing
+
+```toml
+[cache]
+dissociate = true
+```
+
+As with [`[share] dissociate`](#dissociate): the borrowed objects are copied in
+and the link dropped once the clone is made. The network saving remains, the
+disk saving does not, and the result no longer depends on the entry surviving.
+
+### Adopting a root repository
+
+```toml
+[cache]
+adopt_root = true
+```
+
+A root created by `gitscale clone <url>` is linked to the cache from birth. One
+cloned by plain `git clone` holds its own full copy and shares nothing. With
+`adopt_root`, the next `gitscale clone` or `pull` seeds an entry from it (local,
+no network), points it at that entry, and reclaims the duplicate objects —
+measured on a 60-commit root, 1244 KB down to 20 KB, history intact.
+
+**Opt-in, and it stays opt-in.** The reclaim step deletes the repository's own
+objects and converts something that stood on its own into something that depends
+on the cache. Recoverable with `cache repair`, but it is your call, not a
+default. It is not needed in CI: the runner clones the root itself and the
+workspace is discarded at the end.
 
 ## CI authentication
 

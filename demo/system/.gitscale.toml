@@ -2,11 +2,11 @@
 url = "file:///tmp/gitscale-demo-bucket"
 
 [repos]
-"gsdemo-sso" = { url = "git@github.com:avkonst/gsdemo-sso.git", revision = "main" }
-"gsdemo-core" = { url = "git@github.com:avkonst/gsdemo-core.git", revision = "master" }
+"gsdemo-sso" = { url = "git@github.com:avkonst/gsdemo-sso.git", revision = "demo-v1" }
+"gsdemo-core" = { url = "git@github.com:avkonst/gsdemo-core.git", revision = "a98773c3f74c19f2ac82b20af80a95e960063719" }
 "gsdemo-frontend" = { url = "git@github.com:avkonst/gsdemo-frontend.git", revision = "master" }
 "gsdemo-sharedlibs" = { url = "git@github.com:avkonst/gsdemo-sharedlibs.git", revision = "master" }
-"gsdemo-compose" = { url = "git@github.com:avkonst/gsdemo-compose.git", revision = "master" }
+"gsdemo-compose" = { url = "git@github.com:avkonst/gsdemo-compose.git", revision = "3b5897623fd7104a6c7ced66996a1f67d6a83112" }
 "gsdemo-argocd" = { url = "git@github.com:avkonst/gsdemo-argocd.git", revision = "master" }
 
 [hooks]

@@ -1,6 +1,5 @@
 ---
 source: tests/cli.rs
-assertion_line: 697
 expression: out.stdout
 ---
 Cloning missing repos...

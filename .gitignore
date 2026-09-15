@@ -22,6 +22,7 @@ playground/gsdemo-sso-sdk/
 tests/playground/
 tests/repos-remote/
 tests/artefacts-remote/
+tests/cache/
 
 demo/system/gsdemo-core/
 demo/system/gsdemo-argocd/

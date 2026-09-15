@@ -3,9 +3,12 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+use crate::cache::{self, Cache};
+use crate::commands::cache as cache_cmd;
 use crate::config::{find_config, load_config, load_config_optional, CONFIG_FILENAME};
-use crate::git::{fetch_repo, get_artefact_status, get_repo_status, RepoStatus};
+use crate::git::{fetch_repo, get_artefact_status, get_repo_status, is_ci, RepoStatus};
 use crate::resolve::resolve_recursive;
+use crate::share;
 use crate::storage::fetch_artefact;
 
 pub fn run(
@@ -13,6 +16,7 @@ pub fn run(
     do_fetch: bool,
     output_format: &str,
     verbose: bool,
+    no_cache: bool,
     out: &mut dyn Write,
     _err: &mut dyn Write,
 ) -> Result<()> {
@@ -25,7 +29,11 @@ pub fn run(
         return Ok(());
     }
 
+    let cache = cache_cmd::open(&config, no_cache);
+
     if do_fetch {
+        let ci = is_ci();
+        let workspace = share::source_workspace(&config_root);
         for entry in &config.repos {
             let dest = config_root.join(&entry.directory);
             if entry.is_artefact() {
@@ -46,18 +54,40 @@ pub fn run(
                 if verbose {
                     writeln!(out, "Fetching {}...", entry.directory)?;
                 }
-                let _ = fetch_repo(entry, &config_root);
+                let from = cache::source_for(
+                    cache.as_ref(),
+                    workspace.as_deref(),
+                    entry,
+                    config.share.dissociate,
+                    ci,
+                    verbose,
+                );
+                let _ = fetch_repo(entry, &config_root, &from);
             }
         }
     }
 
     let mut statuses: Vec<RepoStatus> = Vec::new();
 
+    // Resolved whether or not the cache is switched on: `--no-cache` changes
+    // what the next command does, not where the objects a checkout already
+    // borrows happen to live.
+    let cache_root = cache::resolve_dir(&config.cache.dir);
+
     for entry in &config.repos {
         if entry.is_artefact() {
             statuses.push(get_artefact_status(entry, &config_root));
         } else {
-            statuses.push(get_repo_status(entry, &config_root));
+            let mut status = get_repo_status(entry, &config_root);
+            let url = crate::git::remote_url(entry);
+            if status.exists && !status.is_symlink {
+                status.cache = cache::cache_use(
+                    &config_root.join(&entry.directory),
+                    &url,
+                    cache_root.as_deref(),
+                );
+            }
+            statuses.push(status);
         }
     }
 
@@ -93,7 +123,7 @@ pub fn run(
     }
 
     if output_format == "json" {
-        print_json(&statuses, &orphans, out)?;
+        print_json(&statuses, &orphans, cache.as_ref(), out)?;
     } else {
         print_table(&statuses, &orphans, out)?;
     }
@@ -171,6 +201,12 @@ fn get_status_flags(s: &RepoStatus) -> String {
     if !s.is_clean {
         flags.push("dirty".to_string());
     }
+    // The checkout borrows from an object store that is no longer there: it
+    // cannot read its own history, and git says nothing until something tries
+    // to read an object. `gitscale cache repair` is the way back.
+    if s.cache == crate::cache::CacheUse::Broken {
+        flags.push("cache-broken".to_string());
+    }
     if s.is_stale {
         flags.push("stale".to_string());
     }
@@ -183,9 +219,13 @@ fn get_status_flags(s: &RepoStatus) -> String {
     if s.behind > 0 {
         flags.push(format!("-{}", s.behind));
     }
+    // A tag or a SHA is checked out detached, so REF reads as a commit and can
+    // never equal the revision as text. What decides it is where HEAD actually
+    // is: detached at the pinned commit is right, detached anywhere else is
+    // the mismatch this flag is for — and used to miss.
     if !s.expected_ref.is_empty()
         && s.current_ref != s.expected_ref
-        && !s.is_detached
+        && !(s.is_detached && s.at_expected)
         && s.current_ref != "artefact"
     {
         flags.push("ref-mismatch".to_string());
@@ -213,7 +253,7 @@ fn status_icon(flags: &str) -> &str {
     if flags.contains("unlinked") {
         return "~";
     }
-    if flags.contains("dirty") {
+    if flags.contains("dirty") || flags.contains("cache-broken") {
         return "!";
     }
     if flags.contains("stale") || flags.contains("ref-mismatch") {
@@ -256,6 +296,7 @@ fn status_color(flags: &str) -> &str {
         || flags.contains("ref-mismatch")
         || flags.contains("stale")
         || flags.contains("unlinked")
+        || flags.contains("cache-broken")
     {
         return "91"; // bright red
     }
@@ -270,6 +311,16 @@ fn colorize(text: &str, ansi_code: &str, bold: bool) -> String {
         format!("\x1b[1;{}m{}\x1b[0m", ansi_code, text)
     } else {
         format!("\x1b[{}m{}\x1b[0m", ansi_code, text)
+    }
+}
+
+/// A SHA-pinned revision abbreviated to the width `git rev-parse --short` uses,
+/// so it lines up with the REF column. Branch and tag names pass through.
+fn abbreviate_revision(revision: &str) -> String {
+    if crate::git::looks_like_sha(revision) && revision.len() > 7 {
+        revision[..7].to_string()
+    } else {
+        revision.to_string()
     }
 }
 
@@ -299,7 +350,7 @@ fn print_table(
             "-".to_string()
         };
         let mode = s.mode.clone();
-        let expected = s.expected_ref.clone();
+        let expected = abbreviate_revision(&s.expected_ref);
         rows.push([
             icon,
             s.directory.clone(),
@@ -341,11 +392,14 @@ fn print_table(
 
     let gap = "   ";
 
-    // Print header
+    // Print header. The last column is never padded: with something printed
+    // after the table, trailing spaces would be real output rather than
+    // whitespace the terminal swallows.
+    let last = headers.len() - 1;
     let header_line: Vec<String> = headers
         .iter()
         .enumerate()
-        .map(|(i, h)| format!("{:<width$}", h, width = widths[i]))
+        .map(|(i, h)| pad(h, if i == last { 0 } else { widths[i] }))
         .collect();
     writeln!(out, "{}", header_line.join(gap))?;
 
@@ -358,17 +412,18 @@ fn print_table(
         let mut cells: Vec<String> = row
             .iter()
             .enumerate()
-            .map(|(i, cell)| format!("{:<width$}", cell, width = widths[i]))
+            .map(|(i, cell)| pad(cell, if i == last { 0 } else { widths[i] }))
             .collect();
 
         // Colorize icon (column 0) and status (column 6)
         cells[0] = colorize(&cells[0], color, icon_bold);
         cells[6] = colorize(&cells[6], color, false);
 
-        // Colorize REF (column 4) yellow if it differs from EXPECTED (column 5)
-        let ref_val = row[4].trim();
-        let expected_val = row[5].trim();
-        if !ref_val.is_empty() && !expected_val.is_empty() && ref_val != expected_val {
+        // Colorize REF (column 4) yellow when it is the wrong ref, which is
+        // what STATUS already says. Comparing the two columns as text instead
+        // painted every tag-pinned repo yellow for spelling a commit as a
+        // commit.
+        if flags.contains("ref-mismatch") {
             cells[4] = colorize(&cells[4], "33", false); // yellow
         }
 
@@ -377,9 +432,14 @@ fn print_table(
     Ok(())
 }
 
+fn pad(cell: &str, width: usize) -> String {
+    format!("{:<width$}", cell, width = width)
+}
+
 fn print_json(
     statuses: &[RepoStatus],
     orphans: &[crate::resolve::OrphanLink],
+    cache: Option<&Cache>,
     out: &mut dyn Write,
 ) -> Result<()> {
     let mut data: Vec<serde_json::Value> = statuses
@@ -398,6 +458,7 @@ fn print_json(
                 "stale": s.is_stale,
                 "symlink": s.is_symlink,
                 "symlink_target": s.symlink_target,
+                "cache": s.cache.label(),
             })
         })
         .collect();
@@ -408,6 +469,20 @@ fn print_json(
             "broken": o.broken,
         }));
     }
+    // A row of its own, discriminated by a key, the way orphan rows are —
+    // `cache_dir` rather than `cache`, which every repo row above uses for the
+    // word in its CACHE column.
+    data.push(match cache {
+        Some(cache) => {
+            let usage = cache.usage();
+            serde_json::json!({
+                "cache_dir": cache.root().display().to_string(),
+                "entries": usage.entries,
+                "bytes": usage.bytes,
+            })
+        }
+        None => serde_json::json!({ "cache_dir": null }),
+    });
     writeln!(out, "{}", serde_json::to_string_pretty(&data).unwrap())?;
     Ok(())
 }

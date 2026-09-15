@@ -3,8 +3,11 @@
 // The workspace a clone borrows from is reached two different ways — a linked
 // worktree, or a workspace cloned with `--reference` — and the two leave
 // completely different traces on disk, so both are exercised here. Every test
-// asserts on `objects/info/alternates`, since that file is the whole
-// observable difference between a borrowed clone and an ordinary one.
+// asserts on `objects/info/alternates`, since that file is where a borrowed
+// clone differs from an ordinary one. With the object cache on, a clone that
+// borrows from nothing here still borrows from a cache mirror, so the tests
+// that refuse an unsuitable workspace assert on *which* copy was borrowed
+// rather than on there being none.
 #[allow(dead_code)]
 mod helpers;
 
@@ -41,6 +44,23 @@ fn git_isolated(cwd: &Path, args: &[&str]) {
 /// the playground, and every test here needs a second workspace beside it.
 fn clone_into(root: &Path) -> helpers::CliOutput {
     gitscale::run_cli_with(&["gitscale", "clone", "-C", root.to_str().unwrap()], false)
+}
+
+/// Assert the clone did not take its objects from `source` — a workspace that
+/// is not a suitable source, or not one at all. Any alternate it does have is
+/// the cache's, which is exactly the fallback that should happen.
+fn assert_not_borrowed_from(repo: &Path, source: &Path) {
+    let Some(alternates) = alternates_of(repo) else {
+        return;
+    };
+    let borrowed = PathBuf::from(&alternates).canonicalize().unwrap();
+    let source = source.canonicalize().unwrap();
+    assert!(
+        !borrowed.starts_with(&source),
+        "{} borrowed from {}, which is not a source it may use",
+        repo.display(),
+        borrowed.display()
+    );
 }
 
 /// The alternates file of a cloned sub-repository, if it has one.
@@ -129,12 +149,15 @@ fn a_plain_workspace_has_nothing_to_borrow_from() {
     let bare = env.create_bare_repo("core", "main", &[("a.txt", "a")]);
     env.write_config(&config_for(&bare, ""));
 
-    let out = env.run(&["clone"]);
+    // `--no-cache` so this measures the source-workspace mechanism alone: with
+    // the cache on, an ordinary clone still borrows — from a cache mirror,
+    // which the cache tests cover.
+    let out = env.run(&["clone", "--no-cache"]);
     assert!(out.success, "{:?}", out.stderr);
     assert_eq!(
         alternates_of(&env.playground.join("libs/core")),
         None,
-        "with no source workspace the clone should be ordinary"
+        "with no source workspace and no cache the clone should be ordinary"
     );
 }
 
@@ -273,11 +296,8 @@ fn a_different_repository_at_the_same_path_is_not_borrowed_from() {
         "clone should fall back, not fail: {:?}",
         out.stderr
     );
-    assert_eq!(
-        alternates_of(&wt.join("libs/core")),
-        None,
-        "a path holding an unrelated repository must not be borrowed from"
-    );
+    // A path holding an unrelated repository must not be borrowed from.
+    assert_not_borrowed_from(&wt.join("libs/core"), &env.playground);
 }
 
 #[test]
@@ -298,11 +318,8 @@ fn a_symlinked_checkout_is_not_borrowed_from() {
         "clone should fall back, not fail: {:?}",
         out.stderr
     );
-    assert_eq!(
-        alternates_of(&wt.join("libs/core")),
-        None,
-        "a symlinked path is not a checkout to borrow from"
-    );
+    // A symlinked path is not a checkout to borrow from.
+    assert_not_borrowed_from(&wt.join("libs/core"), &env.playground);
 }
 
 #[test]
@@ -317,11 +334,8 @@ fn a_missing_checkout_in_the_source_is_skipped() {
 
     let out = clone_into(&wt);
     assert!(out.success, "clone failed: {:?}", out.stderr);
-    assert_eq!(
-        alternates_of(&wt.join("libs/core")),
-        None,
-        "there is nothing on disk to borrow from"
-    );
+    // There is no checkout in the source workspace to borrow from.
+    assert_not_borrowed_from(&wt.join("libs/core"), &env.playground);
     assert!(
         wt.join("libs/core/a.txt").is_file(),
         "it should still clone"
