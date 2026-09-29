@@ -14,12 +14,49 @@ pub fn is_ci() -> bool {
         .unwrap_or(false)
 }
 
+/// The variables through which git names the repository to act on. Git exports
+/// them to every hook it runs, and they take precedence over the working
+/// directory — so a gitscale started by a hook would run each import's git
+/// command against the repository whose hook fired, moving that repository's
+/// HEAD and writing its files into the import. The list is `git rev-parse
+/// --local-env-vars`.
+const LOCAL_ENV_VARS: &[&str] = &[
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+];
+
+/// A git command that inherits nothing from the caller's git context: it acts
+/// on the repository its working directory names, and reads no stdin. Every
+/// git invocation gitscale makes goes through here, because any that does not
+/// silently answers for whichever repository invoked gitscale.
+pub(crate) fn git_command() -> Command {
+    let mut cmd = Command::new("git");
+    for var in LOCAL_ENV_VARS {
+        cmd.env_remove(var);
+    }
+    cmd.stdin(Stdio::null());
+    cmd
+}
+
 pub(crate) fn run_git(
     args: &[&str],
     cwd: Option<&Path>,
     check: bool,
 ) -> Result<std::process::Output> {
-    let mut cmd = Command::new("git");
+    let mut cmd = git_command();
     // Under CI, teach git how to authenticate to the CI server. Scoped to that
     // one host, and carrying the name of the token variable rather than the
     // token, so nothing secret reaches argv or a config file.
@@ -27,7 +64,6 @@ pub(crate) fn run_git(
         cmd.args(auth.git_config_args());
     }
     cmd.args(args);
-    cmd.stdin(Stdio::null());
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     // Marks every git call gitscale makes, so an installed gitscale git hook
     // can tell re-entry from a genuine user operation and bail out. Without

@@ -463,3 +463,57 @@ fn a_global_hook_refuses_a_payload_from_a_cloned_branch() {
         String::from_utf8_lossy(&checkout.stderr)
     );
 }
+
+// ---------------------------------------------------------------------------
+// hook environment isolation
+// ---------------------------------------------------------------------------
+
+fn head_ref(repo: &Path) -> String {
+    let out = Command::new("git")
+        .args(["rev-parse", "--symbolic-full-name", "HEAD"])
+        .current_dir(repo)
+        .output()
+        .expect("failed to read HEAD");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Git exports `GIT_DIR` to every hook it runs, and it overrides the working
+/// directory. A pull that inherited it would check each import's revision out
+/// in the repository whose hook fired — moving that repository's HEAD and
+/// writing its files into the import directory. The import's revision here
+/// does not exist in the parent, so a leaked checkout fails outright rather
+/// than corrupting the playground.
+#[test]
+fn a_pull_from_a_hook_acts_on_the_import_not_the_parent() {
+    let env = TestEnv::new("hook_git_dir_isolation");
+    let bare = env.create_bare_repo("core", "main", &[("a.txt", "a")]);
+    env.write_config(&format!(
+        "[repos]\n\"imports/core\" = {{ url = \"{}\", revision = \"main\" }}\n",
+        bare.display()
+    ));
+    env.init_playground_git();
+    helpers::run_git_pub(&env.playground, &["branch", "-M", "trunk"]);
+
+    let parent = env.playground.clone();
+    let before = head_ref(&parent);
+
+    let out = env.run_with_env(
+        &[("GIT_DIR", parent.join(".git").to_str().unwrap())],
+        &["pull"],
+    );
+    assert!(out.success, "pull failed: {}{}", out.stdout, out.stderr);
+
+    assert_eq!(
+        head_ref(&parent),
+        before,
+        "the pull moved the parent's HEAD"
+    );
+    assert!(
+        parent.join("imports/core/a.txt").exists(),
+        "the import's files should be in the import directory"
+    );
+    assert!(
+        !parent.join("imports/core/.gitkeep").exists(),
+        "the parent's files were written into the import directory"
+    );
+}
