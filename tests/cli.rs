@@ -2189,3 +2189,41 @@ fn clean_keeps_a_checkout_nested_inside_another_repo() {
     );
     assert!(!env.playground.join("core/scratch.tmp").exists());
 }
+
+/// Git's repository discovery walks up from the working directory, so an import
+/// directory that is not a repository resolves to the workspace above it. A pull
+/// would then check the *workspace* out to the import's revision and report
+/// success — silently moving the user off the branch they were on.
+#[test]
+fn pull_leaves_the_workspace_alone_when_an_import_is_not_a_repo() {
+    let env = TestEnv::new("pull_import_not_a_repo");
+    let bare = env.create_bare_repo("mylib", "main", &[("README.md", "# v1\n")]);
+
+    env.write_config(&format!(
+        r#"[repos]
+"libs/mylib" = {{ url = "{}", revision = "main" }}
+"#,
+        bare.display()
+    ));
+    env.init_playground_git();
+    // the workspace has a branch of the same name the import is pinned to, and
+    // is sitting on a different one — the shape in which the bug is visible
+    helpers::run_git_pub(&env.playground, &["branch", "-M", "main"]);
+    helpers::run_git_pub(&env.playground, &["checkout", "-b", "feature"]);
+
+    // exists, but holds no repository: a failed clone or an outside cleaner
+    std::fs::create_dir_all(env.playground.join("libs/mylib")).unwrap();
+
+    let out = env.run(&["pull"]);
+    assert!(!out.success, "a pull into a non-repository should fail");
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(&env.playground)
+        .output()
+        .expect("failed to read HEAD");
+    assert_eq!(
+        String::from_utf8_lossy(&head.stdout).trim(),
+        "feature",
+        "the pull moved the workspace off its branch"
+    );
+}

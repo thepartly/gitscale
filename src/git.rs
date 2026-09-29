@@ -74,6 +74,17 @@ pub(crate) fn run_git(
     cmd.env("SSH_ASKPASS_REQUIRE", "never");
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
+        // Git's repository discovery walks up from the working directory, so a
+        // command aimed at an import that is missing or not a repository finds
+        // the workspace above it and acts on that instead — checking the
+        // workspace out to the import's revision, and reporting success. The
+        // ceiling confines the search to `dir` without gitscale needing to know
+        // how the repository there is laid out: a linked worktree's `.git` is a
+        // file, so naming the git directory outright is not always possible.
+        // Only absolute paths count, which is why a relative `dir` sets none.
+        if let Some(parent) = dir.parent().filter(|p| p.is_absolute()) {
+            cmd.env("GIT_CEILING_DIRECTORIES", parent);
+        }
     }
     let output = cmd
         .output()
@@ -299,7 +310,7 @@ pub fn reconcile_remote(entry: &RepoEntry, root: &Path) -> Result<bool> {
         return Ok(false);
     }
     let dest = root.join(&entry.directory);
-    if !dest.exists() {
+    if !is_repo_root(&dest) {
         return Ok(false);
     }
     let current = run_git(&["remote", "get-url", "origin"], Some(&dest), false)?;
@@ -522,6 +533,14 @@ pub fn sync_repo(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source)
     if !dest.exists() {
         return clone_repo(entry, root, verbose, source);
     }
+    // Refusing rather than re-cloning: whatever is in there was not put there by
+    // gitscale, and removing it is the user's decision to make.
+    if !is_repo_root(&dest) {
+        bail!(
+            "{} exists but is not a git repository; remove it and run `gitscale clone`",
+            entry.directory
+        );
+    }
 
     if entry.is_readonly() {
         restore_writable(&dest)?;
@@ -576,6 +595,14 @@ pub fn pull_repo(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source)
     let dest = root.join(&entry.directory);
     if !dest.exists() {
         return clone_repo(entry, root, verbose, source);
+    }
+    // Refusing rather than re-cloning: whatever is in there was not put there by
+    // gitscale, and removing it is the user's decision to make.
+    if !is_repo_root(&dest) {
+        bail!(
+            "{} exists but is not a git repository; remove it and run `gitscale clone`",
+            entry.directory
+        );
     }
 
     if entry.is_readonly() {
