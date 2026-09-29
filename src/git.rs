@@ -492,10 +492,10 @@ pub fn sync_repo(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source)
     }
 
     let result = (|| -> Result<()> {
-        fetch_repo(entry, root, source)?;
         if is_shallow(&dest) {
-            run_git(&["reset", "--hard", "@{upstream}"], Some(&dest), false)?;
+            update_shallow(entry, &dest, source)?;
         } else {
+            fetch_repo(entry, root, source)?;
             checkout_revision(entry, root)?;
             let head_ref = get_current_ref(entry, root)?;
             if !head_ref.is_empty() && !is_detached(entry, root) {
@@ -509,6 +509,53 @@ pub fn sync_repo(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source)
         apply_readonly(&dest)?;
     }
     result
+}
+
+/// Move a shallow checkout to `entry.revision`, keeping it at depth 1.
+///
+/// A bare `fetch --depth 1` follows the default refspec, which downloads the
+/// tip of every branch on the remote, and `@{upstream}` exists only while a
+/// branch is checked out. Fetching the named revision fits a branch, a tag
+/// and a commit alike.
+fn update_shallow(entry: &RepoEntry, dest: &Path, source: &Source) -> Result<()> {
+    if source.local.is_some() && !looks_like_sha(&entry.revision) {
+        // The cache entry carries every branch and tag, so nothing is fetched
+        // from the remote. Its refs name the target whether or not HEAD is
+        // detached, which `@{upstream}` does not.
+        fetch_from_cache(dest, source)?;
+        let tag = format!("refs/tags/{}", entry.revision);
+        let target = if entry.revision.is_empty() {
+            "@{upstream}".to_string()
+        } else if run_git(
+            &["show-ref", "--verify", "--quiet", &tag],
+            Some(dest),
+            false,
+        )?
+        .status
+        .success()
+        {
+            tag
+        } else {
+            format!("refs/remotes/origin/{}", entry.revision)
+        };
+        run_git(&["reset", "--hard", "--quiet", &target], Some(dest), true)?;
+        return Ok(());
+    }
+    // An arbitrary commit is not something a mirror serves by default, so a
+    // SHA asks the remote even with a cache.
+    ensure_ci_remote(entry, dest)?;
+    let mut args = vec!["fetch", "--depth", "1", "--quiet", "origin"];
+    if !entry.revision.is_empty() {
+        args.push(&entry.revision);
+    }
+    run_git(&args, Some(dest), true)?;
+    let target = if entry.revision.is_empty() {
+        "@{upstream}"
+    } else {
+        "FETCH_HEAD"
+    };
+    run_git(&["reset", "--hard", "--quiet", target], Some(dest), true)?;
+    Ok(())
 }
 
 /// Fast-forward the checked-out branch to its upstream.
@@ -563,38 +610,7 @@ pub fn pull_repo(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source)
             return Ok(());
         }
         if is_shallow(&dest) {
-            if looks_like_sha(&entry.revision) {
-                // Detached at a commit: there is no @{upstream} to reset to,
-                // and an arbitrary commit is not something a mirror serves by
-                // default, so this one asks the remote even with a cache.
-                if source.local.is_some() {
-                    ensure_ci_remote(entry, &dest)?;
-                }
-                run_git(
-                    &[
-                        "fetch",
-                        "--depth",
-                        "1",
-                        "--quiet",
-                        "origin",
-                        &entry.revision,
-                    ],
-                    Some(&dest),
-                    true,
-                )?;
-                run_git(
-                    &["reset", "--hard", "--quiet", "FETCH_HEAD"],
-                    Some(&dest),
-                    true,
-                )?;
-            } else if source.local.is_some() {
-                fetch_from_cache(&dest, source)?;
-                run_git(&["reset", "--hard", "@{upstream}"], Some(&dest), false)?;
-            } else {
-                run_git(&["fetch", "--depth", "1", "--quiet"], Some(&dest), true)?;
-                run_git(&["reset", "--hard", "@{upstream}"], Some(&dest), false)?;
-            }
-            return Ok(());
+            return update_shallow(entry, &dest, source);
         }
         // A full checkout: refs come from the cache when there is one, which
         // makes the fast-forward below local; without one, nothing is fetched
