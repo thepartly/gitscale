@@ -11,9 +11,9 @@
 use anyhow::{bail, Context, Result};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::config::{load_config_optional, OnHookError, CONFIG_FILENAME};
+use crate::git::git_command;
 use crate::trust;
 
 /// The git hooks gitscale installs.
@@ -117,7 +117,7 @@ exit $RC
 // ---------------------------------------------------------------------------
 
 fn git_config_get(scope: Option<Scope>, key: &str, cwd: Option<&Path>) -> Option<String> {
-    let mut cmd = Command::new("git");
+    let mut cmd = git_command();
     cmd.arg("config");
     if let Some(s) = scope {
         cmd.arg(s.config_flag());
@@ -135,7 +135,7 @@ fn git_config_get(scope: Option<Scope>, key: &str, cwd: Option<&Path>) -> Option
 }
 
 fn git_stdout(args: &[&str], cwd: &Path) -> Result<String> {
-    let out = Command::new("git")
+    let out = git_command()
         .args(args)
         .current_dir(cwd)
         .output()
@@ -399,7 +399,7 @@ fn managed_hooks_dir(scope: Scope) -> Result<PathBuf> {
 }
 
 fn set_hooks_path(scope: Scope, dir: &Path, out: &mut dyn Write) -> Result<()> {
-    let status = Command::new("git")
+    let status = git_command()
         .args(["config", scope.config_flag(), "core.hooksPath"])
         .arg(dir)
         .status()
@@ -454,7 +454,7 @@ pub fn uninstall(scope: Scope, root: Option<&Path>, out: &mut dyn Write) -> Resu
     if scope != Scope::Local {
         let current = git_config_get(Some(scope), "core.hooksPath", None);
         if current.as_deref() == Some(dir.to_string_lossy().as_ref()) {
-            let _ = Command::new("git")
+            let _ = git_command()
                 .args(["config", scope.config_flag(), "--unset", "core.hooksPath"])
                 .status();
             writeln!(out, "  unset {} core.hooksPath", scope.label())?;

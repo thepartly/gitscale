@@ -1,12 +1,13 @@
 use anyhow::Result;
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 use crate::cache::{self, Cache};
 use crate::commands::cache as cache_cmd;
 use crate::config::{find_config, load_config, load_config_optional, CONFIG_FILENAME};
-use crate::git::{fetch_repo, get_artefact_status, get_repo_status, is_ci, RepoStatus};
+use crate::git::{
+    fetch_repo, get_artefact_status, get_repo_status, git_command, is_ci, RepoStatus,
+};
 use crate::resolve::resolve_recursive;
 use crate::share;
 use crate::storage::fetch_artefact;
@@ -134,10 +135,9 @@ pub fn run(
 /// uncommitted changes or unpushed commits.
 fn is_tree_modified(path: &Path) -> bool {
     // Check if this repo itself is dirty
-    let dirty = Command::new("git")
+    let dirty = git_command()
         .args(["status", "--porcelain"])
         .current_dir(path)
-        .stdin(Stdio::null())
         .output()
         .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
         .unwrap_or(false);
@@ -146,10 +146,9 @@ fn is_tree_modified(path: &Path) -> bool {
     }
 
     // Check if there are unpushed commits
-    let ahead = Command::new("git")
+    let ahead = git_command()
         .args(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
         .current_dir(path)
-        .stdin(Stdio::null())
         .output()
         .map(|o| {
             let s = String::from_utf8_lossy(&o.stdout).trim().to_string();

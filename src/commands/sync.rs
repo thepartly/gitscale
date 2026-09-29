@@ -1,9 +1,9 @@
 use anyhow::Result;
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 use crate::config::{find_config, load_config, load_config_optional, CONFIG_FILENAME};
+use crate::git::git_command;
 use crate::hooks;
 use crate::resolve::{create_symlinks, resolve_recursive};
 
@@ -144,10 +144,9 @@ fn relink(
 }
 
 fn is_tree_modified(path: &Path) -> bool {
-    let dirty = Command::new("git")
+    let dirty = git_command()
         .args(["status", "--porcelain"])
         .current_dir(path)
-        .stdin(Stdio::null())
         .output()
         .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
         .unwrap_or(false);
@@ -155,10 +154,9 @@ fn is_tree_modified(path: &Path) -> bool {
         return true;
     }
 
-    let ahead = Command::new("git")
+    let ahead = git_command()
         .args(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
         .current_dir(path)
-        .stdin(Stdio::null())
         .output()
         .map(|o| {
             let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
