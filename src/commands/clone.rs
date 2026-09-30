@@ -36,7 +36,7 @@ pub fn run(
     let config_path = find_config(root)?;
     let config_root = config_path.parent().unwrap().to_path_buf();
     let config = load_config(&config_path)?;
-    let selected = filter_entries(&config.repos, names)?;
+    let selected = entries_to_check_out(&config.repos, names, &config_root)?;
 
     if selected.is_empty() {
         writeln!(out, "Nothing to clone.")?;
@@ -239,6 +239,25 @@ pub fn filter_entries(entries: &[RepoEntry], names: &[String]) -> Result<Vec<Rep
         anyhow::bail!("Unknown repos: {}", unknown.join(", "));
     }
     Ok(matched)
+}
+
+/// The entries a command that creates checkouts acts on: the ones named, or
+/// with no names every entry except a `lazy` one that is not on disk yet.
+/// Naming a lazy entry is how it gets fetched; once there it is kept current
+/// like any other.
+pub fn entries_to_check_out(
+    entries: &[RepoEntry],
+    names: &[String],
+    config_root: &Path,
+) -> Result<Vec<RepoEntry>> {
+    if !names.is_empty() {
+        return filter_entries(entries, names);
+    }
+    Ok(entries
+        .iter()
+        .filter(|e| !e.lazy || config_root.join(&e.directory).exists())
+        .cloned()
+        .collect())
 }
 
 #[cfg(test)]

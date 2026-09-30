@@ -50,13 +50,14 @@ One row per declared entry, in config order, followed by a row for each
 
 ## Status flags
 
-`missed` and `symlink` are reported alone. Everything else combines, in this
+`missed`, `lazy` and `symlink` are reported alone. Everything else combines, in this
 order.
 
 | Flag | Meaning |
 |---|---|
 | `ok` | Clean, and on the expected revision |
 | `missed` | The directory does not exist yet — run [`clone`](workflow.md#clone) or [`pull`](workflow.md#pull) |
+| `lazy` | A [lazy entry](dependencies.md#lazy-entries) that has not been fetched. Nothing is wrong; name it to fetch it |
 | `symlink` | Resolved as a symlink to a root-level checkout (a deduped [recursive dependency](recursive-dependencies.md)) |
 | `unlinked` | A dependency inside this repo that should be a symlink is a real clone instead. [`sync`](workflow.md#sync) relinks it |
 | `unlinked, modified` | …and that clone has uncommitted changes or unpushed commits, so relinking would lose work. `sync --force` overrides |
@@ -90,6 +91,7 @@ most serious one.
 |---|---|---|
 | `✔` | green | `ok` |
 | `⤷` | cyan | `symlink` |
+| `○` | dim | `lazy` |
 | `✘` | red | `missed` |
 | `⊘` | yellow / bright red | `orphan` / `orphan, broken` |
 | `~` | yellow / bright red | `unlinked` / `unlinked` with anything else |
@@ -124,6 +126,7 @@ Add `-v` to see which repository is being fetched.
 {
   "directory": "imports/core",
   "exists": true,
+  "lazy": false,
   "current_ref": "main",
   "expected_ref": "main",
   "clean": true,

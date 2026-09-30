@@ -73,6 +73,7 @@ the config.
 | `revision` | string | `""` | Branch, tag or commit SHA. Empty means the remote's default branch, or a revision [adopted from a child config](recursive-dependencies.md#revision-resolution-and-the-mismatch-check). See [pinning a revision](dependencies.md#pinning-a-revision) |
 | `mode` | string | `"readwrite"` | `"readwrite"`, `"readonly"` or `"artefact"`. See [checkout modes](dependencies.md#checkout-modes) |
 | `recursive` | bool | `true` | Read this repository's own `.gitscale.toml`: resolve its transitive dependencies, and clean it by its own `[clean]` rules. With `false`, that config is not read at all and [`clean`](clean.md) skips the repository |
+| `lazy` | bool | `false` | Leave the entry out of every command that names no repos until it is on disk; naming it fetches it. In a child config, the root need not declare it. See [lazy entries](dependencies.md#lazy-entries) |
 
 The directory key must be relative and free of `..`, and must not be empty.
 

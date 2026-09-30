@@ -109,6 +109,10 @@ enum Commands {
         revision: String,
         #[arg(long, value_parser = ["readonly", "readwrite", "artefact"], default_value = "readwrite")]
         mode: String,
+        /// Skip it until named: `clone`, `pull` and the hooks leave it out
+        /// while it is not on disk.
+        #[arg(long)]
+        lazy: bool,
         #[arg(short = 'C', long)]
         root: Option<PathBuf>,
     },
@@ -350,12 +354,14 @@ fn run_cli_inner(
             repo_url,
             revision,
             mode,
+            lazy,
             root,
         } => commands::add::run(
             &directory,
             &repo_url,
             &revision,
             &mode,
+            lazy,
             root.as_deref(),
             out,
         ),

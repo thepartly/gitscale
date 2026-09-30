@@ -42,7 +42,8 @@ fn reconcile_remotes(root: Option<&Path>, names: &[String], out: &mut dyn Write)
     let config_path = find_config(root)?;
     let config_root = config_path.parent().unwrap().to_path_buf();
     let config = load_config(&config_path)?;
-    let selected = crate::commands::clone::filter_entries(&config.repos, names)?;
+    let selected =
+        crate::commands::clone::entries_to_check_out(&config.repos, names, &config_root)?;
 
     let mut header_done = false;
     for entry in &selected {

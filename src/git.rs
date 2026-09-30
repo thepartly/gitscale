@@ -742,6 +742,9 @@ pub struct RepoStatus {
     /// answer as an abbreviated commit — a spelling the revision can never
     /// match, however right the checkout is.
     pub at_expected: bool,
+    /// The entry is declared `lazy`, so not being on disk is expected. Filled
+    /// in by the caller, which has the entry.
+    pub lazy: bool,
 }
 
 /// Whether `dest` is at the commit `revision` names.
@@ -854,6 +857,7 @@ pub fn get_repo_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
             has_unlinked_modified: false,
             cache: crate::cache::CacheUse::Unused,
             at_expected: true,
+            lazy: false,
         };
     }
     if symlink {
@@ -888,6 +892,7 @@ pub fn get_repo_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
             has_unlinked_modified: false,
             cache: crate::cache::CacheUse::Unused,
             at_expected: true,
+            lazy: false,
         };
     }
 
@@ -916,6 +921,7 @@ pub fn get_repo_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
             has_unlinked_modified: false,
             cache: crate::cache::CacheUse::Unused,
             at_expected,
+            lazy: false,
         };
     }
 
@@ -937,6 +943,7 @@ pub fn get_repo_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
         has_unlinked_modified: false,
         cache: crate::cache::CacheUse::Unused,
         at_expected,
+        lazy: false,
     }
 }
 
@@ -995,6 +1002,7 @@ pub fn get_self_status(root: &Path) -> Option<RepoStatus> {
         has_unlinked_modified: false,
         cache: crate::cache::CacheUse::Unused,
         at_expected: true,
+        lazy: false,
     })
 }
 
@@ -1025,6 +1033,7 @@ pub fn get_artefact_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
             has_unlinked_modified: false,
             cache: crate::cache::CacheUse::Unused,
             at_expected: true,
+            lazy: false,
         };
     }
 
@@ -1067,6 +1076,7 @@ pub fn get_artefact_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
         has_unlinked_modified: false,
         cache: crate::cache::CacheUse::Unused,
         at_expected: true,
+        lazy: false,
     }
 }
 

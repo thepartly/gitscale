@@ -76,9 +76,12 @@ pub fn run(
 
     for entry in &config.repos {
         if entry.is_artefact() {
-            statuses.push(get_artefact_status(entry, &config_root));
+            let mut status = get_artefact_status(entry, &config_root);
+            status.lazy = entry.lazy;
+            statuses.push(status);
         } else {
             let mut status = get_repo_status(entry, &config_root);
+            status.lazy = entry.lazy;
             let url = crate::git::remote_url(entry);
             if status.exists && !status.is_symlink {
                 status.cache = cache::cache_use(
@@ -186,7 +189,7 @@ fn is_tree_modified(path: &Path) -> bool {
 
 fn get_status_flags(s: &RepoStatus) -> String {
     if !s.exists {
-        return "missed".to_string();
+        return if s.lazy { "lazy" } else { "missed" }.to_string();
     }
     if s.is_symlink {
         return "symlink".to_string();
@@ -244,6 +247,9 @@ fn status_icon(flags: &str) -> &str {
     if flags.contains("symlink") {
         return "⤷";
     }
+    if flags == "lazy" {
+        return "○";
+    }
     if flags.contains("missed") {
         return "✘";
     }
@@ -279,6 +285,9 @@ fn status_color(flags: &str) -> &str {
     }
     if flags.contains("symlink") {
         return "36"; // cyan
+    }
+    if flags == "lazy" {
+        return "2"; // dim: absent by choice
     }
     if flags.contains("missed") {
         return "31"; // red
@@ -448,6 +457,7 @@ fn print_json(
             serde_json::json!({
                 "directory": s.directory,
                 "exists": s.exists,
+                "lazy": s.lazy,
                 "current_ref": s.current_ref,
                 "expected_ref": s.expected_ref,
                 "clean": s.is_clean,

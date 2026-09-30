@@ -211,6 +211,7 @@ gitscale add [OPTIONS] <DIRECTORY> <REPO_URL> <REVISION>
 | `REPO_URL` | The repository URL |
 | `REVISION` | Branch, tag or commit SHA. Required positionally; pass `""` to leave it unset |
 | `--mode <MODE>` | `readwrite` (default), `readonly` or `artefact` |
+| `--lazy` | Declare it [lazy](dependencies.md#lazy-entries): skipped until named |
 
 Edits `.gitscale.toml` only — run `gitscale clone` afterwards. Creates a config
 if none exists. Fails if the directory is already declared. See

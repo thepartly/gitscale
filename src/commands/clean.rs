@@ -348,6 +348,7 @@ mod tests {
             revision: "main".to_string(),
             mode: RepoMode::Readwrite,
             recursive: true,
+            lazy: false,
         }
     }
 
