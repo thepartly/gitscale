@@ -90,6 +90,10 @@ The fix is to add it to the root config — `gitscale add sharedlibs <url> <rev>
 — which is also the moment someone chooses the revision the whole workspace
 will use.
 
+A child dependency declared [`lazy`](dependencies.md#lazy-entries) is the
+exception: the child already does without it, so a root that does not declare
+it gets no error and no link.
+
 Transitive depth is unlimited, and falls out of the same rule: a
 grandchild dependency has to be declared at the root too, which makes it a
 top-level entry, whose own config GitScale reads in turn. The graph is always

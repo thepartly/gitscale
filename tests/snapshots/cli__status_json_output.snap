@@ -13,6 +13,7 @@ expression: parsed
     "directory": "libs/mylib",
     "exists": true,
     "expected_ref": "main",
+    "lazy": false,
     "mode": "readwrite",
     "stale": false,
     "symlink": false,

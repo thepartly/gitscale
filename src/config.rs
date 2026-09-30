@@ -45,6 +45,10 @@ pub struct RepoEntry {
     pub revision: String,
     pub mode: RepoMode,
     pub recursive: bool,
+    /// Left out of a `clone`, `pull`, `sync` or hook run that names no repos
+    /// until it is on disk; naming it fetches it. See
+    /// [`crate::commands::clone::filter_entries`].
+    pub lazy: bool,
 }
 
 impl RepoEntry {
@@ -211,6 +215,7 @@ struct RawRepo {
     revision: Option<String>,
     mode: Option<String>,
     recursive: Option<bool>,
+    lazy: Option<bool>,
 }
 
 pub fn find_config(start: Option<&Path>) -> Result<PathBuf> {
@@ -447,6 +452,7 @@ fn parse_repos(
             revision,
             mode,
             recursive,
+            lazy: spec.lazy.unwrap_or(false),
         });
     }
     Ok(entries)
@@ -576,6 +582,9 @@ pub fn write_config(config_path: &Path, config: &GitScaleConfig) -> Result<()> {
             }
             if !entry.recursive {
                 parts.push("recursive = false".to_string());
+            }
+            if entry.lazy {
+                parts.push("lazy = true".to_string());
             }
             let inline = parts.join(", ");
             lines.push(format!(

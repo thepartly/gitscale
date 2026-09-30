@@ -11,6 +11,7 @@ pub fn run(
     repo_url: &str,
     revision: &str,
     mode: &str,
+    lazy: bool,
     root: Option<&Path>,
     out: &mut dyn Write,
 ) -> Result<()> {
@@ -45,6 +46,7 @@ pub fn run(
         revision: revision.to_string(),
         mode: mode_enum,
         recursive: true,
+        lazy,
     });
 
     write_config(&config_path, &config)?;

@@ -5,7 +5,7 @@ use std::path::Path;
 
 use crate::cache;
 use crate::commands::cache as cache_cmd;
-use crate::commands::clone::filter_entries;
+use crate::commands::clone::entries_to_check_out;
 use crate::config::{find_config, load_config};
 use crate::git::{is_ci, pull_repo};
 use crate::hooks;
@@ -54,7 +54,7 @@ fn pull_inner(
     let config_path = find_config(root)?;
     let config_root = config_path.parent().unwrap().to_path_buf();
     let config = load_config(&config_path)?;
-    let selected = filter_entries(&config.repos, names)?;
+    let selected = entries_to_check_out(&config.repos, names, &config_root)?;
 
     if selected.is_empty() {
         writeln!(out, "Nothing to pull.")?;

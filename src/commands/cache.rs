@@ -12,7 +12,7 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::cache::{self, Cache};
-use crate::commands::clone::filter_entries;
+use crate::commands::clone::entries_to_check_out;
 use crate::config::{find_config, load_config, GitScaleConfig, RepoEntry};
 use crate::git::is_ci;
 use crate::progress::{run_parallel, RepoStatus};
@@ -65,12 +65,12 @@ pub fn update(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
-    let (config, _config_root) = load(root)?;
+    let (config, config_root) = load(root)?;
     let Some(cache) = open(&config, no_cache) else {
         writeln!(out, "The object cache is off.")?;
         return Ok(());
     };
-    let selected = cacheable(&config, names)?;
+    let selected = cacheable(&config, names, &config_root)?;
     if selected.is_empty() {
         writeln!(out, "Nothing to cache.")?;
         return Ok(());
@@ -308,7 +308,7 @@ pub fn repair(
         writeln!(out, "The object cache is off.")?;
         return Ok(());
     };
-    let selected = cacheable(&config, names)?;
+    let selected = cacheable(&config, names, &config_root)?;
 
     let mut repaired = 0;
     for entry in &selected {
@@ -389,8 +389,12 @@ fn load(root: Option<&Path>) -> Result<(GitScaleConfig, std::path::PathBuf)> {
 
 /// The selected entries a cache can hold anything for. An artefact is an
 /// unpacked archive with no object store, so it never has an entry.
-fn cacheable(config: &GitScaleConfig, names: &[String]) -> Result<Vec<RepoEntry>> {
-    Ok(filter_entries(&config.repos, names)?
+fn cacheable(
+    config: &GitScaleConfig,
+    names: &[String],
+    config_root: &Path,
+) -> Result<Vec<RepoEntry>> {
+    Ok(entries_to_check_out(&config.repos, names, config_root)?
         .into_iter()
         .filter(|e| !e.is_artefact())
         .collect())

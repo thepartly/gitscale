@@ -13,6 +13,7 @@
   - [Commit SHA](#commit-sha)
   - [No revision](#no-revision)
 - [Shallow clones](#shallow-clones)
+- [Lazy entries](#lazy-entries)
 - [Recursive dependencies](#recursive-dependencies)
 - [Artefact storage](#artefact-storage)
   - [Supported backends](#supported-backends)
@@ -44,6 +45,7 @@ entry takes:
 | `revision` | no | the remote's default branch | Branch, tag or commit SHA — see [pinning a revision](#pinning-a-revision) |
 | `mode` | no | `readwrite` | `readwrite`, `readonly` or `artefact` — see [checkout modes](#checkout-modes) |
 | `recursive` | no | `true` | Whether to read this repo's own `.gitscale.toml` — see [recursive dependencies](recursive-dependencies.md) |
+| `lazy` | no | `false` | Leave it out until it is named — see [lazy entries](#lazy-entries) |
 
 Directories must be relative and free of `..`; URLs and revisions may not start
 with `-` or use a `helper::` remote-helper prefix. The reasoning, and the full
@@ -251,6 +253,32 @@ served by shallow snapshot entries and keeps the depth-1 checkout it has today.
 
 A shallow repo cannot report an exact behind count, so `gitscale status` shows
 `≠ stale` when its commit differs from upstream.
+
+## Lazy entries
+
+`lazy = true` declares a dependency that only some work needs, such as a
+repository of large test fixtures. It is pinned like any other entry, but
+`clone`, `pull`, `sync`, `fetch` and the [git hooks](hooks.md) leave it out
+while it is not on disk, so a fresh workspace or CI job does not pay for it.
+
+```toml
+"imports/fixtures" = { url = "git@github.com:org/fixtures.git", revision = "v3", lazy = true }
+```
+
+Name it to fetch it — in a job that runs the tests that read it, say:
+
+```bash
+gitscale clone imports/fixtures    # or: gitscale pull imports/fixtures
+```
+
+Once it is on disk it is an ordinary entry: a plain `pull` keeps it on its pin.
+Delete the directory to make it lazy again. [`status`](status.md) shows an
+absent lazy entry as `lazy`, not `missed`.
+
+A lazy entry in a child's config also relaxes the
+[hoisting rule](recursive-dependencies.md#hoisting-the-root-is-the-source-of-truth):
+the root does not have to declare it. A root that does declare it gets the usual
+symlink once it is fetched.
 
 ## Recursive dependencies
 

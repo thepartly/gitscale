@@ -1765,6 +1765,7 @@ fn shallow_entry(url: &str, revision: &str) -> gitscale::config::RepoEntry {
         revision: revision.to_string(),
         mode: gitscale::config::RepoMode::Readwrite,
         recursive: false,
+        lazy: false,
     }
 }
 
@@ -2188,4 +2189,159 @@ fn clean_keeps_a_checkout_nested_inside_another_repo() {
         "cleaning core deleted a checkout declared inside it"
     );
     assert!(!env.playground.join("core/scratch.tmp").exists());
+}
+
+// ---------------------------------------------------------------------------
+// Lazy entries
+// ---------------------------------------------------------------------------
+
+/// `libs/eager` is an ordinary entry, `libs/lazy` a lazy one.
+#[cfg(test)]
+fn lazy_workspace(name: &str) -> (TestEnv, std::path::PathBuf) {
+    let env = TestEnv::new(name);
+    let eager = env.create_bare_repo("eager", "main", &[("a.txt", "a")]);
+    let lazy = env.create_bare_repo("lazy", "main", &[("b.txt", "v1")]);
+    env.write_config(&format!(
+        r#"[repos]
+"libs/eager" = {{ url = "{}", revision = "main" }}
+"libs/lazy" = {{ url = "{}", revision = "main", lazy = true }}
+"#,
+        eager.display(),
+        lazy.display(),
+    ));
+    (env, lazy)
+}
+
+#[test]
+fn lazy_entry_is_skipped_until_named() {
+    let (env, _) = lazy_workspace("lazy_skipped");
+
+    for command in ["clone", "pull", "sync"] {
+        let out = env.run(&[command]);
+        assert!(out.success, "{command}: {}", out.stderr);
+        assert!(
+            !env.playground.join("libs/lazy").exists(),
+            "{command} with no names should leave a lazy entry alone"
+        );
+    }
+    assert!(env.playground.join("libs/eager/a.txt").is_file());
+}
+
+#[test]
+fn a_hook_pull_skips_a_lazy_entry() {
+    let (env, _) = lazy_workspace("lazy_hook");
+
+    let out = env.run_as_hook("*", &["pull"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(env.playground.join("libs/eager/a.txt").is_file());
+    assert!(!env.playground.join("libs/lazy").exists());
+}
+
+#[test]
+fn naming_a_lazy_entry_fetches_it_and_later_pulls_keep_it_current() {
+    let (env, bare) = lazy_workspace("lazy_named");
+
+    let out = env.run(&["clone", "libs/lazy"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert_eq!(
+        std::fs::read_to_string(env.playground.join("libs/lazy/b.txt")).unwrap(),
+        "v1"
+    );
+
+    commit_to_bare(&bare, "main", "b.txt", "v2");
+    let out = env.run(&["pull"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert_eq!(
+        std::fs::read_to_string(env.playground.join("libs/lazy/b.txt")).unwrap(),
+        "v2",
+        "a lazy entry on disk should be pulled like any other"
+    );
+}
+
+#[test]
+fn pull_by_name_clones_a_lazy_entry() {
+    let (env, _) = lazy_workspace("lazy_pull_named");
+
+    let out = env.run(&["pull", "libs/lazy"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(env.playground.join("libs/lazy/b.txt").is_file());
+    assert!(!env.playground.join("libs/eager").exists());
+}
+
+#[test]
+fn status_reports_an_absent_lazy_entry_as_lazy() {
+    let (env, _) = lazy_workspace("lazy_status");
+
+    let out = env.run(&["status"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    let lazy_row = helpers::strip_ansi(&out.stdout)
+        .lines()
+        .find(|l| l.contains("libs/lazy"))
+        .unwrap()
+        .to_string();
+    assert!(lazy_row.trim_end().ends_with("lazy"), "row: {lazy_row}");
+    assert!(!lazy_row.contains("missed"), "row: {lazy_row}");
+
+    let out = env.run(&["status", "--format", "json"]);
+    let rows: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    let lazy = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["directory"] == "libs/lazy")
+        .unwrap();
+    assert_eq!(lazy["lazy"], true);
+    assert_eq!(lazy["exists"], false);
+}
+
+#[test]
+fn add_lazy_writes_the_flag() {
+    let env = TestEnv::new("add_lazy");
+    env.write_config("");
+
+    let out = env.run(&[
+        "add",
+        "libs/fixtures",
+        "https://github.com/org/fixtures.git",
+        "main",
+        "--lazy",
+    ]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    let config = std::fs::read_to_string(env.playground.join(".gitscale.toml")).unwrap();
+    assert!(config.contains("lazy = true"), "config: {config}");
+}
+
+#[test]
+fn a_lazy_child_dependency_need_not_be_declared_at_the_root() {
+    let env = TestEnv::new("lazy_child_undeclared");
+    let fixtures = env.create_bare_repo("fixtures", "main", &[("f.txt", "f")]);
+    let core = env.create_bare_repo(
+        "core",
+        "main",
+        &[
+            ("c.txt", "c"),
+            (
+                ".gitscale.toml",
+                &format!(
+                    "[repos]\n\"imports/fixtures\" = {{ url = \"{}\", revision = \"main\", lazy = true }}\n",
+                    fixtures.display()
+                ),
+            ),
+        ],
+    );
+    env.write_config(&format!(
+        r#"[repos]
+"imports/core" = {{ url = "{}", revision = "main" }}
+"#,
+        core.display(),
+    ));
+
+    let out = env.run(&["clone"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(env.playground.join("imports/core/c.txt").is_file());
+    assert!(!env
+        .playground
+        .join("imports/core/imports/fixtures")
+        .exists());
+    assert!(!env.playground.join("imports/fixtures").exists());
 }

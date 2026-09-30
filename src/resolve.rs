@@ -56,6 +56,11 @@ pub fn resolve_recursive(
             let norm_url = crate::urls::normalize(&child_dep.repo_url);
 
             let Some(matched_root) = url_to_root.get(&norm_url) else {
+                // The child can do without it, so neither must the root: a
+                // lazy import becomes a real one only where it is declared.
+                if child_dep.lazy {
+                    continue;
+                }
                 bail!(
                     "repo '{}' requires '{}' (url: {}) but it is not declared in the root {}",
                     root_entry.directory,
@@ -289,6 +294,7 @@ pub fn apply_resolved_revisions(
             revision: revision.clone(),
             mode: original.mode,
             recursive: original.recursive,
+            lazy: original.lazy,
         };
         let dest = config_root.join(directory);
         if dest.exists() {
