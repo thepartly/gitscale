@@ -14,6 +14,26 @@ pub enum RepoStatus {
     Fail(String),
 }
 
+/// Split a failure into its error and the `hint:` lines that follow it.
+///
+/// When every repo fails for the same reason — no ssh agent, a CI token the
+/// server refuses — the hint is the same for each, so it is printed once
+/// after the list rather than under every repo.
+fn split_hint(msg: &str) -> (&str, Option<&str>) {
+    match msg.split_once("\nhint: ") {
+        Some((error, hint)) => (error, Some(hint)),
+        None => (msg, None),
+    }
+}
+
+fn note_hint(hints: &mut Vec<String>, hint: Option<&str>) {
+    if let Some(hint) = hint {
+        if !hints.iter().any(|h| h == hint) {
+            hints.push(hint.to_string());
+        }
+    }
+}
+
 /// Run operations on repos in parallel with a live-updating display on TTY,
 /// or sequentially to a writer for non-TTY / tests.
 ///
@@ -75,6 +95,7 @@ where
         .collect();
 
     let failed = std::sync::atomic::AtomicUsize::new(0);
+    let hints = std::sync::Mutex::new(Vec::new());
 
     std::thread::scope(|s| {
         let handles: Vec<_> = names
@@ -82,6 +103,7 @@ where
             .zip(bars.iter())
             .map(|(name, pb)| {
                 let failed = &failed;
+                let hints = &hints;
                 s.spawn(move || {
                     pb.set_message(format!("{:<24} running...", name));
                     let result = op(name);
@@ -94,7 +116,9 @@ where
                         }
                         RepoStatus::Fail(msg) => {
                             failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            pb.finish_with_message(format!("FAIL  {}", msg));
+                            let (error, hint) = split_hint(msg);
+                            note_hint(&mut hints.lock().unwrap(), hint);
+                            pb.finish_with_message(format!("FAIL  {}", error));
                         }
                     }
                 })
@@ -106,6 +130,9 @@ where
         }
     });
 
+    for hint in hints.into_inner().unwrap() {
+        eprintln!("hint: {}", hint);
+    }
     Ok(failed.load(std::sync::atomic::Ordering::Relaxed))
 }
 
@@ -119,17 +146,55 @@ where
     F: Fn(&str) -> RepoStatus + Send + Sync,
 {
     let mut failed = 0;
+    let mut hints = Vec::new();
     for name in names {
         let result = op(name);
         match &result {
             RepoStatus::Ok(msg) => writeln!(out, "  ok    {}", msg)?,
             RepoStatus::Skip(msg) => writeln!(out, "  skip  {}", msg)?,
             RepoStatus::Fail(msg) => {
-                writeln!(err, "  FAIL  {}", msg)?;
+                let (error, hint) = split_hint(msg);
+                note_hint(&mut hints, hint);
+                writeln!(err, "  FAIL  {}", error)?;
                 failed += 1;
             }
         }
     }
+    for hint in hints {
+        writeln!(err, "hint: {}", hint)?;
+    }
     Ok(failed)
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::{run_parallel, RepoStatus};
+
+    #[test]
+    fn prints_a_shared_hint_once_after_the_failures() {
+        let names = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let failed = run_parallel(
+            "Pulling...",
+            &names,
+            false,
+            |name| match name {
+                "c" => RepoStatus::Fail("c: fatal: other".to_string()),
+                _ => RepoStatus::Fail(format!(
+                    "{}: fatal: denied\nhint: load the key\nhint: then retry",
+                    name
+                )),
+            },
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert_eq!(failed, 3);
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "  FAIL  a: fatal: denied\n  FAIL  b: fatal: denied\n  FAIL  c: fatal: other\n\
+             hint: load the key\nhint: then retry\n"
+        );
+    }
+}

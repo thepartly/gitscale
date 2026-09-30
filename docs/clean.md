@@ -120,9 +120,16 @@ a root config enumerating that on its behalf goes stale the moment the
 sub-repository changes.
 
 Reading a sub-repository's `[clean]` is gated on its `recursive` flag, like every
-other nested-config read. A sub-repository's config that exists but does not
-parse is an error rather than an empty keep-list — treating an unreadable file
-as "keep nothing" would delete exactly the files it was written to protect.
+other nested-config read. A `recursive = false` checkout is still cleaned, by the
+command line's `--exclude` patterns alone: its keep-list is part of a config
+GitScale was told not to read. Its own dependencies need no protecting from
+that — GitScale plants nothing inside such a checkout, and a clone somebody made
+there is a [nested repository](#nested-repositories-gitscale-does-not-manage),
+which is reported rather than deleted.
+
+A sub-repository's config that exists but does not parse is an error rather
+than an empty keep-list — treating an unreadable file as "keep nothing" would
+delete exactly the files it was written to protect.
 
 ### `--exclude` on the command line
 
@@ -139,7 +146,6 @@ repository's own `[clean]` table. An empty pattern, or one starting with `-`
 
 | Reason reported | Why |
 |---|---|
-| `recursive = false` | Its config is not GitScale's to read, so its keep-list is unknown — and cleaning a repository without knowing what it wants kept is worse than leaving it alone |
 | `artefact` | No working tree to clean; the directory's contents are managed by `pull` |
 | `not cloned` | The directory does not exist |
 | `symlink` | A deduped [recursive dependency](recursive-dependencies.md); the real checkout is cleaned under its own name |

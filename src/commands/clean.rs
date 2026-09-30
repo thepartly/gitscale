@@ -120,13 +120,6 @@ fn plan(
         let dir = config_root.join(&entry.directory);
         let name = entry.directory.as_str();
 
-        if !entry.recursive {
-            // Its config is not gitscale's to read, so its keep-list is
-            // unknown — and cleaning a repo without knowing what it wants
-            // kept is worse than leaving it alone.
-            targets.push(skipped(name, &dir, "recursive = false"));
-            continue;
-        }
         if entry.is_artefact() {
             targets.push(skipped(name, &dir, "artefact"));
             continue;
@@ -148,7 +141,14 @@ fn plan(
 
         let mut excludes = vec![ALWAYS_KEEP.to_string()];
         excludes.extend(cli_excludes.iter().cloned());
-        excludes.extend(own_excludes(entry, &dir)?);
+        // `recursive = false` means its config is not gitscale's to read, keep-
+        // list included, so the repo is cleaned by the command line's patterns
+        // alone. Its own nested dependencies are safe without that config:
+        // gitscale never planted any, and a clone someone made there is a
+        // nested repository, which `clean` reports rather than deletes.
+        if entry.recursive {
+            excludes.extend(own_excludes(entry, &dir)?);
+        }
         // A repo declared inside this one is a checkout in its own right, and
         // cleaning is not how it gets removed.
         excludes.extend(nested_checkouts(&config.repos, Path::new(&entry.directory)));

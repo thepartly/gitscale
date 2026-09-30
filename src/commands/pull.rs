@@ -22,7 +22,8 @@ pub fn run(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
-    let (config, config_root) = pull_inner(root, names, verbose, no_cache, interactive, out, err)?;
+    let (config, config_root) =
+        pull_inner(root, names, verbose, no_cache, interactive, true, out, err)?;
     hooks::run_post_sync(&config.hooks, &config_root, verbose, out)?;
     Ok(())
 }
@@ -37,7 +38,9 @@ pub fn run_no_hooks(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
-    pull_inner(root, names, verbose, no_cache, interactive, out, err)?;
+    // Not scrubbed: sync decides for itself what untracked content goes —
+    // an orphan it would keep without --force must not disappear here first.
+    pull_inner(root, names, verbose, no_cache, interactive, false, out, err)?;
     Ok(())
 }
 
@@ -48,6 +51,7 @@ fn pull_inner(
     verbose: bool,
     no_cache: bool,
     interactive: bool,
+    scrub: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<(crate::config::GitScaleConfig, std::path::PathBuf)> {
@@ -123,6 +127,24 @@ fn pull_inner(
 
     // Re-resolve symlinks after pull (child configs may have changed)
     crate::resolve::resolve_and_link(&config.repos, &config_root, false, out)?;
+
+    // A pull updates tracked files in place, which is what keeps unchanged
+    // files' mtimes — and so a build cache — valid across jobs. The price is
+    // that anything untracked survives too, so in CI follow it with exactly
+    // `gitscale clean -f <each pulled checkout>`. The root is not named: in CI
+    // it is the runner's to clean, and a job that pulls after restoring a build
+    // cache into it must not lose that cache.
+    if ci && scrub {
+        crate::commands::clean::run(
+            Some(&config_root),
+            &dir_names,
+            &[],
+            true,
+            interactive,
+            out,
+            err,
+        )?;
+    }
 
     Ok((config, config_root))
 }

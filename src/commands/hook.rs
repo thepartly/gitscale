@@ -86,6 +86,13 @@ if [ -n "${{GITSCALE_HOOK:-}}" ]; then
     exit $RC
 fi
 
+# post-checkout's third argument is 0 for a file checkout (`git checkout -- <path>`),
+# which moves no revision and so gives a pull nothing to do. A build restoring one
+# file must not have its sub-repositories reset and cleaned underneath it.
+if [ "$HOOK" = post-checkout ] && [ "${{3:-1}}" = 0 ]; then
+    exit $RC
+fi
+
 # Opt-in check, at the worktree root only. Deliberately not gitscale's usual
 # upward search: an unrelated repo cloned inside a gitscale workspace would
 # otherwise inherit the parent config and trigger a pull of the whole thing.
@@ -211,6 +218,25 @@ fn gitscale_binary() -> Result<PathBuf> {
 fn is_shim(path: &Path) -> bool {
     std::fs::read_to_string(path)
         .map(|s| s.contains(SHIM_MARKER))
+        .unwrap_or(false)
+}
+
+/// A hook that hands off to `gitscale hook run`, whoever wrote it: a shim of
+/// ours, or a copy a repository commits — a `.githooks/` directory its own
+/// setup points `core.hooksPath` at — which carries no marker because gitscale
+/// did not write it.
+///
+/// For reporting only. Install and uninstall act on `is_shim` alone, so a
+/// committed copy is never displaced, rewritten or deleted.
+fn runs_gitscale(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .map(|s| {
+            s.lines().any(|line| {
+                !line.trim_start().starts_with('#')
+                    && line.to_lowercase().contains("gitscale")
+                    && line.contains(" hook run ")
+            })
+        })
         .unwrap_or(false)
 }
 
@@ -493,11 +519,23 @@ pub fn status(root: Option<&Path>, out: &mut dyn Write) -> Result<()> {
         let shadowed = git_config_get(Some(Scope::Global), "core.hooksPath", None).is_some()
             || git_config_get(Some(Scope::System), "core.hooksPath", None).is_some();
         if shadowed {
-            writeln!(
-                out,
-                "\nThis repo sets its own core.hooksPath, which overrides the global one.\n\
-                 A global gitscale install does not run here — use `gitscale hook install --local`."
-            )?;
+            // The advice depends on what is in the directory the repo chose: a
+            // monorepo that commits its own copies of the shim is covered, and
+            // telling it to install over them would be wrong.
+            let covered = HOOKS.iter().all(|hook| runs_gitscale(&dir.join(hook)));
+            if covered {
+                writeln!(
+                    out,
+                    "\nThis repo sets its own core.hooksPath, which overrides the global one.\n\
+                     Its own hooks there run gitscale, so nothing is lost."
+                )?;
+            } else {
+                writeln!(
+                    out,
+                    "\nThis repo sets its own core.hooksPath, which overrides the global one.\n\
+                     A global gitscale install does not run here — use `gitscale hook install --local`."
+                )?;
+            }
         }
     }
 
@@ -507,6 +545,8 @@ pub fn status(root: Option<&Path>, out: &mut dyn Write) -> Result<()> {
             "not installed"
         } else if is_shim(&target) {
             "gitscale"
+        } else if runs_gitscale(&target) {
+            "gitscale (repository's own copy)"
         } else {
             "other (not gitscale)"
         };
@@ -524,7 +564,16 @@ pub fn status(root: Option<&Path>, out: &mut dyn Write) -> Result<()> {
 /// What the installed hook allows, and whether this repository is inside it —
 /// the question people have once a hook has been refused.
 fn report_trust(repo: &Path, dir: &Path, out: &mut dyn Write) -> Result<()> {
-    let Some(spec) = existing_allow(dir) else {
+    // A repository's own copy passes its allowlist the same way a shim does.
+    let spec = existing_allow(dir).or_else(|| {
+        HOOKS.iter().find_map(|hook| {
+            let target = dir.join(hook);
+            runs_gitscale(&target)
+                .then(|| shim_field(&target, "ALLOW"))
+                .flatten()
+        })
+    });
+    let Some(spec) = spec else {
         return Ok(());
     };
     let allowlist = trust::Allowlist::parse(&spec);
@@ -626,6 +675,22 @@ pub fn run(
         crate::commands::pull::run(Some(&repo), &[], verbose, no_cache, interactive, out, err);
 
     let breadcrumb = breadcrumb_path(&repo)?;
+
+    // Checked after the pull, when the checkouts exist for `git clean -n` to
+    // find, and failed whatever `on_pull_error` says: that policy is for a pull
+    // that did not work, and this is a pipeline that cannot — the runner is
+    // about to delete what the pull just produced.
+    if let Err(e) = crate::gitlab::check_runner_clean(&repo) {
+        let note = format!("{}: {} hook: {}\n", now_stamp(), hook, e);
+        let _ = std::fs::write(&breadcrumb, &note);
+        writeln!(err, "gitscale: {} hook — {}", hook, e)?;
+        // Told in full just above; the error only has to fail the checkout.
+        bail!(
+            "{} hook: GIT_CLEAN_FLAGS would delete the declared checkouts",
+            hook
+        );
+    }
+
     match result {
         Ok(()) => {
             let _ = std::fs::remove_file(&breadcrumb);

@@ -132,6 +132,7 @@ others set.
 | Checkout depth | full | 1 |
 | Object transfer | borrowed via `--reference` | copied by a local clone |
 | Source workspace | used when there is one | normally none — the runner clones the root itself |
+| Untracked files in checkouts after `pull` | kept | removed, as [`gitscale clean -f`](clean.md) removes them |
 
 The cache being on by default is what makes a shell runner with a persistent
 home directory pay off:

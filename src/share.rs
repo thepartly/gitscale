@@ -15,7 +15,6 @@
 //! history, and git reports nothing until something tries to read an object.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::config::RepoEntry;
 
@@ -182,7 +181,7 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 /// available", so a missing git, a directory that is not a repository and a
 /// git too old for the subcommand all collapse to the same answer.
 fn git_query(args: &[&str], cwd: &Path) -> Option<String> {
-    let output = Command::new("git")
+    let output = crate::git::git_command()
         .args(args)
         .current_dir(cwd)
         .env("GIT_TERMINAL_PROMPT", "0")

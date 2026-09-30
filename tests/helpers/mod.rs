@@ -269,6 +269,26 @@ impl TestEnv {
         }
     }
 
+    /// Run `gitscale hook run <hook>` on the playground the way the installed
+    /// shim does — sentinel and allowlist set — with extra environment on top.
+    /// `hook` is a nested subcommand, so `run_binary`'s `-C` placement does not
+    /// fit it.
+    pub fn run_hook_run(&self, hook: &str, allow: &str, vars: &[(&str, &str)]) -> CliOutput {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_gitscale"));
+        cmd.args(["hook", "run", hook, "-C", self.playground.to_str().unwrap()])
+            .env("GITSCALE_HOOK", hook)
+            .env("GITSCALE_HOOK_ALLOW", allow);
+        for (name, value) in vars {
+            cmd.env(name, value);
+        }
+        let output = cmd.output().expect("failed to run the gitscale binary");
+        CliOutput {
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            success: output.status.success(),
+        }
+    }
+
     /// Point the playground's own repo at `url`, so the hook allowlist has a
     /// deterministic host/owner/repo to judge it by.
     pub fn set_playground_origin(&self, url: &str) {

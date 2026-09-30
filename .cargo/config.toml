@@ -21,3 +21,14 @@ GIT_CONFIG_NOSYSTEM = "1"
 # disposable as the rest of the build output. Tests that exercise the cache
 # itself set `[cache] dir` and get a directory of their own on top of this.
 GITSCALE_CACHE_DIR = { value = "target/gitscale-test-cache", relative = true }
+
+# Run under a CI job, the suite would otherwise inherit the job's own markers,
+# and every in-process test would switch to CI behaviour — shallow checkouts,
+# snapshot entries, failing hooks, checkouts scrubbed after each pull — while
+# asserting the developer-machine one. Cargo cannot unset a variable, but
+# gitscale reads an empty one as unset, and `force` overrides the ambient value.
+# Tests about CI set these on the subprocess they launch (`run_with_env`).
+CI = { value = "", force = true }
+GITLAB_CI = { value = "", force = true }
+CI_JOB_TOKEN = { value = "", force = true }
+GITHUB_ACTIONS = { value = "", force = true }

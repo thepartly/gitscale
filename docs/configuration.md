@@ -72,7 +72,7 @@ the config.
 | `url` | string | **required** | Repository URL: HTTPS, SSH (`git@host:owner/repo.git` or `ssh://git@host/owner/repo.git`), or a local path |
 | `revision` | string | `""` | Branch, tag or commit SHA. Empty means the remote's default branch, or a revision [adopted from a child config](recursive-dependencies.md#revision-resolution-and-the-mismatch-check). See [pinning a revision](dependencies.md#pinning-a-revision) |
 | `mode` | string | `"readwrite"` | `"readwrite"`, `"readonly"` or `"artefact"`. See [checkout modes](dependencies.md#checkout-modes) |
-| `recursive` | bool | `true` | Read this repository's own `.gitscale.toml`: resolve its transitive dependencies, and clean it by its own `[clean]` rules. With `false`, that config is not read at all and [`clean`](clean.md) skips the repository |
+| `recursive` | bool | `true` | Read this repository's own `.gitscale.toml`: resolve its transitive dependencies, and clean it by its own `[clean]` rules. With `false`, that config is not read at all, and [`clean`](clean.md#per-repo-clean) cleans the repository without its keep-list |
 
 The directory key must be relative and free of `..`, and must not be empty.
 
@@ -199,13 +199,15 @@ If you keep comments in the file, edit it by hand instead.
 
 | Variable | Effect |
 |---|---|
-| `CI` | `1` or `true` switches to [CI behaviour](caching.md#what-changes-in-ci): shallow checkouts and snapshot cache entries |
+| `CI` | `1` or `true` switches to [CI behaviour](caching.md#what-changes-in-ci): shallow checkouts, snapshot cache entries, and [`clean -f` on every checkout](hooks.md#git-hooks-in-ci) after a `pull` |
 | `GITSCALE_CACHE_DIR` | Cache location, when `[cache] dir` is unset |
 | `XDG_DATA_HOME` | `$XDG_DATA_HOME/gitscale` is the cache location, when neither of the above is set |
 | `HOME` | `~/.local/share/gitscale` is the last fallback; also where `--global` hooks are installed |
 | `GITSCALE_NO_CI_AUTH` | Any non-empty value disables [CI authentication](ci-authentication.md) |
 | `GITSCALE_HOOK_ALLOW` | Set by an installed [git hook shim](hooks.md#the-hook-allowlist) to the allowlist it was installed with. Not something to set yourself |
 | `GITSCALE_HOOK` | Set by GitScale on every git call it makes, so an installed hook can tell re-entry from a genuine user operation |
+| `GITLAB_CI` | `true` makes a hook-triggered pull check that the runner's post-checkout clean keeps the declared checkouts, and [fail if it would not](hooks.md#git-hooks-in-ci) |
+| `GIT_CLEAN_FLAGS` | GitLab Runner's own: the flags of the `git clean` it runs after its checkout, default `-ffdx`. Read for that check, never set by GitScale |
 
 ### CI authentication
 
@@ -231,6 +233,12 @@ Every git call GitScale makes runs with `GIT_TERMINAL_PROMPT=0`, an empty
 `GIT_ASKPASS` and `SSH_ASKPASS`, and `SSH_ASKPASS_REQUIRE=never`, with stdin
 closed. GitScale never prompts for credentials: a repository that needs
 credentials git does not already have fails rather than hanging.
+
+That includes the passphrase of an ssh key: a key that has one must be loaded
+into an ssh agent (`ssh-add`). On a machine you reach over SSH, forwarding the
+agent of the machine you connect from (`ForwardAgent yes`) works too. When ssh
+refuses the key, GitScale checks the agent and prints a `hint:` saying which of
+these is missing, once for the whole run.
 
 ---
 

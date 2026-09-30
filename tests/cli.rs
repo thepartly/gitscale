@@ -481,6 +481,123 @@ fn push_readwrite() {
     insta::assert_snapshot!("push_readwrite_stdout", out.stdout);
 }
 
+/// A readwrite repo pinned to a tag is checked out detached. There is no
+/// branch to push, and `git push` failing on that used to fail every sync.
+#[test]
+fn push_skips_a_detached_tag_pin() {
+    let env = TestEnv::new("push_skip_detached");
+    let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "a")]);
+    helpers::run_git_pub(&bare, &["tag", "demo-v1", "main"]);
+
+    env.write_config(&format!(
+        r#"[repos]
+"libs/mylib" = {{ url = "{}", revision = "demo-v1", mode = "readwrite" }}
+"#,
+        bare.display()
+    ));
+    assert!(env.run(&["clone"]).success);
+
+    let out = env.run(&["sync"]);
+    assert!(
+        out.success,
+        "stdout: {}\nstderr: {}",
+        out.stdout, out.stderr
+    );
+    assert!(
+        out.stdout.contains("libs/mylib (detached HEAD)"),
+        "{}",
+        out.stdout
+    );
+}
+
+/// git exports `GIT_DIR` to hooks — during `git clone`, the new root's `.git`.
+/// A hook-triggered pull that let its git calls inherit it ran them against
+/// the root: the pinned tag "did not exist", and with a warm cache the mirror
+/// fetch rewrote the root's refs and checked the sub-repo's tag out over it.
+#[test]
+fn pull_ignores_an_inherited_git_dir() {
+    let env = TestEnv::new("pull_inherited_git_dir");
+    env.init_playground_git();
+    env.set_playground_origin("https://github.com/acme/root.git");
+    let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "a")]);
+    helpers::run_git_pub(&bare, &["tag", "demo-v1", "main"]);
+
+    env.write_config(&format!(
+        r#"[cache]
+dir = "{}"
+
+[repos]
+"libs/mylib" = {{ url = "{}", revision = "demo-v1", mode = "readwrite" }}
+"#,
+        env.cache.display(),
+        bare.display()
+    ));
+    let root_git = env.playground.join(".git");
+    let rev = |dir: &std::path::Path, spec: &str| {
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", spec])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let root_head = rev(&env.playground, "HEAD");
+    let tag = rev(&bare, "demo-v1");
+
+    // Cold cache first, then warm: the second is the one that damaged the root.
+    for pass in ["cold", "warm"] {
+        let _ = std::fs::remove_dir_all(env.playground.join("libs"));
+        let out = env.run_with_env(&[("GIT_DIR", root_git.to_str().unwrap())], &["pull"]);
+        assert!(
+            out.success,
+            "{} pass\nstdout: {}\nstderr: {}",
+            pass, out.stdout, out.stderr
+        );
+        let lib = env.playground.join("libs/mylib");
+        assert_eq!(
+            rev(&lib, "HEAD"),
+            tag,
+            "{} pass: sub-repo not on the tag",
+            pass
+        );
+        assert_eq!(
+            rev(&env.playground, "HEAD"),
+            root_head,
+            "{} pass: root moved",
+            pass
+        );
+        let leaked = std::process::Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", "refs/tags/demo-v1"])
+            .current_dir(&env.playground)
+            .output()
+            .unwrap();
+        assert!(
+            !leaked.status.success(),
+            "{} pass: the sub-repo's tag was fetched into the root",
+            pass
+        );
+        // Creating the cache entry ran `init --bare` on the root; updating one
+        // repointed the root's origin at the sub-repo.
+        assert_eq!(
+            rev(&env.playground, "--is-bare-repository"),
+            "false",
+            "{} pass: the root was reinitialised as bare",
+            pass
+        );
+        let origin = std::process::Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(&env.playground)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&origin.stdout).trim(),
+            "https://github.com/acme/root.git",
+            "{} pass: the root's origin was repointed",
+            pass
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Status
 // ---------------------------------------------------------------------------
@@ -1968,9 +2085,13 @@ fn subrepo_clean_excludes_come_from_its_own_config() {
     assert!(!env.playground.join("core/build.out").exists());
 }
 
+/// `recursive = false` puts the repo's own config out of reach, keep-list
+/// included, so it is cleaned by the command line's patterns alone — and what
+/// lives inside it that gitscale did not put there is left to git, which
+/// reports a nested clone rather than deleting it.
 #[test]
-fn recursive_false_leaves_a_subrepo_alone() {
-    let env = TestEnv::new("recursive_false_leaves_a_subrepo_alone");
+fn recursive_false_is_cleaned_without_its_own_keep_list() {
+    let env = TestEnv::new("recursive_false_cleaned");
     let core = env.create_bare_repo(
         "core",
         "main",
@@ -1990,22 +2111,22 @@ fn recursive_false_leaves_a_subrepo_alone() {
     std::fs::write(env.playground.join("core/envs/dev"), "x").unwrap();
     std::fs::write(env.playground.join("core/build.out"), "x").unwrap();
     std::fs::write(env.playground.join("junk.txt"), "x").unwrap();
+    // A dependency of core's own, cloned by hand: a grandchild of the workspace.
+    let grandchild = env.playground.join("core/vendor/dep");
+    std::fs::create_dir_all(&grandchild).unwrap();
+    helpers::run_git_pub(&grandchild, &["init", "-q"]);
 
     let out = env.run(&["clean", "-f"]);
     assert!(out.success, "stderr: {}", out.stderr);
-    // Its keep-list is unreadable by design, so the whole repo is left alone
-    // rather than cleaned blind.
-    assert!(env.playground.join("core/envs/dev").exists());
+    assert!(!env.playground.join("core/build.out").exists());
     assert!(
-        env.playground.join("core/build.out").exists(),
-        "recursive = false should have skipped the repo entirely"
+        !env.playground.join("core/envs/dev").exists(),
+        "a keep-list gitscale does not read cannot keep anything"
     );
     assert!(
-        out.stdout.contains("recursive = false"),
-        "stdout: {}",
-        out.stdout
+        grandchild.join(".git").exists(),
+        "a nested clone is reported, never deleted"
     );
-    // The rest of the workspace is cleaned as usual.
     assert!(!env.playground.join("junk.txt").exists());
 }
 

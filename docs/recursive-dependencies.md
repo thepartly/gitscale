@@ -153,10 +153,9 @@ place to move a checkout somebody may be working in.
 ```
 
 GitScale then does not read that repository's `.gitscale.toml` at all. It
-creates no symlinks inside it, validates none of its dependencies — and
-[`clean`](clean.md) skips it entirely, since its keep-list is out of reach and
-cleaning a repo without knowing what it wants kept is worse than leaving it
-alone.
+creates no symlinks inside it and validates none of its dependencies, and
+[`clean`](clean.md#per-repo-clean) cleans it without the keep-list that config
+would have supplied.
 
 Use it for a repository that happens to carry a `.gitscale.toml` of its own that
 this workspace has no business acting on.

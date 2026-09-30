@@ -189,6 +189,52 @@ any job script runs, and hosted runners keep no global git config between jobs.
 On runners you control, `gitscale hook install --system` works. Everywhere else,
 run `gitscale sync` (or `gitscale pull`) as an explicit step after checkout.
 
+On GitLab, a hook install needs one more line. The runner cleans the build
+directory *after* its checkout, so the hook populates the declared checkouts and
+the default `GIT_CLEAN_FLAGS` (`-ffdx`) deletes them again: they are ignored,
+and `-ff` removes nested repositories too. Exclude them from that clean, in
+`.gitlab-ci.yml` or in the runner's environment:
+
+```yaml
+variables:
+  # One -e per top-level checkout directory; gitignore syntax, anchored at
+  # the workspace root.
+  GIT_CLEAN_FLAGS: -ffdx -e /imports/
+```
+
+A missing exclude fails the checkout. In a GitLab job (`GITLAB_CI=true`), the
+hook's pull ends by asking git what the runner's clean is about to do —
+`git clean -n` with the job's own `GIT_CLEAN_FLAGS` — and if that would delete a
+declared checkout, the hook fails whatever
+[`on_pull_error`](#on_pull_error) says, with the line to add:
+
+```
+gitscale: post-checkout hook — GIT_CLEAN_FLAGS="-ffdx" would delete imports/core — GitLab Runner cleans after its checkout, so the job would start without it.
+Exclude the checkouts from that clean, in .gitlab-ci.yml or the runner's environment:
+
+    GIT_CLEAN_FLAGS: -ffdx -e /imports/
+```
+
+The job stops at *Getting source from Git repository* instead of at the first
+build step that goes looking for a sub-repository. `GIT_CLEAN_FLAGS: none`
+passes, as does anything else that leaves the checkouts where they are.
+
+Excluded, the checkouts stay in a build directory the runner keeps between jobs,
+and the next job's pull updates them in place. That is what keeps a build cache
+valid: files the new revision does not change keep their mtimes, so a tool that
+decides freshness by mtime — `cargo`, for path dependencies — does not rebuild
+them. The pull still cleans up after the previous job: under CI, once every
+checkout is at its pinned revision, the pull runs
+[`gitscale clean -f`](clean.md) on each of them — the same rules, each checkout's own `[clean]
+exclude` included, and the same report. The workspace root is not among them: it
+is the runner's to clean, and a job that pulls after restoring a build cache
+into it must not lose that cache. `sync` does not do this: it has its own rules
+for what untracked content may go, and an [orphan](recursive-dependencies.md) it
+keeps without `--force` is not removed behind its back.
+
+An explicit `gitscale pull` step needs none of the exclude — by the time a job
+script runs, the runner's clean is already done.
+
 ### Caveats
 
 - A `--global` or `--system` hook makes `git clone` and `git checkout` run
@@ -200,6 +246,10 @@ run `gitscale sync` (or `gitscale pull`) as an explicit step after checkout.
   reports it, and `--local` is the fix.
 - `gitscale hook run` is invoked by the installed hook, not by you. Run by hand
   it refuses, because the environment the shim provides is missing.
+- A file checkout — `git checkout -- <path>`, which git reports to
+  `post-checkout` with a third argument of `0` — moves no revision, and the
+  shim ignores it. Shims written by an earlier GitScale pull on it too;
+  `gitscale hook install` rewrites them.
 
 ## The hook allowlist
 

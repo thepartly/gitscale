@@ -192,6 +192,46 @@ fn shim_runs_the_chained_hook_and_honours_the_recursion_guard() {
     );
 }
 
+/// `git checkout -- <path>` fires post-checkout too, with a third argument of
+/// 0. It moves no revision, and a build restoring a file must not have its
+/// sub-repositories reset and cleaned underneath it.
+#[test]
+fn shim_ignores_a_file_checkout() {
+    let env = TestEnv::new("hook_shim_file_checkout");
+    let repo = repo_with(&env, Some("[repos]\n"));
+    assert!(cli(&["hook", "install", "--local", "-C", repo.to_str().unwrap()]).success);
+    let script = hooks_dir(&repo).join("post-checkout");
+
+    let run = |flag: &str| {
+        let out = Command::new("sh")
+            .arg(&script)
+            .args(["0000000", "0000000", flag])
+            .current_dir(&repo)
+            .env_remove("GITSCALE_HOOK")
+            .output()
+            .expect("failed to run hook");
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
+
+    // An in-process install bakes in the test binary rather than gitscale, so
+    // what the shim reaches cannot run a real pull here. Whether it reaches it
+    // at all is the question: silence means the shim stopped first.
+    let file_checkout = run("0");
+    assert!(
+        file_checkout.trim().is_empty(),
+        "a file checkout must not reach gitscale: {}",
+        file_checkout
+    );
+    assert!(
+        !run("1").trim().is_empty(),
+        "a branch checkout must still reach gitscale"
+    );
+}
+
 #[test]
 fn hook_run_rejects_an_unknown_hook_name() {
     let env = TestEnv::new("hook_run_unknown");
@@ -386,6 +426,122 @@ fn hook_status_reports_the_allowlist() {
     assert!(out.stdout.contains("hook allowlist"), "{}", out.stdout);
     assert!(out.stdout.contains("github.com/acme/*"), "{}", out.stdout);
     assert!(out.stdout.contains("NOT allowed"), "{}", out.stdout);
+}
+
+/// A monorepo that commits its own copies of the shim — `.githooks/`, pointed
+/// at by a repo-local `core.hooksPath` — is running gitscale, and status must
+/// say so rather than call them foreign and advise installing over them.
+/// Uninstall, which acts only on shims gitscale wrote, leaves them alone.
+#[test]
+fn hook_status_recognises_a_repositorys_own_copy_of_the_shim() {
+    let env = TestEnv::new("hook_status_vendored");
+    let repo = repo_with(&env, Some("[repos]\n"));
+    let root = repo.to_str().unwrap();
+
+    // Generate a real shim, then commit a copy the way the monorepo does: its
+    // own header, no gitscale marker.
+    assert!(
+        cli(&[
+            "hook",
+            "install",
+            "--local",
+            "--allow",
+            "gitlab.example/*",
+            "-C",
+            root
+        ])
+        .success
+    );
+    let vendored = repo.join(".githooks");
+    std::fs::create_dir_all(&vendored).unwrap();
+    for hook in ["post-checkout", "post-merge"] {
+        let shim = std::fs::read_to_string(hooks_dir(&repo).join(hook)).unwrap();
+        let copy: String = shim
+            .lines()
+            .map(|l| {
+                if l.starts_with("# installed by gitscale") {
+                    "# Delegate to the gitscale installed by the current environment."
+                } else {
+                    l
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(vendored.join(hook), copy).unwrap();
+    }
+    helpers::run_git_pub(&repo, &["config", "core.hooksPath", ".githooks"]);
+
+    // A global install is what the repo-local path shadows.
+    let home = isolated_home(&env);
+    std::fs::write(
+        home.join(".gitconfig"),
+        "[core]\n\thooksPath = /etc/gitscale/hooks\n",
+    )
+    .unwrap();
+
+    let out = cli_isolated(&home, &["hook", "status", "-C", root]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(
+        out.stdout.contains("gitscale (repository's own copy)"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        !out.stdout.contains("other (not gitscale)"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("run gitscale, so nothing is lost"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        !out.stdout.contains("hook install --local"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("gitlab.example/*"),
+        "its allowlist: {}",
+        out.stdout
+    );
+
+    // Committed files are the repository's, not gitscale's to remove.
+    assert!(cli_isolated(&home, &["hook", "uninstall", "--local", "-C", root]).success);
+    assert!(vendored.join("post-checkout").exists());
+    assert!(vendored.join("post-merge").exists());
+}
+
+/// Without copies of its own in the repo's hooks directory, the advice stands.
+#[test]
+fn hook_status_still_flags_a_repo_path_that_runs_no_gitscale() {
+    let env = TestEnv::new("hook_status_shadowed");
+    let repo = repo_with(&env, Some("[repos]\n"));
+    let root = repo.to_str().unwrap();
+    let own = repo.join(".githooks");
+    std::fs::create_dir_all(&own).unwrap();
+    std::fs::write(own.join("post-checkout"), "#!/bin/sh\necho lint\n").unwrap();
+    helpers::run_git_pub(&repo, &["config", "core.hooksPath", ".githooks"]);
+    let home = isolated_home(&env);
+    std::fs::write(
+        home.join(".gitconfig"),
+        "[core]\n\thooksPath = /etc/gitscale/hooks\n",
+    )
+    .unwrap();
+
+    let out = cli_isolated(&home, &["hook", "status", "-C", root]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(
+        out.stdout.contains("other (not gitscale)"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("hook install --local"),
+        "{}",
+        out.stdout
+    );
 }
 
 /// The reported attack, end to end: a global hook is installed, an attacker's

@@ -5,7 +5,7 @@ use std::path::Path;
 
 use crate::commands::clone::filter_entries;
 use crate::config::{find_config, load_config};
-use crate::git::push_repo;
+use crate::git::{is_detached, push_repo};
 use crate::progress::{run_parallel, RepoStatus};
 
 pub fn run(
@@ -46,6 +46,11 @@ pub fn run(
             let dest = config_root.join(&entry.directory);
             if !dest.exists() {
                 return RepoStatus::Skip(format!("{} (not cloned)", name));
+            }
+            // A tag or SHA pin checks out detached: there is no branch to
+            // push, and `git push` would fail the whole sync over it.
+            if is_detached(entry, &config_root) {
+                return RepoStatus::Skip(format!("{} (detached HEAD)", name));
             }
 
             match push_repo(entry, &config_root, verbose) {

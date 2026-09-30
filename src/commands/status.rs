@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use crate::cache::{self, Cache};
 use crate::commands::cache as cache_cmd;
@@ -134,7 +134,7 @@ pub fn run(
 /// uncommitted changes or unpushed commits.
 fn is_tree_modified(path: &Path) -> bool {
     // Check if this repo itself is dirty
-    let dirty = Command::new("git")
+    let dirty = crate::git::git_command()
         .args(["status", "--porcelain"])
         .current_dir(path)
         .stdin(Stdio::null())
@@ -146,7 +146,7 @@ fn is_tree_modified(path: &Path) -> bool {
     }
 
     // Check if there are unpushed commits
-    let ahead = Command::new("git")
+    let ahead = crate::git::git_command()
         .args(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
         .current_dir(path)
         .stdin(Stdio::null())

@@ -14,12 +14,48 @@ pub fn is_ci() -> bool {
         .unwrap_or(false)
 }
 
+/// Variables that tell git which repository to operate on, whatever the working
+/// directory — the location half of `git rev-parse --local-env-vars`. The
+/// config half (`GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`) is kept: CI
+/// runners pass credentials through it, and git's own submodule code keeps it
+/// for the same reason.
+const REPO_LOCATION_ENV: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_SHALLOW_FILE",
+    "GIT_GRAFT_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_CONFIG",
+];
+
+/// A `git` command that finds its repository from the working directory.
+///
+/// gitscale runs inside git hooks, and git exports `GIT_DIR` to them — during
+/// `git clone`, as the absolute path of the new clone's `.git`. Inherited, it
+/// sends every command meant for a sub-repository to the root instead: a
+/// pinned tag "does not exist" because the root has no such tag, and a
+/// checkout of a branch the root does have moves the root.
+pub(crate) fn git_command() -> Command {
+    let mut cmd = Command::new("git");
+    for var in REPO_LOCATION_ENV {
+        cmd.env_remove(var);
+    }
+    cmd
+}
+
 pub(crate) fn run_git(
     args: &[&str],
     cwd: Option<&Path>,
     check: bool,
 ) -> Result<std::process::Output> {
-    let mut cmd = Command::new("git");
+    let mut cmd = git_command();
     // Under CI, teach git how to authenticate to the CI server. Scoped to that
     // one host, and carrying the name of the token variable rather than the
     // token, so nothing secret reaches argv or a config file.
@@ -61,16 +97,19 @@ fn git_error_line(stderr: &str) -> &str {
         .unwrap_or("unknown error")
 }
 
-/// The message to report for a failed git call. A 403 from the CI server is
-/// the failure people actually hit: the token is valid but the target project
-/// has not allowed this one to read it, and git's own wording gives no clue.
+/// The message to report for a failed git call. Two failures need more than
+/// git's own wording. A 403 from the CI server: the token is valid but the
+/// target project has not allowed this one to read it. And an ssh key refused
+/// over SSH: often one whose passphrase gitscale could not ask for.
 fn git_failure(stderr: &str, auth: Option<&crate::ci::CiAuth>) -> String {
     let line = git_error_line(stderr);
-    match auth {
-        Some(auth) if stderr.contains("403") => {
-            format!("{}\nhint: {}", line, auth.forbidden_hint())
-        }
-        _ => line.to_string(),
+    let hint = match auth {
+        Some(auth) if stderr.contains("403") => Some(auth.forbidden_hint()),
+        _ => crate::ssh::failure_hint(stderr),
+    };
+    match hint {
+        Some(hint) => format!("{}\nhint: {}", line, hint),
+        None => line.to_string(),
     }
 }
 
@@ -582,17 +621,22 @@ pub fn pull_repo(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source)
                     Some(&dest),
                     true,
                 )?;
+                // Detach rather than reset: a checkout moved here from a
+                // branch pin would otherwise drag that branch to this commit.
                 run_git(
-                    &["reset", "--hard", "--quiet", "FETCH_HEAD"],
+                    &["checkout", "--quiet", "-f", "--detach", "FETCH_HEAD"],
                     Some(&dest),
                     true,
                 )?;
             } else if source.local.is_some() {
                 fetch_from_cache(&dest, source)?;
-                run_git(&["reset", "--hard", "@{upstream}"], Some(&dest), false)?;
-            } else {
+                land_shallow(entry, &dest)?;
+            } else if entry.revision.is_empty() {
                 run_git(&["fetch", "--depth", "1", "--quiet"], Some(&dest), true)?;
                 run_git(&["reset", "--hard", "@{upstream}"], Some(&dest), false)?;
+            } else {
+                fetch_shallow_revision(entry, &dest)?;
+                land_shallow(entry, &dest)?;
             }
             return Ok(());
         }
@@ -612,6 +656,136 @@ pub fn pull_repo(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source)
         apply_readonly(&dest)?;
     }
     result
+}
+
+/// Fetch the ref `entry.revision` names into a shallow checkout, at depth 1 —
+/// a branch into its tracking ref, a tag as itself.
+///
+/// Named explicitly because a shallow checkout's default refspec is the one
+/// branch it was cloned at: a plain `fetch` never brings a tag, or another
+/// branch, that the config has since moved to.
+fn fetch_shallow_revision(entry: &RepoEntry, dest: &Path) -> Result<()> {
+    let rev = &entry.revision;
+    // Branch first, then tag: the order `clone --branch` resolves a name in.
+    let specs = [
+        format!("+refs/heads/{0}:refs/remotes/origin/{0}", rev),
+        format!("+refs/tags/{0}:refs/tags/{0}", rev),
+    ];
+    for spec in &specs {
+        let fetched = run_git(
+            &[
+                "fetch",
+                "--depth",
+                "1",
+                "--quiet",
+                "--no-tags",
+                "origin",
+                spec,
+            ],
+            Some(dest),
+            false,
+        )?;
+        if fetched.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&fetched.stderr);
+        // Anything but "no such ref" is a real failure — auth, network — and
+        // must not be reported as a revision that does not exist.
+        if !stderr.contains("couldn't find remote ref") {
+            bail!("{}", git_failure(&stderr, ci::active()));
+        }
+    }
+    bail!(
+        "revision '{}' does not exist in {}",
+        entry.revision,
+        entry.directory
+    );
+}
+
+/// Move a shallow checkout to `entry.revision`, leaving it where
+/// `clone --depth 1 --branch` would have: on the branch and tracking it, or
+/// detached at a tag. Tracked files are forced to match, as `reset --hard`
+/// did; files that do not change keep their mtimes.
+fn land_shallow(entry: &RepoEntry, dest: &Path) -> Result<()> {
+    let rev = &entry.revision;
+    if rev.is_empty() {
+        run_git(&["reset", "--hard", "@{upstream}"], Some(dest), false)?;
+        return Ok(());
+    }
+    let tracking = format!("refs/remotes/origin/{}", rev);
+    if ref_exists(dest, &tracking) {
+        run_git(
+            &["checkout", "--quiet", "-f", "-B", rev, &tracking],
+            Some(dest),
+            true,
+        )?;
+        track_branch(dest, rev)?;
+        return Ok(());
+    }
+    let tag = format!("refs/tags/{}", rev);
+    if ref_exists(dest, &format!("{}^{{commit}}", tag)) {
+        run_git(
+            &["checkout", "--quiet", "-f", "--detach", &tag],
+            Some(dest),
+            true,
+        )?;
+        return Ok(());
+    }
+    bail!(
+        "revision '{}' does not exist in {}",
+        entry.revision,
+        entry.directory
+    );
+}
+
+fn ref_exists(dest: &Path, name: &str) -> bool {
+    run_git(
+        &["rev-parse", "--verify", "--quiet", name],
+        Some(dest),
+        false,
+    )
+    .map(|o| o.status.success())
+    .unwrap_or(false)
+}
+
+/// Make `branch` track `origin/<branch>`, as a clone at that branch does.
+///
+/// A single-branch clone's refspec maps only the branch it was cloned at, and
+/// `@{upstream}` resolves only through a refspec — so a checkout moved to
+/// another branch needs one for it, or status could no longer count ahead and
+/// behind.
+fn track_branch(dest: &Path, branch: &str) -> Result<()> {
+    let spec = format!("+refs/heads/{0}:refs/remotes/origin/{0}", branch);
+    let listed = run_git(
+        &["config", "--get-all", "remote.origin.fetch"],
+        Some(dest),
+        false,
+    )?;
+    let covered = stdout_str(&listed)
+        .lines()
+        .any(|line| line == spec || line == "+refs/heads/*:refs/remotes/origin/*");
+    if !covered {
+        run_git(
+            &["config", "--add", "remote.origin.fetch", &spec],
+            Some(dest),
+            true,
+        )?;
+    }
+    run_git(
+        &["config", &format!("branch.{}.remote", branch), "origin"],
+        Some(dest),
+        true,
+    )?;
+    run_git(
+        &[
+            "config",
+            &format!("branch.{}.merge", branch),
+            &format!("refs/heads/{}", branch),
+        ],
+        Some(dest),
+        true,
+    )?;
+    Ok(())
 }
 
 pub fn push_repo(entry: &RepoEntry, root: &Path, _verbose: bool) -> Result<()> {
