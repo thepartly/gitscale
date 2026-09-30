@@ -1960,6 +1960,141 @@ fn shallow_pull_pinned_to_sha_moves_to_new_sha() {
     );
 }
 
+/// Tag `sha` in the bare repo, and push an unrelated branch whose tip must not
+/// be downloaded by a pull that only needs the tag.
+#[cfg(test)]
+fn tag_with_unrelated_branch(bare: &std::path::Path, tag: &str, sha: &str) -> String {
+    helpers::run_git_pub(bare, &["tag", tag, sha]);
+    let tmp = bare.with_extension("unrelated.tmp");
+    let _ = std::fs::remove_dir_all(&tmp);
+    helpers::run_git_pub(
+        bare.parent().unwrap(),
+        &["clone", "-q", bare.to_str().unwrap(), tmp.to_str().unwrap()],
+    );
+    helpers::run_git_pub(&tmp, &["config", "user.email", "test@test.com"]);
+    helpers::run_git_pub(&tmp, &["config", "user.name", "Test"]);
+    helpers::run_git_pub(&tmp, &["checkout", "-q", "--orphan", "unrelated"]);
+    std::fs::write(tmp.join("b.txt"), "b").unwrap();
+    helpers::run_git_pub(&tmp, &["add", "-A"]);
+    helpers::run_git_pub(&tmp, &["commit", "-q", "-m", "unrelated"]);
+    helpers::run_git_pub(&tmp, &["push", "-q", "origin", "unrelated"]);
+    let unrelated = git_stdout(&tmp, &["rev-parse", "HEAD"]);
+    let _ = std::fs::remove_dir_all(&tmp);
+    unrelated
+}
+
+#[cfg(test)]
+fn has_commit(dest: &std::path::Path, sha: &str) -> bool {
+    std::process::Command::new("git")
+        .args(["cat-file", "-e", &format!("{}^{{commit}}", sha)])
+        .current_dir(dest)
+        .status()
+        .unwrap()
+        .success()
+}
+
+#[test]
+fn shallow_pull_from_sha_to_tag_fetches_only_the_tag() {
+    let env = TestEnv::new("shallow_pull_sha_to_tag");
+    let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "v1")]);
+    let url = format!("file://{}", bare.display());
+    let first = bare_git_stdout(&bare, &["rev-parse", "main"]);
+    gitscale::git::clone_repo(
+        &shallow_entry(&url, &first),
+        &env.playground,
+        false,
+        &shallow_source(),
+    )
+    .unwrap();
+
+    let second = commit_to_bare(&bare, "main", "a.txt", "v2");
+    let unrelated = tag_with_unrelated_branch(&bare, "snapshot-1", &second);
+
+    gitscale::git::pull_repo(
+        &shallow_entry(&url, "snapshot-1"),
+        &env.playground,
+        false,
+        &shallow_source(),
+    )
+    .expect("shallow pull from a SHA pin to a tag should succeed");
+
+    let dest = env.playground.join("libs/mylib");
+    assert_eq!(git_stdout(&dest, &["rev-parse", "HEAD"]), second);
+    assert!(
+        !has_commit(&dest, &unrelated),
+        "pull should not download other branches"
+    );
+    assert_eq!(
+        git_stdout(&dest, &["rev-parse", "--is-shallow-repository"]),
+        "true"
+    );
+}
+
+#[test]
+fn shallow_pull_pinned_to_tag_moves_to_new_tag() {
+    let env = TestEnv::new("shallow_pull_tag");
+    let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "v1")]);
+    let url = format!("file://{}", bare.display());
+    let first = bare_git_stdout(&bare, &["rev-parse", "main"]);
+    helpers::run_git_pub(&bare, &["tag", "snapshot-1", &first]);
+    gitscale::git::clone_repo(
+        &shallow_entry(&url, "snapshot-1"),
+        &env.playground,
+        false,
+        &shallow_source(),
+    )
+    .unwrap();
+
+    let second = commit_to_bare(&bare, "main", "a.txt", "v2");
+    let unrelated = tag_with_unrelated_branch(&bare, "snapshot-2", &second);
+
+    gitscale::git::pull_repo(
+        &shallow_entry(&url, "snapshot-2"),
+        &env.playground,
+        false,
+        &shallow_source(),
+    )
+    .expect("shallow pull to a new tag should succeed");
+
+    let dest = env.playground.join("libs/mylib");
+    assert_eq!(git_stdout(&dest, &["rev-parse", "HEAD"]), second);
+    assert!(
+        !has_commit(&dest, &unrelated),
+        "pull should not download other branches"
+    );
+}
+
+#[test]
+fn shallow_pull_pinned_to_branch_moves_to_its_tip() {
+    let env = TestEnv::new("shallow_pull_branch");
+    let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "v1")]);
+    let url = format!("file://{}", bare.display());
+    gitscale::git::clone_repo(
+        &shallow_entry(&url, "main"),
+        &env.playground,
+        false,
+        &shallow_source(),
+    )
+    .unwrap();
+
+    let second = commit_to_bare(&bare, "main", "a.txt", "v2");
+
+    gitscale::git::pull_repo(
+        &shallow_entry(&url, "main"),
+        &env.playground,
+        false,
+        &shallow_source(),
+    )
+    .expect("shallow pull of a branch should succeed");
+
+    let dest = env.playground.join("libs/mylib");
+    assert_eq!(git_stdout(&dest, &["rev-parse", "HEAD"]), second);
+    assert_eq!(
+        git_stdout(&dest, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "main"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Clean
 // ---------------------------------------------------------------------------

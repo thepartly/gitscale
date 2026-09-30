@@ -546,39 +546,6 @@ fn walkdir_recursive(root: &Path, dir: &Path, result: &mut Vec<WalkEntry>) {
     }
 }
 
-pub fn sync_repo(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source) -> Result<()> {
-    if entry.is_artefact() {
-        return Ok(());
-    }
-    let dest = root.join(&entry.directory);
-    if !is_checkout(&dest) {
-        return clone_repo(entry, root, verbose, source);
-    }
-
-    if entry.is_readonly() {
-        restore_writable(&dest)?;
-    }
-
-    let result = (|| -> Result<()> {
-        fetch_repo(entry, root, source)?;
-        if is_shallow(&dest) {
-            run_git(&["reset", "--hard", "@{upstream}"], Some(&dest), false)?;
-        } else {
-            checkout_revision(entry, root)?;
-            let head_ref = get_current_ref(entry, root)?;
-            if !head_ref.is_empty() && !is_detached(entry, root) {
-                fast_forward(&dest, source)?;
-            }
-        }
-        Ok(())
-    })();
-
-    if entry.is_readonly() {
-        apply_readonly(&dest)?;
-    }
-    result
-}
-
 /// Fast-forward the checked-out branch to its upstream.
 ///
 /// With a cache entry behind it the tracking ref was just updated from there,
