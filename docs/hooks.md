@@ -77,7 +77,9 @@ This is how a workspace is normally set up: `git clone` and nothing else. The
 pull the hook fires also honours
 [`[cache] adopt_root`](caching.md#adopting-a-root-repository), so the root
 repository joins the [object cache](caching.md) on the way — something plain
-`git clone` cannot do for itself.
+`git clone` cannot do for itself. The pull a `git worktree add` fires leaves
+adoption alone: a linked worktree shares the main worktree's object store, so
+only a pull in the main worktree adopts it.
 
 ### Scopes
 

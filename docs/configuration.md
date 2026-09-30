@@ -103,7 +103,7 @@ The [object cache](caching.md).
 | `enabled` | bool | `true` | Use the object cache. `false` makes every clone and fetch talk to the remote directly, as `--no-cache` does per command |
 | `dir` | string | `""` | Where entries live. Empty means the default location — see [where the cache lives](caching.md#where-the-cache-lives). A leading `~/` is expanded |
 | `dissociate` | bool | `false` | Copy objects borrowed from the cache into each workspace and drop the link. Costs the disk saving, keeps the network one — see [dissociate](caching.md#copying-instead-of-borrowing-dissociate) |
-| `adopt_root` | bool | `false` | Relink a workspace root cloned by plain `git clone` to the cache, reclaiming its duplicate objects — see [adopting a root repository](caching.md#adopting-a-root-repository) |
+| `adopt_root` | bool | `false` | Relink a workspace root cloned by plain `git clone` to the cache, reclaiming its duplicate objects. Skipped for shallow clones and linked worktrees; [`cache adopt`](caching.md#cache-adopt) does it on demand — see [adopting a root repository](caching.md#adopting-a-root-repository) |
 
 The cache is per-user by design; there is no system-wide scope and no key to
 create one.

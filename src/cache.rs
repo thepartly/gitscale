@@ -226,14 +226,32 @@ impl Cache {
     /// Local, no network. `repack -a -d -l` deletes the repository's own
     /// objects, so a repository that stood on its own comes out depending on
     /// the cache — recoverable with `cache repair`, but the user's call, which
-    /// is why nothing here runs unless `[cache] adopt_root` says so.
-    pub fn adopt(&self, repo: &Path, url: &str) -> Result<bool> {
+    /// is why nothing here runs unless `[cache] adopt_root` or
+    /// `gitscale cache adopt` says so.
+    pub fn adopt(&self, repo: &Path, url: &str) -> Result<Adoption> {
         // A repository that already borrows is already thin, and whatever it
         // borrows from is not necessarily this cache. Overwriting that pointer
         // and then repacking with `-l` would leave it unable to read objects
         // it never owned — so anything with an alternate is left alone.
         if !alternates_of(repo).is_empty() {
-            return Ok(false);
+            return Ok(if borrowed_from(repo, &self.root).is_some() {
+                Adoption::Already
+            } else {
+                Adoption::Borrowing
+            });
+        }
+        // Git will not take refs from a shallow repository into a full one:
+        // the fetch rejects every ref, exits zero, and leaves the objects in
+        // the entry with nothing pointing at them. Relinking on top of that
+        // makes the repository depend on unreferenced objects in an entry that
+        // serves nobody. A shallow mirror is no answer either — `--reference`
+        // refuses one — so a shallow root keeps its own objects.
+        if crate::git::is_shallow(repo) {
+            return Ok(Adoption::Shallow);
+        }
+        let wanted = remote_tracking(repo)?;
+        if wanted.is_empty() {
+            return Ok(Adoption::Empty);
         }
         let path = self.mirror_path(url);
         let _lock = self.lock(&path)?;
@@ -252,6 +270,28 @@ impl Cache {
             ],
             true,
         )?;
+        // A fetch can reject refs and still exit zero. Nothing below may run
+        // unless the entry really holds what the repository is about to stop
+        // owning: the repack deletes it.
+        for (branch, sha) in &wanted {
+            let held = git_in(
+                &path,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{}", branch),
+                ],
+                false,
+            )?;
+            if String::from_utf8_lossy(&held.stdout).trim() != sha {
+                bail!(
+                    "the cache entry did not take origin/{} from {}; left it as it was",
+                    branch,
+                    repo.display()
+                );
+            }
+        }
         let alternates = crate::git::git_path(repo, "objects/info/alternates")
             .context("cannot locate the object store to relink")?;
         if let Some(parent) = alternates.parent() {
@@ -261,7 +301,28 @@ impl Cache {
             .with_context(|| format!("cannot write {}", alternates.display()))?;
         crate::git::repack_local(repo)?;
         touch(&path.join(LAST_USED));
-        Ok(true)
+        Ok(Adoption::Adopted)
+    }
+
+    /// Whether `repo` borrows from an entry in this cache.
+    pub fn borrows(&self, repo: &Path) -> bool {
+        borrowed_from(repo, &self.root).is_some()
+    }
+
+    /// Mark the entry `repo` borrows from as wanted, if it borrows from one.
+    ///
+    /// Sub-repositories keep their entries alive by being pulled through them.
+    /// A workspace root is not: `git pull` in it talks to the remote and never
+    /// comes near the cache. Without this, `compact` would evict the entry an
+    /// adopted — or `gitscale clone <url>`-made — root borrows from once
+    /// `--keep-recent` passed, however busy that workspace was, and leave it
+    /// unable to read its own history.
+    pub fn keep_alive(&self, repo: &Path) {
+        if let Some(entry) = borrowed_from(repo, &self.root) {
+            if is_entry(&entry) {
+                touch(&entry.join(LAST_USED));
+            }
+        }
     }
 
     /// Re-create the entry `repo` borrows from, after something deleted it.
@@ -463,6 +524,21 @@ pub struct Revision {
 pub struct Usage {
     pub entries: usize,
     pub bytes: u64,
+}
+
+/// What [`Cache::adopt`] did with a repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Adoption {
+    /// Seeded an entry from it, relinked it and reclaimed its objects.
+    Adopted,
+    /// It already borrows from this cache.
+    Already,
+    /// It borrows from somewhere else, which adopting would cut it off from.
+    Borrowing,
+    /// A shallow clone, which no mirror can take refs from.
+    Shallow,
+    /// No remote-tracking refs: nothing an entry could hold.
+    Empty,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -683,6 +759,26 @@ fn alternates_of(repo: &Path) -> Vec<PathBuf> {
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(PathBuf::from)
         .collect()
+}
+
+/// `repo`'s remote-tracking branches, as `(branch, sha)` — what adopting it
+/// seeds an entry with.
+fn remote_tracking(repo: &Path) -> Result<Vec<(String, String)>> {
+    let listed = crate::git::run_git(
+        &[
+            "for-each-ref",
+            "--format=%(refname:lstrip=3) %(objectname)",
+            "refs/remotes/origin/",
+        ],
+        Some(repo),
+        true,
+    )?;
+    Ok(String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .filter(|(branch, _)| *branch != "HEAD")
+        .map(|(branch, sha)| (branch.to_string(), sha.to_string()))
+        .collect())
 }
 
 /// The cache entry `repo` borrows from, if it borrows from one inside `root`.

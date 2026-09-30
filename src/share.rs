@@ -99,7 +99,7 @@ pub fn source_workspace(root: &Path) -> Option<PathBuf> {
 
 /// The main worktree of the repository at `root`, when `root` is some *other*
 /// worktree of it.
-fn main_worktree(root: &Path) -> Option<PathBuf> {
+pub(crate) fn main_worktree(root: &Path) -> Option<PathBuf> {
     let listing = git_query(&["worktree", "list", "--porcelain"], root)?;
     // `worktree list` always names the main worktree first, whichever worktree
     // it is asked from. That ordering is what makes the "never borrow from a
@@ -107,6 +107,20 @@ fn main_worktree(root: &Path) -> Option<PathBuf> {
     let first = listing.lines().next()?.strip_prefix("worktree ")?;
     let main = PathBuf::from(first);
     (!same_dir(&main, root)).then_some(main)
+}
+
+/// Every worktree of the repository at `root`, the main one first — the set
+/// that shares one object store, and so everything that relinking it touches.
+pub(crate) fn worktrees(root: &Path) -> Vec<PathBuf> {
+    git_query(&["worktree", "list", "--porcelain"], root)
+        .map(|listing| {
+            listing
+                .lines()
+                .filter_map(|line| line.strip_prefix("worktree "))
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The workspace whose object store `root` already borrows from.

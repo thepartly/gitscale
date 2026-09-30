@@ -177,8 +177,7 @@ fn local_hooks_dir(repo: &Path) -> Result<(PathBuf, bool)> {
 /// `status` must report: anything else would say "not installed" about a hook
 /// that is demonstrably running.
 fn active_hooks_dir(repo: &Path) -> Result<(PathBuf, bool)> {
-    let repo_chose_it =
-        git_config_get(Some(Scope::Local), "core.hooksPath", Some(repo)).is_some();
+    let repo_chose_it = git_config_get(Some(Scope::Local), "core.hooksPath", Some(repo)).is_some();
     match git_config_get(None, "core.hooksPath", Some(repo)) {
         Some(path) => Ok((resolve_hooks_path(repo, &path), repo_chose_it)),
         None => {
@@ -336,8 +335,11 @@ pub fn install(
             chain = existing_chain(&target);
         }
 
-        std::fs::write(&target, shim_source(hook, &binary, chain.as_deref(), &allow))
-            .with_context(|| format!("cannot write {}", target.display()))?;
+        std::fs::write(
+            &target,
+            shim_source(hook, &binary, chain.as_deref(), &allow),
+        )
+        .with_context(|| format!("cannot write {}", target.display()))?;
         make_executable(&target)?;
         writeln!(out, "  installed {}", target.display())?;
     }
@@ -389,7 +391,9 @@ fn resolve_allow(scope: Scope, dir: &Path, requested: Option<&str>) -> Result<St
 fn existing_allow(dir: &Path) -> Option<String> {
     HOOKS.iter().find_map(|hook| {
         let target = dir.join(hook);
-        is_shim(&target).then(|| shim_field(&target, "ALLOW")).flatten()
+        is_shim(&target)
+            .then(|| shim_field(&target, "ALLOW"))
+            .flatten()
     })
 }
 

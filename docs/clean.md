@@ -8,6 +8,7 @@
   - [Per-repo `[clean]`](#per-repo-clean)
   - [`--exclude` on the command line](#--exclude-on-the-command-line)
 - [What is skipped](#what-is-skipped)
+- [A directory holding no repository](#a-directory-holding-no-repository)
 - [Nested repositories GitScale does not manage](#nested-repositories-gitscale-does-not-manage)
 
 ## What it does
@@ -149,7 +150,25 @@ repository's own `[clean]` table. An empty pattern, or one starting with `-`
 | `artefact` | No working tree to clean; the directory's contents are managed by `pull` |
 | `not cloned` | The directory does not exist |
 | `symlink` | A deduped [recursive dependency](recursive-dependencies.md); the real checkout is cleaned under its own name |
-| `not a git repository` | The directory exists but is not the top level of a repository. For the workspace root this is only reported when `.` was asked for by name — a workspace that is not itself a repository is an ordinary setup, not a problem |
+| `not a git repository` | The directory has a `.git` but is not the top level of a working repository — a damaged checkout, which may still hold the only copy of somebody's work. For the workspace root this is only reported when `.` was asked for by name — a workspace that is not itself a repository is an ordinary setup, not a problem |
+| `holds no repository, but another declared checkout is inside it` | See [below](#a-directory-holding-no-repository) |
+
+## A directory holding no repository
+
+An entry's directory can exist with no repository in it at all — no `.git` —
+after a failed clone, an interrupted delete, an outside cleaner, or a CI cache
+restored into a path whose checkout was not. [`pull`](workflow.md#pull) refuses
+to clone over one that holds files, and nothing inside it belongs to a
+checkout, so `clean` **removes the whole directory**. The dry run lists it as
+`./ (the whole directory: it holds no repository)`. A clean always leaves the
+workspace in a state the next `pull` can complete from.
+
+`--exclude` patterns and `[clean] exclude` do not apply: they describe
+untracked files inside a repository, and there is no repository here.
+
+The one exception is a directory that another declared checkout sits inside,
+present on disk — `libs/core` holding `libs/core/vendor`. Removing it would
+take that checkout with it, so it is skipped and reported instead.
 
 ## Nested repositories GitScale does not manage
 

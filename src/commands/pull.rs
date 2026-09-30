@@ -126,7 +126,7 @@ fn pull_inner(
     }
 
     // Re-resolve symlinks after pull (child configs may have changed)
-    crate::resolve::resolve_and_link(&config.repos, &config_root, false, out)?;
+    crate::resolve::resolve_and_link(&config.repos, &config_root, false)?;
 
     // A pull updates tracked files in place, which is what keeps unchanged
     // files' mtimes — and so a build cache — valid across jobs. The price is

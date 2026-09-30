@@ -121,7 +121,7 @@ fn relink(
     }
 
     // Restore symlinks for any that were removed
-    create_symlinks(&symlinks, config_root, out)?;
+    create_symlinks(&symlinks, config_root)?;
 
     if skipped > 0 || orphan_skipped > 0 {
         let mut parts = Vec::new();

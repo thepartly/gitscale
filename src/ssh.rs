@@ -113,7 +113,8 @@ fn agent() -> Agent {
 mod tests {
     use super::{hint, remote_of, Agent};
 
-    const DENIED: &str = "** WARNING: connection is not using a post-quantum key exchange algorithm.\n\
+    const DENIED: &str =
+        "** WARNING: connection is not using a post-quantum key exchange algorithm.\n\
                           git@github.com: Permission denied (publickey).\n\
                           fatal: Could not read from remote repository.";
 
@@ -121,7 +122,10 @@ mod tests {
     fn ignores_failures_other_than_ssh_auth() {
         let stderr = "fatal: repository 'https://example.com/x.git/' not found";
         assert_eq!(hint(stderr, Agent::Missing, false), None);
-        assert_eq!(hint("Host key verification failed.", Agent::Empty, false), None);
+        assert_eq!(
+            hint("Host key verification failed.", Agent::Empty, false),
+            None
+        );
     }
 
     #[test]

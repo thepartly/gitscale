@@ -55,7 +55,10 @@ pub fn validate_spec(spec: &str) -> Result<()> {
         );
     }
     if Allowlist::parse(spec).patterns.is_empty() {
-        bail!("--allow was given no patterns (use '{}' to allow every repository)", ALLOW_ANY);
+        bail!(
+            "--allow was given no patterns (use '{}' to allow every repository)",
+            ALLOW_ANY
+        );
     }
     Ok(())
 }
@@ -293,20 +296,41 @@ mod tests {
     #[test]
     fn a_comma_separated_list_is_a_union() {
         let spec = "git.internal.example/*, github.com/thepartly/*, gitlab.com/acme/tooling";
-        assert!(allows(spec, &workspace("git@git.internal.example:any/thing.git")));
-        assert!(allows(spec, &workspace("https://github.com/thepartly/anything")));
-        assert!(allows(spec, &workspace("https://gitlab.com/acme/tooling.git")));
+        assert!(allows(
+            spec,
+            &workspace("git@git.internal.example:any/thing.git")
+        ));
+        assert!(allows(
+            spec,
+            &workspace("https://github.com/thepartly/anything")
+        ));
+        assert!(allows(
+            spec,
+            &workspace("https://gitlab.com/acme/tooling.git")
+        ));
         assert!(!allows(spec, &workspace("https://gitlab.com/acme/other")));
     }
 
     #[test]
     fn ssh_and_https_spellings_are_the_same_repository() {
         let spec = "github.com/thepartly/gitscale";
-        assert!(allows(spec, &workspace("git@github.com:thepartly/gitscale.git")));
-        assert!(allows(spec, &workspace("https://github.com/thepartly/gitscale.git")));
-        assert!(allows(spec, &workspace("ssh://git@github.com/thepartly/gitscale")));
+        assert!(allows(
+            spec,
+            &workspace("git@github.com:thepartly/gitscale.git")
+        ));
+        assert!(allows(
+            spec,
+            &workspace("https://github.com/thepartly/gitscale.git")
+        ));
+        assert!(allows(
+            spec,
+            &workspace("ssh://git@github.com/thepartly/gitscale")
+        ));
         // Forges treat owner and repository names case-insensitively.
-        assert!(allows(spec, &workspace("https://GitHub.com/ThePartly/GitScale")));
+        assert!(allows(
+            spec,
+            &workspace("https://GitHub.com/ThePartly/GitScale")
+        ));
     }
 
     #[test]

@@ -787,6 +787,240 @@ fn adopting_is_off_unless_the_config_asks_for_it() {
     );
 }
 
+/// A root repository declaring `libs/core`, with `extra` added under
+/// `[cache]`, and a second commit so that a depth-1 clone of it is shallow.
+fn adoptable_root(env: &TestEnv, extra: &str) -> std::path::PathBuf {
+    let core = env.create_bare_repo("core", "main", &[("a.txt", "a")]);
+    let root = env.create_bare_repo(
+        "root",
+        "main",
+        &[(
+            ".gitscale.toml",
+            &format!(
+                "[cache]\ndir = \"{}\"\n{}\n{}",
+                env.cache.display(),
+                extra,
+                config_for(&core.display().to_string())
+            ),
+        )],
+    );
+    set_head(&root, "main");
+    commit_to_bare(&root, "main", "README.md", "hi");
+    root
+}
+
+fn clone_by_hand(env: &TestEnv, url: &str, extra: &[&str]) -> std::path::PathBuf {
+    let ws = env.playground.join("ws");
+    let mut args = vec!["clone", "--quiet"];
+    args.extend_from_slice(extra);
+    args.extend_from_slice(&[url, ws.to_str().unwrap()]);
+    git(&env.playground, &args);
+    ws
+}
+
+#[test]
+fn cache_adopt_relinks_a_root_without_the_config_asking() {
+    let env = TestEnv::new("cache_adopt_command");
+    let root = adoptable_root(&env, "");
+    let ws = clone_by_hand(&env, root.to_str().unwrap(), &[]);
+
+    let out = gitscale::run_cli_with(
+        &["gitscale", "cache", "adopt", "-C", ws.to_str().unwrap()],
+        false,
+    );
+    assert!(out.success, "{:?}", out.stderr);
+    assert!(out.stdout.contains("Adopted"), "{}", out.stdout);
+    let alternates = alternates_of(&ws).expect("the root should now borrow from the cache");
+    assert!(
+        Path::new(&alternates).starts_with(env.cache.canonicalize().unwrap()),
+        "it should point into the cache: {}",
+        alternates
+    );
+    assert!(git_ok(&ws, &["fsck", "--no-progress"]));
+
+    let again = gitscale::run_cli_with(
+        &["gitscale", "cache", "adopt", "-C", ws.to_str().unwrap()],
+        false,
+    );
+    assert!(again.success, "{:?}", again.stderr);
+    assert!(
+        again.stdout.contains("already borrows from the cache"),
+        "{}",
+        again.stdout
+    );
+}
+
+#[test]
+fn adopting_leaves_a_shallow_root_alone() {
+    let env = TestEnv::new("cache_adopt_shallow");
+    let root = adoptable_root(&env, "adopt_root = true");
+    // `file://`, or git ignores `--depth` for a local path.
+    let url = format!("file://{}", root.display());
+    let ws = clone_by_hand(&env, &url, &["--depth", "1"]);
+    assert_eq!(git(&ws, &["rev-parse", "--is-shallow-repository"]), "true");
+
+    let out = gitscale::run_cli_with(&["gitscale", "pull", "-C", ws.to_str().unwrap()], false);
+    assert!(out.success, "{:?}", out.stderr);
+    assert!(!out.stdout.contains("adopt"), "{}", out.stdout);
+    assert_eq!(
+        alternates_of(&ws),
+        None,
+        "a mirror cannot take refs from a shallow clone, so the root must keep its own objects"
+    );
+    assert!(
+        env.playground.join("ws/libs/core/a.txt").is_file(),
+        "the sub-repositories are still served as usual"
+    );
+
+    let out = gitscale::run_cli_with(
+        &["gitscale", "cache", "adopt", "-C", ws.to_str().unwrap()],
+        false,
+    );
+    assert!(out.success, "{:?}", out.stderr);
+    assert!(out.stdout.contains("shallow clone"), "{}", out.stdout);
+    assert_eq!(alternates_of(&ws), None);
+    assert!(git_ok(&ws, &["fsck", "--no-progress"]));
+}
+
+/// A hand-cloned root with two linked worktrees beside it, returned as
+/// `(main, first worktree, second worktree)`.
+fn root_with_worktrees(
+    env: &TestEnv,
+    extra: &str,
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    let root = adoptable_root(env, extra);
+    let main = clone_by_hand(env, root.to_str().unwrap(), &[]);
+    let wt1 = env.playground.join("wt1");
+    let wt2 = env.playground.join("wt2");
+    for (wt, branch) in [(&wt1, "feat1"), (&wt2, "feat2")] {
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                branch,
+                wt.to_str().unwrap(),
+            ],
+        );
+    }
+    (main, wt1, wt2)
+}
+
+#[test]
+fn cache_adopt_refuses_in_a_linked_worktree_unless_shared() {
+    let env = TestEnv::new("cache_adopt_worktree");
+    let (main, wt1, _) = root_with_worktrees(&env, "");
+
+    // The object store a worktree reads is its main worktree's, so adopting
+    // from here would relink main and every sibling along with it.
+    let out = gitscale::run_cli_with(
+        &["gitscale", "cache", "adopt", "-C", wt1.to_str().unwrap()],
+        false,
+    );
+    assert!(!out.success, "{}", out.stdout);
+    assert!(out.stderr.contains("--shared"), "{}", out.stderr);
+    assert_eq!(alternates_of(&main), None, "main must be left as it was");
+}
+
+#[test]
+fn cache_adopt_shared_relinks_every_worktree_at_once() {
+    let env = TestEnv::new("cache_adopt_worktree_shared");
+    let (main, wt1, wt2) = root_with_worktrees(&env, "");
+
+    let out = gitscale::run_cli_with(
+        &[
+            "gitscale",
+            "cache",
+            "adopt",
+            "--shared",
+            "-C",
+            wt1.to_str().unwrap(),
+        ],
+        false,
+    );
+    assert!(out.success, "{:?}", out.stderr);
+    assert!(
+        out.stdout.contains("other worktrees") && out.stdout.contains("wt2"),
+        "it should say who else moved: {}",
+        out.stdout
+    );
+    assert!(alternates_of(&main).is_some(), "the shared store is main's");
+    for repo in [&main, &wt1, &wt2] {
+        assert!(
+            git_ok(repo, &["fsck", "--no-progress"]),
+            "{} should still be whole",
+            repo.display()
+        );
+    }
+
+    // Now there is nothing to relink, so there is nothing to refuse either.
+    let again = gitscale::run_cli_with(
+        &["gitscale", "cache", "adopt", "-C", wt2.to_str().unwrap()],
+        false,
+    );
+    assert!(again.success, "{:?}", again.stderr);
+    assert!(again.stdout.contains("already borrows"), "{}", again.stdout);
+}
+
+#[test]
+fn adopt_root_waits_for_the_main_worktree() {
+    let env = TestEnv::new("cache_adopt_worktree_config");
+    let (main, wt1, _) = root_with_worktrees(&env, "adopt_root = true");
+
+    // The pull `git worktree add` fires lands in the new worktree: adopting
+    // there would relink main behind the user's back.
+    let out = gitscale::run_cli_with(&["gitscale", "pull", "-C", wt1.to_str().unwrap()], false);
+    assert!(out.success, "{:?}", out.stderr);
+    assert_eq!(alternates_of(&main), None);
+
+    let out = gitscale::run_cli_with(&["gitscale", "pull", "-C", main.to_str().unwrap()], false);
+    assert!(out.success, "{:?}", out.stderr);
+    assert!(
+        alternates_of(&main).is_some(),
+        "a pull in main adopts for every worktree"
+    );
+    assert!(git_ok(&wt1, &["fsck", "--no-progress"]));
+}
+
+#[test]
+fn a_pull_keeps_the_entry_an_adopted_root_borrows_from() {
+    let env = TestEnv::new("cache_adopt_keep_alive");
+    let root = adoptable_root(&env, "adopt_root = true");
+    let ws = clone_by_hand(&env, root.to_str().unwrap(), &[]);
+    let pull = || gitscale::run_cli_with(&["gitscale", "pull", "-C", ws.to_str().unwrap()], false);
+    assert!(pull().success);
+
+    // `git pull` in the root never goes near the cache, so gitscale's own pull
+    // is the only thing that can say the root's entry is still wanted.
+    let entry = env.cache_entry("mirror", root.to_str().unwrap());
+    age(&entry.join("gitscale-last-used"), "2 hours ago");
+    assert!(pull().success);
+
+    let out = gitscale::run_cli_with(
+        &[
+            "gitscale",
+            "cache",
+            "compact",
+            "--keep-recent",
+            "1h",
+            "-C",
+            ws.to_str().unwrap(),
+        ],
+        false,
+    );
+    assert!(out.success, "{:?}", out.stderr);
+    assert!(
+        entry.is_dir(),
+        "a busy workspace's root entry must survive compact"
+    );
+    assert!(
+        git_ok(&ws, &["log", "--oneline"]),
+        "and the root still read its own history"
+    );
+}
+
 #[test]
 fn a_checkout_that_is_already_shallow_stays_shallow() {
     let env = TestEnv::new("cache_shallow_upgrade");

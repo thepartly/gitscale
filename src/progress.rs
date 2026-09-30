@@ -62,11 +62,7 @@ where
     }
 }
 
-fn run_interactive<F>(
-    heading: &str,
-    names: &[String],
-    op: &F,
-) -> anyhow::Result<usize>
+fn run_interactive<F>(heading: &str, names: &[String], op: &F) -> anyhow::Result<usize>
 where
     F: Fn(&str) -> RepoStatus + Send + Sync,
 {
@@ -111,9 +107,7 @@ where
                     pb.set_style(done_style);
                     match &result {
                         RepoStatus::Ok(msg) => pb.finish_with_message(format!("ok    {}", msg)),
-                        RepoStatus::Skip(msg) => {
-                            pb.finish_with_message(format!("skip  {}", msg))
-                        }
+                        RepoStatus::Skip(msg) => pb.finish_with_message(format!("skip  {}", msg)),
                         RepoStatus::Fail(msg) => {
                             failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             let (error, hint) = split_hint(msg);
@@ -165,7 +159,6 @@ where
     }
     Ok(failed)
 }
-
 
 #[cfg(test)]
 mod tests {

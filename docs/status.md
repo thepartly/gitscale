@@ -44,7 +44,7 @@ One row per declared entry, in config order, followed by a row for each
 | `REPO` | The directory the entry declares. For an orphan row, the path of the leftover symlink |
 | `PATH` | Where a symlinked entry points; `-` for an ordinary checkout. Only [recursive dependencies](recursive-dependencies.md) deduped into one checkout are symlinks |
 | `MODE` | `readwrite`, `readonly` or `artefact` |
-| `REF` | The ref currently checked out: a branch name, or an abbreviated commit when HEAD is detached. `artefact` for an extracted artefact, `—` when the directory does not exist. For a symlink row, the ref of the checkout it points at |
+| `REF` | The ref currently checked out: a branch name, or an abbreviated commit when HEAD is detached. `artefact` for an extracted artefact, `—` when there is no checkout. For a symlink row, the ref of the checkout it points at |
 | `EXPECTED` | The `revision` from `.gitscale.toml`. A SHA is abbreviated to 7 characters so it lines up with `REF` |
 | `STATUS` | The flags below, comma-separated, or `ok` |
 
@@ -56,7 +56,7 @@ order.
 | Flag | Meaning |
 |---|---|
 | `ok` | Clean, and on the expected revision |
-| `missed` | The directory does not exist yet — run [`clone`](workflow.md#clone) or [`pull`](workflow.md#pull) |
+| `missed` | No checkout yet: the directory does not exist, or holds no repository — run [`clone`](workflow.md#clone) or [`pull`](workflow.md#pull) |
 | `symlink` | Resolved as a symlink to a root-level checkout (a deduped [recursive dependency](recursive-dependencies.md)) |
 | `unlinked` | A dependency inside this repo that should be a symlink is a real clone instead. [`sync`](workflow.md#sync) relinks it |
 | `unlinked, modified` | …and that clone has uncommitted changes or unpushed commits, so relinking would lose work. `sync --force` overrides |

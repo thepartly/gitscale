@@ -113,8 +113,8 @@ gitscale fetch [OPTIONS] [NAMES...]
 ```
 
 Update remote state without modifying working trees: `git fetch` for git
-entries (through the cache), a HEAD request for artefact entries. Checkouts that
-do not exist are skipped. See [workflow → fetch](workflow.md#fetch).
+entries (through the cache), a HEAD request for artefact entries. Entries with
+no checkout are skipped. See [workflow → fetch](workflow.md#fetch).
 
 ## `gitscale pull`
 
@@ -122,7 +122,8 @@ do not exist are skipped. See [workflow → fetch](workflow.md#fetch).
 gitscale pull [OPTIONS] [NAMES...]
 ```
 
-Bring every selected checkout up to date, cloning anything missing first, then
+Bring every selected checkout up to date, cloning anything missing first — into
+an empty directory too, while one holding files but no repository fails — then
 re-create [recursive dependency](recursive-dependencies.md) symlinks and run the
 [`post_sync` hook](hooks.md#post_sync). See
 [workflow → pull](workflow.md#pull).
@@ -133,8 +134,8 @@ re-create [recursive dependency](recursive-dependencies.md) symlinks and run the
 gitscale push [OPTIONS] [NAMES...]
 ```
 
-`git push` in each readwrite checkout. `readonly`, `artefact` and missing
-checkouts are skipped.
+`git push` in each readwrite checkout. `readonly`, `artefact` and entries
+with no checkout are skipped.
 
 ## `gitscale sync`
 
@@ -160,7 +161,7 @@ gitscale commit [OPTIONS] -m <MESSAGE> [NAMES...]
 | `-m, --message <MESSAGE>` | **Required.** The commit message, used for every repository |
 
 `git add -A` plus `git commit -m` in each selected checkout. Skips `artefact`
-and `readonly` entries, missing checkouts, symlinked entries and repositories
+and `readonly` entries, entries with no checkout, symlinked entries and repositories
 that are already clean. With no names, the workspace repository is committed too
 when it is the top level of a git repository. Nothing is pushed. See
 [workflow → commit](workflow.md#commit).
@@ -233,28 +234,31 @@ directory on disk is left alone — delete it yourself.
 ## `gitscale cache`
 
 ```
-gitscale cache <status|update|repair|compact> [OPTIONS]
+gitscale cache <status|update|adopt|repair|compact> [OPTIONS]
 ```
 
 | Subcommand | Purpose |
 |---|---|
 | [`status`](caching.md#cache-status) | What the cache holds, one row per repository. `-v` also lists every ref a mirror holds |
 | [`update`](caching.md#cache-update) | Refresh entries without touching any checkout. Takes optional `NAMES...` |
+| [`adopt`](caching.md#cache-adopt) | Relink the workspace root to the cache now, whatever `adopt_root` says, and say why when it will not |
 | [`repair`](caching.md#cache-repair) | Re-create entries this workspace borrows from but that are gone. Takes optional `NAMES...` |
 | [`compact`](caching.md#cache-compact) | Repack entries and evict the ones nothing used lately |
 
 | Option | Subcommand | Meaning |
 |---|---|---|
-| `--keep-recent <PERIOD>` | `compact` | How recently an entry must have been used to be kept. Default `1month`; accepts `12h`, `30d`, `2 weeks`, `1y`, and a bare number as days |
+| `--shared` | `adopt` | Adopt from a linked worktree, relinking the object store it shares with its main worktree and every sibling |
+| `--keep-recent <PERIOD>` | `compact` | How recently an entry must have been used to be kept. Default `12months`; accepts `12h`, `30d`, `2 weeks`, `1y`, and a bare number as days |
 
 `status` and `compact` work from anywhere — the cache belongs to the user, not
 to a workspace. A config is used when there is one, so `[cache] dir` is honoured.
-All four print `The object cache is off.` and do nothing under `--no-cache` or
+All five print `The object cache is off.` and do nothing under `--no-cache` or
 `[cache] enabled = false`.
 
 ```
 gitscale cache status
 gitscale cache update imports/core
+gitscale cache adopt
 gitscale cache repair
 gitscale cache compact --keep-recent 2weeks
 ```

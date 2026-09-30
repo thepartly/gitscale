@@ -2310,3 +2310,162 @@ fn clean_keeps_a_checkout_nested_inside_another_repo() {
     );
     assert!(!env.playground.join("core/scratch.tmp").exists());
 }
+
+// ---------------------------------------------------------------------------
+// An entry's directory that holds no repository
+// ---------------------------------------------------------------------------
+
+fn git_out(cwd: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("failed to run git");
+    assert!(output.status.success(), "git {:?} failed", args);
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// A workspace that is a git repository on a branch of its own, declaring
+/// `libs/core` pinned to `main` — a name the workspace also has — with the
+/// entry's directory created by `setup` rather than by a clone.
+fn workspace_with_stray_directory(name: &str, setup: impl FnOnce(&std::path::Path)) -> TestEnv {
+    let env = TestEnv::new(name);
+    let core = env.create_bare_repo("core", "main", &[("README.md", "core")]);
+    env.write_config(&format!(
+        "[repos]\n\"libs/core\" = {{ url = \"{}\", revision = \"main\" }}\n",
+        core.to_str().unwrap()
+    ));
+    env.init_playground_git();
+    git_out(&env.playground, &["checkout", "-q", "-B", "main"]);
+    git_out(&env.playground, &["checkout", "-q", "-b", "feature"]);
+    let dir = env.playground.join("libs/core");
+    std::fs::create_dir_all(&dir).unwrap();
+    setup(&dir);
+    env
+}
+
+#[test]
+fn pull_clones_into_an_empty_directory_and_leaves_the_workspace_alone() {
+    // What a failed clone, an interrupted delete or an outside cleaner leaves.
+    // Git run in there walks up to the workspace, so treating it as a checkout
+    // checked out `main` over the workspace's own branch.
+    let env = workspace_with_stray_directory("pull_empty_entry_dir", |_| {});
+
+    let out = env.run(&["pull"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert_eq!(
+        git_out(&env.playground, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "feature",
+        "the workspace's own branch must not move"
+    );
+    assert!(
+        env.playground.join("libs/core/README.md").is_file(),
+        "the entry should be cloned into the empty directory"
+    );
+}
+
+#[test]
+fn pull_refuses_a_directory_that_holds_something_else() {
+    let env = workspace_with_stray_directory("pull_stray_entry_dir", |dir| {
+        std::fs::write(dir.join("notes.txt"), "mine").unwrap();
+    });
+
+    let out = env.run(&["pull"]);
+    assert!(!out.success, "stdout: {}", out.stdout);
+    let said = format!("{}{}", out.stdout, out.stderr);
+    assert!(said.contains("holds no git repository"), "{}", said);
+    assert_eq!(
+        std::fs::read_to_string(env.playground.join("libs/core/notes.txt")).unwrap(),
+        "mine",
+        "whatever is there is somebody's, and must be left"
+    );
+    assert_eq!(
+        git_out(&env.playground, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "feature"
+    );
+}
+
+#[test]
+fn commit_does_not_reach_the_workspace_through_an_empty_directory() {
+    let env = workspace_with_stray_directory("commit_empty_entry_dir", |_| {});
+    std::fs::write(env.playground.join("staged.txt"), "x").unwrap();
+    git_out(&env.playground, &["add", "staged.txt"]);
+    let before = git_out(&env.playground, &["rev-parse", "HEAD"]);
+
+    let out = env.run(&["commit", "libs/core", "-m", "meant for core"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(out.stdout.contains("not cloned"), "stdout: {}", out.stdout);
+    assert_eq!(
+        git_out(&env.playground, &["rev-parse", "HEAD"]),
+        before,
+        "a commit meant for the entry must not land in the workspace"
+    );
+}
+
+#[test]
+fn clean_removes_a_directory_holding_no_repository_so_pull_works() {
+    let env = workspace_with_stray_directory("clean_stray_entry_dir", |dir| {
+        std::fs::create_dir_all(dir.join("target")).unwrap();
+        std::fs::write(dir.join("target/out.o"), "x").unwrap();
+    });
+    let stray = env.playground.join("libs/core");
+
+    let dry = env.run(&["clean"]);
+    assert!(dry.success, "stderr: {}", dry.stderr);
+    assert!(dry.stdout.contains("holds no repository"), "{}", dry.stdout);
+    assert!(stray.join("target/out.o").exists(), "a dry run deleted it");
+
+    let out = env.run(&["clean", "-f"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(!stray.exists(), "nothing in it belongs to a checkout");
+
+    // The point of it: a clean leaves nothing that stops the next pull.
+    let pull = env.run(&["pull"]);
+    assert!(pull.success, "stderr: {}", pull.stderr);
+    assert!(stray.join("README.md").is_file());
+    assert_eq!(
+        git_out(&env.playground, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "feature"
+    );
+}
+
+#[test]
+fn clean_leaves_a_directory_whose_git_is_broken() {
+    // It has a `.git`, so it was a checkout — a damaged one can still hold the
+    // only copy of somebody's work.
+    let env = workspace_with_stray_directory("clean_broken_entry_git", |dir| {
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(dir.join("work.txt"), "unpushed").unwrap();
+    });
+
+    let out = env.run(&["clean", "-f"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    let said = format!("{}{}", out.stdout, out.stderr);
+    assert!(said.contains("not a git repository"), "{}", said);
+    assert!(env.playground.join("libs/core/work.txt").exists());
+}
+
+#[test]
+fn clean_leaves_a_stray_directory_holding_another_checkout() {
+    let env = TestEnv::new("clean_stray_holds_checkout");
+    let core = env.create_bare_repo("core", "main", &[("README.md", "core")]);
+    let vendor = env.create_bare_repo("vendor", "main", &[("v.txt", "v")]);
+    env.write_config(&format!(
+        "[repos]\n\"libs/core\" = {{ url = \"{}\", revision = \"main\" }}\n\
+         \"libs/core/vendor\" = {{ url = \"{}\", revision = \"main\" }}\n",
+        core.to_str().unwrap(),
+        vendor.to_str().unwrap()
+    ));
+    env.init_playground_git();
+    assert!(env.run(&["clone", "libs/core/vendor"]).success);
+    assert!(env.playground.join("libs/core/vendor/v.txt").is_file());
+
+    let out = env.run(&["clean", "-f"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(
+        env.playground.join("libs/core/vendor/v.txt").is_file(),
+        "removing libs/core would have taken the vendor checkout with it"
+    );
+    let said = format!("{}{}", out.stdout, out.stderr);
+    assert!(said.contains("another declared checkout"), "{}", said);
+}

@@ -1,17 +1,17 @@
 //! `gitscale cache` — the commands that own the cache directly.
 //!
 //! Everything else touches it implicitly: a clone, fetch or pull updates the
-//! entries it is about to read and says nothing about it. These three are for
-//! the times that is not enough — warming a repo nobody has pulled yet,
-//! rebuilding an entry something deleted, and keeping the directory from
-//! growing without bound.
+//! entries it is about to read and says nothing about it. These are for the
+//! times that is not enough — warming a repo nobody has pulled yet, putting a
+//! hand-cloned root on the cache, rebuilding an entry something deleted, and
+//! keeping the directory from growing without bound.
 
 use anyhow::Result;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
 
-use crate::cache::{self, Cache};
+use crate::cache::{self, Adoption, Cache};
 use crate::commands::clone::filter_entries;
 use crate::config::{find_config, load_config, GitScaleConfig, RepoEntry};
 use crate::git::is_ci;
@@ -27,12 +27,14 @@ pub fn open(config: &GitScaleConfig, no_cache: bool) -> Option<Cache> {
 }
 
 /// Relink the workspace's own root repository to the cache, if the config asks
-/// for it.
+/// for it, and keep the entry a linked root borrows from alive.
 ///
 /// Opt-in, and it stays opt-in: adopting deletes the root's own objects and
 /// converts a repository that stood on its own into one that depends on the
-/// cache. A root `gitscale clone` created is already linked, so this is only
-/// ever about one somebody cloned with plain `git clone`.
+/// cache. A root `gitscale clone` created is already linked, so adopting is
+/// only ever about one somebody cloned with plain `git clone` — but both kinds
+/// need their entry marked as wanted, since nothing else about the root ever
+/// goes through the cache.
 pub fn adopt_root(
     cache: Option<&Cache>,
     config: &GitScaleConfig,
@@ -42,16 +44,116 @@ pub fn adopt_root(
     let Some(cache) = cache else {
         return Ok(());
     };
-    if !config.cache.adopt_root || !crate::git::is_repo_root(config_root) {
-        return Ok(());
+    // A linked worktree shares its object store with the main worktree and
+    // every sibling, so adopting from one would relink all of them. That is
+    // `gitscale cache adopt --shared`, asked for by name — never a side effect
+    // of the pull `git worktree add` fires. The main worktree adopts for all.
+    let linked = crate::share::main_worktree(config_root).is_some();
+    if config.cache.adopt_root && !linked && crate::git::is_repo_root(config_root) {
+        if let Some(url) = crate::git::origin_url(config_root) {
+            // Anything short of adopting is left for `gitscale cache adopt` to
+            // explain: said on every pull, it would only be noise.
+            if cache.adopt(config_root, &url)? == Adoption::Adopted {
+                writeln!(out, "  adopt {} into the cache", config_root.display())?;
+            }
+        }
     }
-    let Some(url) = crate::git::origin_url(config_root) else {
+    cache.keep_alive(config_root);
+    Ok(())
+}
+
+/// `gitscale cache adopt` — relink the workspace root to the cache now,
+/// whatever `[cache] adopt_root` says, and say why when it will not.
+///
+/// From a linked worktree it refuses unless `shared` is set: the object store
+/// it would relink belongs to the main worktree, and to every sibling with it.
+pub fn adopt(root: Option<&Path>, shared: bool, no_cache: bool, out: &mut dyn Write) -> Result<()> {
+    let (config, config_root) = load(root)?;
+    let Some(cache) = open(&config, no_cache) else {
+        writeln!(out, "The object cache is off.")?;
         return Ok(());
     };
-    if cache.adopt(config_root, &url)? {
-        writeln!(out, "  adopt {} into the cache", config_root.display())?;
+    if !crate::git::is_repo_root(&config_root) {
+        anyhow::bail!(
+            "{} is not the top of a git repository",
+            config_root.display()
+        );
+    }
+    let Some(url) = crate::git::origin_url(&config_root) else {
+        anyhow::bail!("{} has no origin to cache", config_root.display());
+    };
+    let worktrees = crate::share::worktrees(&config_root);
+    let main = crate::share::main_worktree(&config_root);
+    if let Some(main) = &main {
+        // Nothing to relink, so nothing to refuse.
+        if cache.borrows(&config_root) {
+            writeln!(
+                out,
+                "{} already borrows from the cache.",
+                config_root.display()
+            )?;
+            return Ok(());
+        }
+        if !shared {
+            anyhow::bail!(
+                "{} is a worktree of {}. Adopting would relink the object store it shares with: {}. \
+                 Run `gitscale cache adopt` in {}, or pass --shared to do it from here.",
+                config_root.display(),
+                main.display(),
+                sharers(&worktrees, &config_root),
+                main.display()
+            );
+        }
+    }
+    let shown = config_root.display();
+    match cache.adopt(&config_root, &url)? {
+        Adoption::Adopted if worktrees.len() > 1 => {
+            let owner = main.as_deref().unwrap_or(&config_root);
+            writeln!(
+                out,
+                "Adopted the repository at {} into the cache.",
+                owner.display()
+            )?;
+            // One object store, so every worktree of it moved with it.
+            writeln!(
+                out,
+                "  Its other worktrees borrow from the cache too: {}",
+                sharers(&worktrees, owner)
+            )?;
+        }
+        Adoption::Adopted => writeln!(out, "Adopted {} into the cache.", shown)?,
+        Adoption::Already => writeln!(out, "{} already borrows from the cache.", shown)?,
+        Adoption::Borrowing => writeln!(
+            out,
+            "Left {} alone: it borrows objects from somewhere else, and adopting would cut it off from them.",
+            shown
+        )?,
+        Adoption::Shallow => writeln!(
+            out,
+            "Left {} alone: it is a shallow clone, and a mirror cannot take refs from one.",
+            shown
+        )?,
+        Adoption::Empty => writeln!(
+            out,
+            "Left {} alone: it has no remote-tracking branches to seed an entry with.",
+            shown
+        )?,
     }
     Ok(())
+}
+
+/// Every worktree in `worktrees` other than `except`, comma-separated — who
+/// else an adoption touches.
+fn sharers(worktrees: &[std::path::PathBuf], except: &Path) -> String {
+    let except = except
+        .canonicalize()
+        .unwrap_or_else(|_| except.to_path_buf());
+    worktrees
+        .iter()
+        .filter(|w| w.canonicalize().map(|w| w != except).unwrap_or(true))
+        .map(|w| w.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// `gitscale cache update` — bring entries up to date without touching any

@@ -157,6 +157,20 @@ fn shallow_clone_at_sha(entry: &RepoEntry, dest: &Path, verbose: bool) -> Result
     Ok(true)
 }
 
+/// Whether `dir` is a checkout of its own, rather than just a directory.
+///
+/// Existing is not enough. A failed clone, an interrupted delete or an outside
+/// cleaner can leave an entry's directory behind with no repository in it,
+/// and git run there does not stop at it: it walks up and finds the
+/// workspace's own repository. Every git command gitscale meant for the
+/// checkout would then land on the workspace instead — a pull checking out the
+/// pinned branch over the user's, a commit or a push of the wrong repository.
+/// A `.git` directory, or the `.git` file of a linked worktree, is what makes
+/// git stop.
+pub fn is_checkout(dir: &Path) -> bool {
+    dir.join(".git").exists()
+}
+
 /// Clone `entry` into `root`.
 ///
 /// `source` says where the objects come from: the remote, a copy already on
@@ -169,7 +183,22 @@ pub fn clone_repo(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source
     }
     let dest = root.join(&entry.directory);
     if dest.exists() {
-        bail!("Directory already exists: {}", dest.display());
+        // An empty directory is what a clone that never finished leaves, and
+        // holds nothing to lose. Anything else is somebody's.
+        let empty = fs::read_dir(&dest)
+            .map(|mut listing| listing.next().is_none())
+            .unwrap_or(false);
+        if !empty || dest.is_symlink() {
+            if is_checkout(&dest) {
+                bail!("Directory already exists: {}", dest.display());
+            }
+            bail!(
+                "{} exists but holds no git repository; `gitscale clean -f {}` removes it",
+                dest.display(),
+                entry.directory
+            );
+        }
+        fs::remove_dir(&dest).with_context(|| format!("cannot remove {}", dest.display()))?;
     }
 
     if let Some(pinned) = &source.pinned {
@@ -302,7 +331,7 @@ pub fn reconcile_remote(entry: &RepoEntry, root: &Path) -> Result<bool> {
         return Ok(false);
     }
     let dest = root.join(&entry.directory);
-    if !dest.exists() {
+    if !is_checkout(&dest) {
         return Ok(false);
     }
     let current = run_git(&["remote", "get-url", "origin"], Some(&dest), false)?;
@@ -522,7 +551,7 @@ pub fn sync_repo(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source)
         return Ok(());
     }
     let dest = root.join(&entry.directory);
-    if !dest.exists() {
+    if !is_checkout(&dest) {
         return clone_repo(entry, root, verbose, source);
     }
 
@@ -577,7 +606,7 @@ pub fn pull_repo(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source)
         return Ok(());
     }
     let dest = root.join(&entry.directory);
-    if !dest.exists() {
+    if !is_checkout(&dest) {
         return clone_repo(entry, root, verbose, source);
     }
 
@@ -793,7 +822,7 @@ pub fn push_repo(entry: &RepoEntry, root: &Path, _verbose: bool) -> Result<()> {
         return Ok(());
     }
     let dest = root.join(&entry.directory);
-    if !dest.exists() {
+    if !is_checkout(&dest) {
         return Ok(());
     }
     ensure_ci_remote(entry, &dest)?;
@@ -805,7 +834,7 @@ pub fn push_repo(entry: &RepoEntry, root: &Path, _verbose: bool) -> Result<()> {
 /// Returns `Ok(true)` if a commit was created, `Ok(false)` if the working tree
 /// was already clean (nothing to commit).
 pub fn commit_path(dir: &Path, message: &str) -> Result<bool> {
-    if !dir.exists() {
+    if !is_checkout(dir) {
         return Ok(false);
     }
     // Nothing to commit if the working tree is clean.
@@ -1010,7 +1039,7 @@ pub fn get_repo_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
         .symlink_metadata()
         .map(|m| m.file_type().is_symlink())
         .unwrap_or(false);
-    if !dest.exists() {
+    if !is_checkout(&dest) {
         return RepoStatus {
             directory: entry.directory.clone(),
             exists: false,

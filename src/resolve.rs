@@ -1,7 +1,6 @@
 use anyhow::{bail, Result};
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use crate::config::{load_config, RepoEntry, CONFIG_FILENAME};
@@ -113,11 +112,7 @@ pub fn resolve_recursive(
 }
 
 /// Create symlinks on disk. Skips entries whose target doesn't exist yet.
-pub fn create_symlinks(
-    symlinks: &[SymlinkEntry],
-    config_root: &Path,
-    out: &mut dyn Write,
-) -> Result<()> {
+pub fn create_symlinks(symlinks: &[SymlinkEntry], config_root: &Path) -> Result<()> {
     for entry in symlinks {
         let link_abs = config_root.join(&entry.link_path);
         let target_abs = config_root.join(&entry.target_path);
@@ -304,7 +299,6 @@ pub fn resolve_and_link(
     root_repos: &[RepoEntry],
     config_root: &Path,
     apply_revisions: bool,
-    out: &mut dyn Write,
 ) -> Result<()> {
     let (symlinks, resolved_revisions) = resolve_recursive(root_repos, config_root)?;
 
@@ -313,7 +307,7 @@ pub fn resolve_and_link(
     }
 
     if !symlinks.is_empty() {
-        create_symlinks(&symlinks, config_root, out)?;
+        create_symlinks(&symlinks, config_root)?;
     }
 
     Ok(())

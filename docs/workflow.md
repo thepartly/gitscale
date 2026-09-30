@@ -29,6 +29,11 @@
   directory; `-C, --root PATH` starts the search somewhere else.
 - **Network.** Everything goes through the [object cache](caching.md) unless
   `--no-cache` is given.
+- **What counts as a checkout.** A directory with a `.git` of its own. One that
+  exists but holds no repository — left by a failed clone, an interrupted
+  delete, an outside cleaner — is treated as not cloned: git run inside it would
+  walk up and act on the workspace's own repository, so GitScale never runs git
+  there.
 
 ```
 Cloning missing repos...
@@ -39,7 +44,7 @@ Cloning missing repos...
 
 ## clone
 
-Create the checkouts that do not exist yet. Existing directories are left
+Create the checkouts that do not exist yet. Existing checkouts are left
 untouched.
 
 ```
@@ -53,7 +58,9 @@ Per entry:
 |---|---|
 | Directory missing, git entry | Cloned, through the cache when it can serve it |
 | Directory missing, artefact entry | Archive downloaded and extracted |
-| Directory exists | `skip (already exists)` |
+| Checkout exists | `skip (already exists)` |
+| Directory exists but is empty | Cloned into it |
+| Directory exists, holds files but no repository | `FAIL … exists but holds no git repository`. Left as it is — [`gitscale clean -f`](clean.md#a-directory-holding-no-repository) removes it, or move it aside, and run again |
 | Path is a symlink | The symlink is removed and a real clone is made in its place |
 | Artefact entry, no `[storage]` url | `FAIL … no [storage] configured` |
 | Artefact entry, nothing in storage | `skip (no artefact data)` |
@@ -124,7 +131,8 @@ gitscale fetch imports/core        # one entry
 
 - **Git entries**: the cache entry is refreshed from the remote, then the
   workspace's remote-tracking refs are updated from it. A shallow checkout stays
-  shallow. A checkout that does not exist is skipped (`not cloned`).
+  shallow. A checkout that does not exist, or a directory holding no repository, is
+  skipped (`not cloned`).
 - **Artefact entries**: a HEAD request against object storage, recording the
   remote ETag in `.etag-remote`. Nothing is downloaded or extracted.
 
@@ -142,7 +150,8 @@ gitscale pull imports/core         # one entry
 
 | Entry | What happens |
 |---|---|
-| Missing directory | Cloned, exactly as `clone` would |
+| Missing directory, or an empty one | Cloned, exactly as `clone` would |
+| Directory holding files but no repository | `FAIL`, left as it is, exactly as `clone` would |
 | Full clone, on a branch | Refs refreshed, checked out if it is on the wrong revision, then fast-forwarded (`--ff-only`). A diverged branch is left alone rather than forced |
 | Shallow clone | Refetched at depth 1 and `reset --hard` to the upstream commit |
 | Shallow clone pinned to a SHA | That one commit is fetched and reset to |
@@ -165,7 +174,7 @@ gitscale push imports/core         # one entry
 ```
 
 `git push` in each readwrite checkout. `readonly` entries, `artefact` entries
-and directories that do not exist are skipped. Inside CI, the remote is
+and directories that hold no checkout are skipped. Inside CI, the remote is
 repointed at the job-token HTTPS URL first where that applies — see
 [CI authentication](ci-authentication.md).
 
@@ -207,7 +216,7 @@ gitscale commit -m "wip" imports/core apps/web
 
 In each selected checkout this is `git add -A` followed by `git commit -m`, so
 untracked files are included. Skipped: `artefact` entries, `readonly` entries,
-directories that do not exist, symlinked (deduped) entries — the real checkout
+directories that hold no checkout, symlinked (deduped) entries — the real checkout
 is committed under its own name — and any repo whose working tree is already
 clean.
 

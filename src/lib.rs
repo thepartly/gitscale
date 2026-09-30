@@ -146,6 +146,15 @@ enum CacheAction {
         root: Option<PathBuf>,
         names: Vec<String>,
     },
+    /// Relink the workspace root to the cache, reclaiming its own objects
+    Adopt {
+        #[arg(short = 'C', long)]
+        root: Option<PathBuf>,
+        /// Adopt from a linked worktree, relinking the object store it shares
+        /// with its main worktree and every sibling
+        #[arg(long)]
+        shared: bool,
+    },
     /// Re-create entries this workspace borrows from but that are gone
     Repair {
         #[arg(short = 'C', long)]
@@ -157,7 +166,7 @@ enum CacheAction {
         #[arg(short = 'C', long)]
         root: Option<PathBuf>,
         /// How recently an entry must have been used to be kept, e.g. '2weeks'
-        #[arg(long, value_name = "PERIOD", default_value = "1month")]
+        #[arg(long, value_name = "PERIOD", default_value = "12months")]
         keep_recent: String,
     },
 }
@@ -377,6 +386,9 @@ fn run_cli_inner(
                 out,
                 err,
             ),
+            CacheAction::Adopt { root, shared } => {
+                commands::cache::adopt(root.as_deref(), shared, no_cache, out)
+            }
             CacheAction::Repair { root, names } => {
                 commands::cache::repair(root.as_deref(), &names, no_cache, out)
             }

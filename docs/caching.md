@@ -1,16 +1,22 @@
 # 2.5 The object cache
 
-- [The rule](#the-rule)
-- [Where objects come from](#where-objects-come-from)
-- [Where the cache lives](#where-the-cache-lives)
-- [Mirrors and snapshots](#mirrors-and-snapshots)
-- [What changes in CI](#what-changes-in-ci)
-- [Guarantees and limits](#guarantees-and-limits)
-- [Turning it off](#turning-it-off)
-- [Copying instead of borrowing: dissociate](#copying-instead-of-borrowing-dissociate)
-- [Adopting a root repository](#adopting-a-root-repository)
-- [Seeing what the cache is doing](#seeing-what-the-cache-is-doing)
-- [The cache commands](#the-cache-commands)
+- [2.5 The object cache](#25-the-object-cache)
+  - [The rule](#the-rule)
+  - [Where objects come from](#where-objects-come-from)
+  - [Where the cache lives](#where-the-cache-lives)
+  - [Mirrors and snapshots](#mirrors-and-snapshots)
+  - [What changes in CI](#what-changes-in-ci)
+  - [Guarantees and limits](#guarantees-and-limits)
+  - [Turning it off](#turning-it-off)
+  - [Copying instead of borrowing: dissociate](#copying-instead-of-borrowing-dissociate)
+  - [Adopting a root repository](#adopting-a-root-repository)
+  - [Seeing what the cache is doing](#seeing-what-the-cache-is-doing)
+  - [The cache commands](#the-cache-commands)
+    - [cache status](#cache-status)
+    - [cache update](#cache-update)
+    - [cache adopt](#cache-adopt)
+    - [cache repair](#cache-repair)
+    - [cache compact](#cache-compact)
 
 ## The rule
 
@@ -239,9 +245,18 @@ your call, not a default.
 
 Adoption is skipped when the repository already borrows from something else —
 overwriting that pointer and repacking would leave it unable to read objects it
-never owned — and when the workspace root is not itself the top of a git
-repository. It is not needed in CI, where the runner clones the root itself and
-the workspace is discarded at the end.
+never owned — when it is a shallow clone, which git will not let a mirror take
+refs from, and when the workspace root is not itself the top of a git
+repository. It never adopts from a linked worktree, whose object store belongs
+to the main worktree — see [`cache adopt`](#cache-adopt), which does the same on
+demand and says which of these applies. It is not needed in CI, where the runner
+clones the root itself and the workspace is discarded at the end.
+
+`git pull` in the root never goes near the cache, so every `gitscale clone` and
+`pull` marks the entry a linked root borrows from as used — adopted or made by
+`gitscale clone <url>` alike. Without that, [`compact`](#cache-compact) would
+evict it once `--keep-recent` passed, however busy the workspace was, and leave
+the root unable to read its own history.
 
 Note what it does and does not buy. It reclaims the root's duplicate objects and
 gives every later worktree and workspace on the machine something to borrow. It
@@ -325,6 +340,25 @@ CI it adds a pin for each entry's revision, reporting
 `imports/core (pinned at 9fceb02a)`, and skips anything it cannot pin
 (`nothing to pin`). `-v` prints the cache's total size afterwards.
 
+### cache adopt
+
+```
+gitscale cache adopt
+```
+
+Put the workspace root on the cache now, the way
+[`adopt_root`](#adopting-a-root-repository) does on the next `clone` or `pull`
+— without the setting, and without pulling anything else. When it will not, it
+says why: the root already borrows from the cache, borrows from somewhere else,
+is a shallow clone, or has no remote-tracking branches to seed an entry with.
+
+In a linked worktree it refuses, because the object store a worktree reads
+belongs to its main worktree: adopting would relink main and every sibling
+along with it. Run it in the main worktree, or pass `--shared` to do it from
+the linked one; either way it names every worktree that moved. `adopt_root`
+never adopts from a linked worktree — the pull `git worktree add` fires would
+otherwise relink main behind your back — and waits for a pull in main instead.
+
 ### cache repair
 
 ```
@@ -352,9 +386,16 @@ gitscale cache compact --keep-recent 2weeks
 ```
 
 Repack every entry and evict the ones nothing has used within `--keep-recent`
-(default `1month`). Each entry carries a last-used marker touched on every hit,
+(default `12months`). Each entry carries a last-used marker touched on every hit,
 and each pinned commit carries its own — so a snapshot entry in daily use can
 still shed the pins that have gone cold.
+
+A hit is any `clone`, `fetch`, `pull`, `sync` or `cache update` that goes
+through the entry, a CI job taking a pin, adoption, and — for the entry a
+workspace root borrows from — any `clone`, `pull` or `sync` in that workspace.
+Nothing checks who still borrows: a workspace nobody has touched within the
+period loses the entries it borrows from, `status` flags its checkouts
+`cache-broken`, and [`cache repair`](#cache-repair) downloads them again.
 
 Periods are a number and a unit: `12h`, `30d`, `2 weeks`, `1month`, `1y`. A bare
 number is a count of days.

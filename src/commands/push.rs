@@ -44,7 +44,7 @@ pub fn run(
                 return RepoStatus::Skip(format!("{} (readonly)", name));
             }
             let dest = config_root.join(&entry.directory);
-            if !dest.exists() {
+            if !crate::git::is_checkout(&dest) {
                 return RepoStatus::Skip(format!("{} (not cloned)", name));
             }
             // A tag or SHA pin checks out detached: there is no branch to

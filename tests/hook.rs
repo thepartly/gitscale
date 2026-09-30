@@ -337,7 +337,10 @@ fn install_local_allows_its_own_repository_by_default() {
     let env = TestEnv::new("hook_allow_local_default");
     let repo = repo_with(&env, Some("[repos]\n"));
     assert!(cli(&["hook", "install", "--local", "-C", repo.to_str().unwrap()]).success);
-    assert_eq!(baked_allowlist(&hooks_dir(&repo).join("post-checkout")), "*");
+    assert_eq!(
+        baked_allowlist(&hooks_dir(&repo).join("post-checkout")),
+        "*"
+    );
 }
 
 /// Upgrading gitscale means re-running install; that must not silently widen or
@@ -348,7 +351,18 @@ fn reinstall_keeps_the_existing_allowlist() {
     let repo = repo_with(&env, Some("[repos]\n"));
     let root = repo.to_str().unwrap();
 
-    assert!(cli(&["hook", "install", "--local", "--allow", "github.com/acme/*", "-C", root]).success);
+    assert!(
+        cli(&[
+            "hook",
+            "install",
+            "--local",
+            "--allow",
+            "github.com/acme/*",
+            "-C",
+            root
+        ])
+        .success
+    );
     assert!(cli(&["hook", "install", "--local", "-C", root]).success);
     assert_eq!(
         baked_allowlist(&hooks_dir(&repo).join("post-checkout")),
@@ -357,7 +371,10 @@ fn reinstall_keeps_the_existing_allowlist() {
 
     // ...and passing --allow again replaces it.
     assert!(cli(&["hook", "install", "--local", "--allow", "*", "-C", root]).success);
-    assert_eq!(baked_allowlist(&hooks_dir(&repo).join("post-checkout")), "*");
+    assert_eq!(
+        baked_allowlist(&hooks_dir(&repo).join("post-checkout")),
+        "*"
+    );
 }
 
 /// A global install arms every clone on the machine, so it has to be told what
@@ -369,7 +386,11 @@ fn install_global_requires_an_allowlist() {
 
     let out = cli_isolated(&home, &["hook", "install", "--global"]);
     assert!(!out.success, "stdout: {}", out.stdout);
-    assert!(out.stderr.contains("--allow is required"), "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("--allow is required"),
+        "stderr: {}",
+        out.stderr
+    );
     assert!(
         !home.join(".config/gitscale/hooks").exists(),
         "a refused install must not leave hooks behind"
@@ -377,7 +398,13 @@ fn install_global_requires_an_allowlist() {
 
     let out = cli_isolated(
         &home,
-        &["hook", "install", "--global", "--allow", "github.com/acme/*"],
+        &[
+            "hook",
+            "install",
+            "--global",
+            "--allow",
+            "github.com/acme/*",
+        ],
     );
     assert!(out.success, "stderr: {}", out.stderr);
     assert_eq!(
@@ -400,7 +427,11 @@ fn install_refuses_a_pattern_that_would_break_the_shim() {
         repo.to_str().unwrap(),
     ]);
     assert!(!out.success);
-    assert!(out.stderr.contains("cannot be written into a hook script"), "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("cannot be written into a hook script"),
+        "stderr: {}",
+        out.stderr
+    );
 }
 
 /// A shim written before the allowlist existed passes no patterns. Running wide
@@ -411,7 +442,11 @@ fn hook_run_refuses_when_the_shim_passed_no_allowlist() {
     let repo = repo_with(&env, Some("[repos]\n"));
     let out = cli(&["hook", "run", "post-checkout", "-C", repo.to_str().unwrap()]);
     assert!(!out.success);
-    assert!(out.stderr.contains("installed by an older gitscale"), "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("installed by an older gitscale"),
+        "stderr: {}",
+        out.stderr
+    );
 }
 
 #[test]
@@ -419,7 +454,18 @@ fn hook_status_reports_the_allowlist() {
     let env = TestEnv::new("hook_status_allowlist");
     let repo = repo_with(&env, Some("[repos]\n"));
     let root = repo.to_str().unwrap();
-    assert!(cli(&["hook", "install", "--local", "--allow", "github.com/acme/*", "-C", root]).success);
+    assert!(
+        cli(&[
+            "hook",
+            "install",
+            "--local",
+            "--allow",
+            "github.com/acme/*",
+            "-C",
+            root
+        ])
+        .success
+    );
 
     let out = cli_isolated(&isolated_home(&env), &["hook", "status", "-C", root]);
     assert!(out.success, "stderr: {}", out.stderr);
@@ -565,7 +611,13 @@ fn a_global_hook_refuses_a_payload_from_a_cloned_branch() {
 
     let out = cli_isolated(
         &home,
-        &["hook", "install", "--global", "--allow", "github.com/acme/*"],
+        &[
+            "hook",
+            "install",
+            "--global",
+            "--allow",
+            "github.com/acme/*",
+        ],
     );
     assert!(out.success, "stderr: {}", out.stderr);
 

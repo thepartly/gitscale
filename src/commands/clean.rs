@@ -27,6 +27,9 @@ struct Target {
     excludes: Vec<String>,
     /// Set when there is nothing to do, carrying the reason to report.
     skip: Option<String>,
+    /// An entry's directory with no repository in it, removed whole. See
+    /// [`stray`].
+    stray: bool,
 }
 
 pub fn run(
@@ -108,6 +111,7 @@ fn plan(
                 dir: config_root.to_path_buf(),
                 excludes,
                 skip: None,
+                stray: false,
             });
         } else if !names.is_empty() {
             // Only worth reporting when it was asked for by name: a workspace
@@ -134,7 +138,14 @@ fn plan(
             targets.push(skipped(name, &dir, "symlink"));
             continue;
         }
+        if !crate::git::is_checkout(&dir) {
+            targets.push(stray(config, entry, &dir));
+            continue;
+        }
         if !is_repo_root(&dir) {
+            // It has a `.git`, so it is a checkout of some kind, if a broken
+            // one — and a broken checkout can still hold the only copy of
+            // somebody's work.
             targets.push(skipped(name, &dir, "not a git repository"));
             continue;
         }
@@ -160,10 +171,45 @@ fn plan(
             dir,
             excludes,
             skip: None,
+            stray: false,
         });
     }
 
     Ok(targets)
+}
+
+/// An entry's directory that exists but holds no repository: left by a failed
+/// clone, an interrupted delete, an outside cleaner, or a CI cache restored
+/// into a path whose checkout was not.
+///
+/// It is removed whole. Nothing in it belongs to a checkout, `pull` refuses to
+/// clone over it, and git cannot clean it — there is no repository to run
+/// `git clean` in, and the workspace's own clean excludes the path. Left
+/// alone, a clean would leave behind the one thing standing between it and a
+/// working `pull`. The exception is a directory holding another declared
+/// checkout that is on disk: removing it would take that checkout with it.
+fn stray(config: &crate::config::GitScaleConfig, entry: &RepoEntry, dir: &Path) -> Target {
+    let holds_checkout = nested_checkouts(&config.repos, Path::new(&entry.directory))
+        .iter()
+        .any(|inner| {
+            dir.join(inner.trim_start_matches('/'))
+                .symlink_metadata()
+                .is_ok()
+        });
+    if holds_checkout {
+        return skipped(
+            &entry.directory,
+            dir,
+            "holds no repository, but another declared checkout is inside it",
+        );
+    }
+    Target {
+        name: entry.directory.clone(),
+        dir: dir.to_path_buf(),
+        excludes: Vec::new(),
+        skip: None,
+        stray: true,
+    }
 }
 
 /// Anchored patterns for the checkouts that land inside `holder`, which is the
@@ -195,6 +241,7 @@ fn skipped(name: &str, dir: &Path, reason: &str) -> Target {
         dir: dir.to_path_buf(),
         excludes: Vec::new(),
         skip: Some(reason.to_string()),
+        stray: false,
     }
 }
 
@@ -260,6 +307,13 @@ fn report(targets: &[Target], out: &mut dyn Write) -> Result<()> {
             writeln!(out, "  {} — skip ({})", target.name, reason)?;
             continue;
         }
+        if target.stray {
+            repos += 1;
+            total += 1;
+            writeln!(out, "  {}", target.name)?;
+            writeln!(out, "    ./ (the whole directory: it holds no repository)")?;
+            continue;
+        }
         let paths = clean_repo(&target.dir, &target.excludes, false)
             .with_context(|| format!("{}: cannot list untracked files", target.name))?;
         if paths.is_empty() {
@@ -309,6 +363,12 @@ fn execute(
             let target = &by_name[name];
             if let Some(reason) = &target.skip {
                 return RepoStatus::Skip(format!("{} ({})", name, reason));
+            }
+            if target.stray {
+                return match std::fs::remove_dir_all(&target.dir) {
+                    Ok(()) => RepoStatus::Ok(format!("{} (removed: it held no repository)", name)),
+                    Err(e) => RepoStatus::Fail(format!("{}: cannot remove: {}", name, e)),
+                };
             }
             match clean_repo(&target.dir, &target.excludes, true) {
                 Ok(paths) if paths.is_empty() => {

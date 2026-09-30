@@ -43,7 +43,7 @@ pub fn run(
                 return RepoStatus::Skip(format!("{} (readonly)", name));
             }
             let dest = config_root.join(&entry.directory);
-            if !dest.exists() {
+            if !crate::git::is_checkout(&dest) {
                 return RepoStatus::Skip(format!("{} (not cloned)", name));
             }
             // Resolved recursive deps are symlinks to a root-level checkout that

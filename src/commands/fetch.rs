@@ -31,10 +31,8 @@ pub fn run(
         return Ok(());
     }
 
-    let entry_map: HashMap<&str, &crate::config::RepoEntry> = selected
-        .iter()
-        .map(|e| (e.directory.as_str(), e))
-        .collect();
+    let entry_map: HashMap<&str, &crate::config::RepoEntry> =
+        selected.iter().map(|e| (e.directory.as_str(), e)).collect();
     let dir_names: Vec<String> = selected.iter().map(|e| e.directory.clone()).collect();
     let storage_url = &config.storage_url;
     let ci = is_ci();
@@ -72,7 +70,7 @@ pub fn run(
             }
 
             let dest = config_root.join(&entry.directory);
-            if !dest.exists() {
+            if !crate::git::is_checkout(&dest) {
                 return RepoStatus::Skip(format!("{} (not cloned)", name));
             }
 

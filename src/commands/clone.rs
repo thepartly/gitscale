@@ -93,7 +93,7 @@ pub fn run(
                 };
             }
 
-            if dest.exists() {
+            if crate::git::is_checkout(&dest) {
                 return RepoStatus::Skip(format!("{} (already exists)", name));
             }
 
@@ -120,7 +120,7 @@ pub fn run(
         anyhow::bail!("{} repo(s) failed to clone", failed);
     }
 
-    crate::resolve::resolve_and_link(&config.repos, &config_root, true, out)?;
+    crate::resolve::resolve_and_link(&config.repos, &config_root, true)?;
 
     Ok(())
 }

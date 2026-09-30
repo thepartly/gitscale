@@ -50,7 +50,7 @@ pub fn run(
                 }
                 continue;
             }
-            if dest.exists() {
+            if crate::git::is_checkout(&dest) {
                 if verbose {
                     writeln!(out, "Fetching {}...", entry.directory)?;
                 }
