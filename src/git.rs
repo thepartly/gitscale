@@ -533,18 +533,34 @@ fn walkdir_recursive(dir: &Path, result: &mut Vec<PathBuf>) {
 /// Fast-forward the checked-out branch to its upstream.
 ///
 /// With a cache entry behind it the tracking ref was just updated from there,
-/// so this is a local move and `git pull` would only mean a second trip to the
-/// remote. Without one it is that trip. Either way a branch that has diverged
-/// is left alone rather than forced.
+/// so this is a local move. Without one the refs come from the remote first —
+/// the trip `git pull` would make, but checked: a pull that could not reach
+/// the remote must fail, not report a checkout it never updated.
+///
+/// Only a branch that is behind is moved, and a merge that then fails (local
+/// changes in the way) is an error too. One that is up to date, ahead or has
+/// diverged is left alone rather than forced, and so is a detached HEAD or a
+/// branch with no upstream: there is nothing to fast-forward to.
 fn fast_forward(dest: &Path, source: &Source) -> Result<()> {
-    if source.local.is_some() {
+    if source.local.is_none() {
+        run_git(&["fetch", "--quiet"], Some(dest), true)?;
+    }
+    if !ref_exists(dest, "@{upstream}") {
+        return Ok(());
+    }
+    let behind = run_git(
+        &["merge-base", "--is-ancestor", "HEAD", "@{upstream}"],
+        Some(dest),
+        false,
+    )?
+    .status
+    .success();
+    if behind {
         run_git(
             &["merge", "--ff-only", "--quiet", "@{upstream}"],
             Some(dest),
-            false,
+            true,
         )?;
-    } else {
-        run_git(&["pull", "--ff-only", "--quiet"], Some(dest), false)?;
     }
     Ok(())
 }
@@ -701,7 +717,11 @@ fn fetch_shallow_revision(entry: &RepoEntry, dest: &Path) -> Result<()> {
 fn land_shallow(entry: &RepoEntry, dest: &Path) -> Result<()> {
     let rev = &entry.revision;
     if rev.is_empty() {
-        run_git(&["reset", "--hard", "@{upstream}"], Some(dest), false)?;
+        // Detached, or a branch with no upstream: nothing to follow. Otherwise
+        // the reset is checked, like every other move here.
+        if ref_exists(dest, "@{upstream}") {
+            run_git(&["reset", "--hard", "@{upstream}"], Some(dest), true)?;
+        }
         return Ok(());
     }
     let tracking = format!("refs/remotes/origin/{}", rev);

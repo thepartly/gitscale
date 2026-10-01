@@ -162,7 +162,7 @@ gitscale pull imports/core         # one entry
 |---|---|
 | Missing directory, or an empty one | Cloned, exactly as `clone` would |
 | Directory holding files but no repository | `FAIL`, left as it is, exactly as `clone` would |
-| Full clone, on a branch | Refs refreshed, checked out if it is on the wrong revision, then fast-forwarded (`--ff-only`). A diverged branch is left alone rather than forced |
+| Full clone, on a branch | Refs refreshed, checked out if it is on the wrong revision, then fast-forwarded (`--ff-only`). A diverged branch is left alone rather than forced; a remote that cannot be reached, or local changes that block the fast-forward, fail the entry |
 | Full clone, no revision | Stays on the branch it is on, which is fast-forwarded |
 | Shallow clone | Only the pinned branch or tag is fetched, at depth 1, and checked out: on the branch, or detached at the tag. With no revision, refetched and reset to the upstream commit |
 | Shallow clone pinned to a SHA | That one commit is fetched and reset to |

@@ -2409,6 +2409,81 @@ fn shallow_pull_pinned_to_tag_moves_to_new_tag() {
     );
 }
 
+/// A full checkout's pull that cannot reach the remote fails, rather than
+/// reporting `ok` for a checkout it never updated.
+#[test]
+fn pull_fails_when_the_remote_is_unreachable() {
+    for (name, flags) in [
+        ("pull_unreachable_cached", &[][..]),
+        ("pull_unreachable_no_cache", &["--no-cache"][..]),
+    ] {
+        let env = TestEnv::new(name);
+        let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "v1")]);
+        env.write_config(&format!(
+            "[repos]\n\"libs/mylib\" = {{ url = \"{}\", revision = \"main\" }}\n",
+            bare.display()
+        ));
+        let clone = [&["clone"][..], flags].concat();
+        assert!(env.run(&clone).success, "{}: clone failed", name);
+        std::fs::rename(&bare, bare.with_extension("gone")).unwrap();
+
+        let pull = [&["pull"][..], flags].concat();
+        let out = env.run(&pull);
+        assert!(!out.success, "{}: pull should fail: {}", name, out.stdout);
+        let text = format!("{}{}", out.stdout, out.stderr);
+        assert!(text.contains("FAIL  libs/mylib"), "{}: {}", name, text);
+    }
+}
+
+/// Fast-forward only: a branch with commits of its own and new ones upstream
+/// is left where it is, and the pull still succeeds.
+#[test]
+fn pull_leaves_a_diverged_branch_alone() {
+    let env = TestEnv::new("pull_diverged");
+    let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "v1")]);
+    env.write_config(&format!(
+        "[repos]\n\"libs/mylib\" = {{ url = \"{}\", revision = \"main\" }}\n",
+        bare.display()
+    ));
+    assert!(env.run(&["clone"]).success);
+    let dest = env.playground.join("libs/mylib");
+    helpers::run_git_pub(&dest, &["config", "user.email", "t@t.com"]);
+    helpers::run_git_pub(&dest, &["config", "user.name", "T"]);
+    std::fs::write(dest.join("local.txt"), "mine").unwrap();
+    helpers::run_git_pub(&dest, &["add", "-A"]);
+    helpers::run_git_pub(&dest, &["commit", "-q", "-m", "local"]);
+    let local = git_stdout(&dest, &["rev-parse", "HEAD"]);
+    commit_to_bare(&bare, "main", "a.txt", "v2");
+
+    let out = env.run(&["pull"]);
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    assert_eq!(git_stdout(&dest, &["rev-parse", "HEAD"]), local);
+}
+
+/// A fast-forward that local changes block fails, and the changes survive.
+#[test]
+fn pull_fails_when_local_changes_block_the_fast_forward() {
+    let env = TestEnv::new("pull_blocked_by_changes");
+    let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "v1")]);
+    env.write_config(&format!(
+        "[repos]\n\"libs/mylib\" = {{ url = \"{}\", revision = \"main\" }}\n",
+        bare.display()
+    ));
+    assert!(env.run(&["clone"]).success);
+    let dest = env.playground.join("libs/mylib");
+    std::fs::write(dest.join("a.txt"), "edited").unwrap();
+    commit_to_bare(&bare, "main", "a.txt", "v2");
+
+    let out = env.run(&["pull"]);
+    assert!(!out.success, "pull should fail: {}", out.stdout);
+    let text = format!("{}{}", out.stdout, out.stderr);
+    assert!(text.contains("FAIL  libs/mylib"), "{}", text);
+    assert_eq!(
+        std::fs::read_to_string(dest.join("a.txt")).unwrap(),
+        "edited"
+    );
+}
+
 /// No revision means "the branch the clone landed on": pull fast-forwards it
 /// rather than trying to check out an empty name.
 #[test]
