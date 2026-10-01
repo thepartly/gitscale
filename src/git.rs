@@ -117,6 +117,26 @@ fn stdout_str(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
+/// A read-only git query in `dir`: its trimmed output, or `None` when git
+/// fails — no repository there, no such ref, a git too old for the command.
+/// Callers that need to tell those apart use [`run_git`].
+pub(crate) fn query(dir: &Path, args: &[&str]) -> Option<String> {
+    let output = run_git(args, Some(dir), false).ok()?;
+    output.status.success().then(|| stdout_str(&output))
+}
+
+/// Point `dir`'s existing `origin` at `url`. `Ok(false)` when it already did,
+/// or when there is no `origin` to repoint.
+pub(crate) fn set_origin(dir: &Path, url: &str) -> Result<bool> {
+    match origin_url(dir) {
+        Some(current) if current != url => {
+            run_git(&["remote", "set-url", "origin", url], Some(dir), true)?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Core operations
 // ---------------------------------------------------------------------------
@@ -334,28 +354,14 @@ pub fn reconcile_remote(entry: &RepoEntry, root: &Path) -> Result<bool> {
     if !is_checkout(&dest) {
         return Ok(false);
     }
-    let current = run_git(&["remote", "get-url", "origin"], Some(&dest), false)?;
-    if !current.status.success() {
-        return Ok(false);
-    }
-    let url = remote_url(entry);
-    if stdout_str(&current) == url {
-        return Ok(false);
-    }
-    run_git(&["remote", "set-url", "origin", &url], Some(&dest), true)?;
-    Ok(true)
+    set_origin(&dest, &remote_url(entry))
 }
 
 /// The `origin` URL of the repository `dir` belongs to, or `None` if it is not
 /// in one or has no such remote. Resolved by git rather than by looking for a
 /// `.git` directory, so a path inside a repository answers for that repository.
 pub fn origin_url(dir: &Path) -> Option<String> {
-    let output = run_git(&["remote", "get-url", "origin"], Some(dir), false).ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let url = stdout_str(&output);
-    (!url.is_empty()).then_some(url)
+    query(dir, &["remote", "get-url", "origin"]).filter(|url| !url.is_empty())
 }
 
 /// The URL to use as `origin` for `entry`: the configured one, unless CI
@@ -375,11 +381,7 @@ fn ensure_ci_remote(entry: &RepoEntry, dest: &Path) -> Result<()> {
     let Some(url) = auth.remote_url(&entry.repo_url) else {
         return Ok(());
     };
-    let current = run_git(&["remote", "get-url", "origin"], Some(dest), false)?;
-    if !current.status.success() || stdout_str(&current) == url {
-        return Ok(());
-    }
-    run_git(&["remote", "set-url", "origin", &url], Some(dest), true)?;
+    set_origin(dest, &url)?;
     Ok(())
 }
 
@@ -731,13 +733,7 @@ fn land_shallow(entry: &RepoEntry, dest: &Path) -> Result<()> {
 /// What `name` resolves to in `dir` (a ref, `HEAD`, `<rev>^{commit}`…), or
 /// `None` when it does not.
 pub(crate) fn resolve_ref(dir: &Path, name: &str) -> Option<String> {
-    let output = run_git(
-        &["rev-parse", "--verify", "--quiet", name],
-        Some(dir),
-        false,
-    )
-    .ok()?;
-    output.status.success().then(|| stdout_str(&output))
+    query(dir, &["rev-parse", "--verify", "--quiet", name])
 }
 
 pub(crate) fn ref_exists(dir: &Path, name: &str) -> bool {
@@ -846,17 +842,12 @@ pub fn clean_repo(dir: &Path, excludes: &[String], force: bool) -> Result<Vec<St
 }
 
 pub fn is_repo_root(dir: &Path) -> bool {
-    run_git(&["rev-parse", "--show-toplevel"], Some(dir), false)
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| {
-            let top = PathBuf::from(stdout_str(&o));
-            match (fs::canonicalize(&top), fs::canonicalize(dir)) {
-                (Ok(a), Ok(b)) => a == b,
-                _ => false,
-            }
-        })
-        .unwrap_or(false)
+    query(dir, &["rev-parse", "--show-toplevel"]).is_some_and(|top| {
+        match (fs::canonicalize(top), fs::canonicalize(dir)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    })
 }
 
 /// Resolve a path inside `repo`'s git directory, the way git itself would.
@@ -864,12 +855,8 @@ pub fn is_repo_root(dir: &Path) -> bool {
 /// Built by asking git rather than by joining `.git/…`: in a linked worktree
 /// `.git` is a file, so the hand-built path matches nothing and the caller
 /// quietly does the wrong thing instead of erroring.
-pub fn git_path(repo: &Path, name: &str) -> Option<std::path::PathBuf> {
-    let output = run_git(&["rev-parse", "--git-path", name], Some(repo), false).ok()?;
-    output
-        .status
-        .success()
-        .then(|| repo.join(stdout_str(&output)))
+pub fn git_path(repo: &Path, name: &str) -> Option<PathBuf> {
+    query(repo, &["rev-parse", "--git-path", name]).map(|path| repo.join(path))
 }
 
 /// Repack `repo` against its alternates and drop what it no longer needs to

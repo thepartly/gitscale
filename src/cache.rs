@@ -710,7 +710,7 @@ fn served_by_snapshot(repo: &Path, url: &str, cache_root: Option<&Path>) -> bool
 }
 
 /// The object stores `repo` borrows from, whatever they are.
-fn alternates_of(repo: &Path) -> Vec<PathBuf> {
+pub(crate) fn alternates_of(repo: &Path) -> Vec<PathBuf> {
     let Some(path) = crate::git::git_path(repo, "objects/info/alternates") else {
         return Vec::new();
     };
@@ -765,18 +765,15 @@ fn is_entry(path: &Path) -> bool {
 /// where the same repository is reached over HTTPS with a job token.
 fn ensure_entry(path: &Path, url: &str) -> Result<()> {
     if is_entry(path) {
-        let current = git_in(path, &["remote", "get-url", "origin"], false)?;
-        let args: &[&str] = if current.status.success() {
-            if String::from_utf8_lossy(&current.stdout).trim() == url {
-                return Ok(());
-            }
-            &["remote", "set-url", "origin"]
+        if crate::git::origin_url(path).is_some() {
+            crate::git::set_origin(path, url)?;
         } else {
-            &["remote", "add", "--mirror=fetch", "origin"]
-        };
-        let mut full = args.to_vec();
-        full.push(url);
-        git_in(path, &full, true)?;
+            git_in(
+                path,
+                &["remote", "add", "--mirror=fetch", "origin", url],
+                true,
+            )?;
+        }
         return Ok(());
     }
 

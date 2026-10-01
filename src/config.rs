@@ -270,6 +270,42 @@ pub fn load_config_optional(config_path: &Path) -> Option<GitScaleConfig> {
     load_config(config_path).ok()
 }
 
+/// The config governing `root` (found by searching upward from it, or from the
+/// current directory), and the workspace directory it lives in — what every
+/// multi-repo command starts from.
+pub fn load_workspace(root: Option<&Path>) -> Result<(GitScaleConfig, PathBuf)> {
+    let config_path = find_config(root)?;
+    let config = load_config(&config_path)?;
+    let config_root = config_path
+        .parent()
+        .expect("a config file always has a parent directory")
+        .to_path_buf();
+    Ok((config, config_root))
+}
+
+/// The entries `names` selects: all of them when none are given, otherwise
+/// exactly those directories, and an error naming any that are not declared.
+pub fn filter_entries(entries: &[RepoEntry], names: &[String]) -> Result<Vec<RepoEntry>> {
+    if names.is_empty() {
+        return Ok(entries.to_vec());
+    }
+    let matched: Vec<RepoEntry> = entries
+        .iter()
+        .filter(|e| names.contains(&e.directory))
+        .cloned()
+        .collect();
+    let matched_names: Vec<&str> = matched.iter().map(|e| e.directory.as_str()).collect();
+    let unknown: Vec<&str> = names
+        .iter()
+        .filter(|n| !matched_names.contains(&n.as_str()))
+        .map(|n| n.as_str())
+        .collect();
+    if !unknown.is_empty() {
+        bail!("Unknown repos: {}", unknown.join(", "));
+    }
+    Ok(matched)
+}
+
 // ---------------------------------------------------------------------------
 // Validation
 //

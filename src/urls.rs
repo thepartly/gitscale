@@ -1,11 +1,17 @@
 use anyhow::{bail, Result};
 use regex::Regex;
+use std::sync::OnceLock;
 use url::Url;
+
+/// An scp-style SSH address, `user@host:path`: the host, then the path.
+fn ssh_address() -> &'static Regex {
+    static SSH: OnceLock<Regex> = OnceLock::new();
+    SSH.get_or_init(|| Regex::new(r"^[\w-]+@([\w.\-]+):(.*)").unwrap())
+}
 
 pub fn extract_hostname(repo_url: &str) -> Result<String> {
     // SSH: git@hostname:owner/repo.git
-    let ssh_re = Regex::new(r"^[\w-]+@([\w.\-]+):").unwrap();
-    if let Some(caps) = ssh_re.captures(repo_url) {
+    if let Some(caps) = ssh_address().captures(repo_url) {
         return Ok(caps[1].to_string());
     }
 
@@ -23,9 +29,8 @@ pub fn extract_hostname(repo_url: &str) -> Result<String> {
 /// suffix kept — the part that survives a change of transport.
 pub fn extract_path(repo_url: &str) -> Result<String> {
     // SSH: git@hostname:owner/repo.git
-    let ssh_re = Regex::new(r"^[\w-]+@[\w.\-]+:(.*)").unwrap();
-    let path = if let Some(caps) = ssh_re.captures(repo_url) {
-        caps[1].to_string()
+    let path = if let Some(caps) = ssh_address().captures(repo_url) {
+        caps[2].to_string()
     } else if let Ok(parsed) = Url::parse(repo_url) {
         parsed.path().to_string()
     } else {
@@ -38,26 +43,18 @@ pub fn extract_path(repo_url: &str) -> Result<String> {
     Ok(path.to_string())
 }
 
+/// The owner and repository of a URL: the first segment of its path, and
+/// everything after it, so a nested GitLab group stays whole in the second.
 pub fn extract_owner_repo(repo_url: &str) -> Result<(String, String)> {
-    // SSH: git@hostname:owner/repo.git
-    let ssh_re = Regex::new(r"^[\w-]+@[\w.\-]+:(.*)").unwrap();
-    let path = if let Some(caps) = ssh_re.captures(repo_url) {
-        caps[1].to_string()
-    } else if let Ok(parsed) = Url::parse(repo_url) {
-        parsed.path().to_string()
-    } else {
-        bail!("Cannot extract owner/repo from URL: {}", repo_url)
-    };
-
-    // Strip leading slash and .git suffix
-    let path = path.trim_matches('/');
-    let path = path.strip_suffix(".git").unwrap_or(path);
-
-    let parts: Vec<&str> = path.splitn(2, '/').collect();
-    if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
-        bail!("Cannot extract owner/repo from URL: {}", repo_url);
+    let path = extract_path(repo_url)
+        .map_err(|_| anyhow::anyhow!("Cannot extract owner/repo from URL: {}", repo_url))?;
+    let path = path.strip_suffix(".git").unwrap_or(&path);
+    match path.split_once('/') {
+        Some((owner, repo)) if !owner.is_empty() && !repo.is_empty() => {
+            Ok((owner.to_string(), repo.to_string()))
+        }
+        _ => bail!("Cannot extract owner/repo from URL: {}", repo_url),
     }
-    Ok((parts[0].to_string(), parts[1].to_string()))
 }
 
 /// True for something that names a remote repository rather than a directory
@@ -69,8 +66,7 @@ pub fn extract_owner_repo(repo_url: &str) -> Result<(String, String)> {
 /// path is the one shape that looks like a directory name; spell it
 /// `file://…` or absolutely to bootstrap from it.
 pub fn looks_like_remote(value: &str) -> bool {
-    static SSH: &str = r"^[\w-]+@[\w.\-]+:";
-    value.contains("://") || value.starts_with('/') || Regex::new(SSH).unwrap().is_match(value)
+    value.contains("://") || value.starts_with('/') || ssh_address().is_match(value)
 }
 
 /// Canonicalize a git remote URL so that different transport forms of the same
@@ -99,6 +95,31 @@ mod tests {
         assert!(looks_like_remote("/srv/mirrors/repo.git"));
         assert!(!looks_like_remote("libs/core"));
         assert!(!looks_like_remote("core"));
+    }
+
+    #[test]
+    fn owner_and_repo_survive_every_transport() {
+        let pair = |o: &str, r: &str| (o.to_string(), r.to_string());
+        for url in [
+            "git@github.com:org/repo.git",
+            "https://github.com/org/repo",
+            "https://github.com/org/repo.git/",
+            "ssh://git@github.com/org/repo.git",
+        ] {
+            assert_eq!(
+                extract_owner_repo(url).unwrap(),
+                pair("org", "repo"),
+                "{}",
+                url
+            );
+        }
+        // A nested group keeps everything after the owner.
+        assert_eq!(
+            extract_owner_repo("git@gitlab.com:group/sub/repo.git").unwrap(),
+            pair("group", "sub/repo")
+        );
+        assert!(extract_owner_repo("https://github.com/repo").is_err());
+        assert!(extract_owner_repo("not a url").is_err());
     }
 
     #[test]

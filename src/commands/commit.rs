@@ -3,8 +3,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 
-use crate::commands::clone::filter_entries;
-use crate::config::{find_config, load_config};
+use crate::config::{filter_entries, load_workspace};
 use crate::git::{commit_path, is_repo_root};
 use crate::progress::{run_parallel, RepoStatus};
 
@@ -20,9 +19,7 @@ pub fn run(
         anyhow::bail!("commit message must not be empty");
     }
 
-    let config_path = find_config(root)?;
-    let config_root = config_path.parent().unwrap().to_path_buf();
-    let config = load_config(&config_path)?;
+    let (config, config_root) = load_workspace(root)?;
     let selected = filter_entries(&config.repos, names)?;
 
     let entry_map: HashMap<&str, &crate::config::RepoEntry> =

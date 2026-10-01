@@ -100,19 +100,17 @@ pub fn source_workspace(root: &Path) -> Option<PathBuf> {
 /// The main worktree of the repository at `root`, when `root` is some *other*
 /// worktree of it.
 pub(crate) fn main_worktree(root: &Path) -> Option<PathBuf> {
-    let listing = git_query(&["worktree", "list", "--porcelain"], root)?;
     // `worktree list` always names the main worktree first, whichever worktree
     // it is asked from. That ordering is what makes the "never borrow from a
     // sibling" rule automatic rather than something to enforce separately.
-    let first = listing.lines().next()?.strip_prefix("worktree ")?;
-    let main = PathBuf::from(first);
+    let main = worktrees(root).into_iter().next()?;
     (!same_dir(&main, root)).then_some(main)
 }
 
 /// Every worktree of the repository at `root`, the main one first — the set
 /// that shares one object store, and so everything that relinking it touches.
 pub(crate) fn worktrees(root: &Path) -> Vec<PathBuf> {
-    git_query(&["worktree", "list", "--porcelain"], root)
+    crate::git::query(root, &["worktree", "list", "--porcelain"])
         .map(|listing| {
             listing
                 .lines()
@@ -125,19 +123,8 @@ pub(crate) fn worktrees(root: &Path) -> Vec<PathBuf> {
 
 /// The workspace whose object store `root` already borrows from.
 fn alternates_workspace(root: &Path) -> Option<PathBuf> {
-    // Ask git for the path rather than building `<root>/.git/objects/...`: in
-    // a worktree `.git` is a file, so the hand-built path matches nothing and
-    // the check quietly fails instead of erroring.
-    let relative = git_query(
-        &["rev-parse", "--git-path", "objects/info/alternates"],
-        root,
-    )?;
-    let contents = std::fs::read_to_string(root.join(relative)).ok()?;
-    let objects = contents
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with('#'))?;
-    workspace_of_object_store(Path::new(objects))
+    let objects = crate::cache::alternates_of(root).into_iter().next()?;
+    workspace_of_object_store(&objects)
 }
 
 /// `<workspace>/.git/objects` back to `<workspace>`. Any other shape — a bare
@@ -189,22 +176,6 @@ fn same_dir(a: &Path, b: &Path) -> bool {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,
     }
-}
-
-/// Run a read-only git query. Every caller treats failure as "no source
-/// available", so a missing git, a directory that is not a repository and a
-/// git too old for the subcommand all collapse to the same answer.
-fn git_query(args: &[&str], cwd: &Path) -> Option<String> {
-    let output = crate::git::git_command()
-        .args(args)
-        .current_dir(cwd)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 #[cfg(test)]

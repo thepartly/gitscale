@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::io::Write;
 use std::path::Path;
 
-use crate::config::{find_config, load_config};
+use crate::config::{filter_entries, load_workspace, GitScaleConfig};
 use crate::git::is_tree_modified;
 use crate::hooks;
 use crate::resolve::{create_symlinks, resolve_recursive};
@@ -18,14 +18,11 @@ pub fn run(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
+    let (config, config_root) = load_workspace(root)?;
     crate::commands::clone::run(root, names, verbose, no_cache, interactive, out, err)?;
-    reconcile_remotes(root, names, out)?;
+    reconcile_remotes(&config, &config_root, names, out)?;
     // pull runs its own post_sync hook, skip it here to avoid double-run
     crate::commands::pull::run_no_hooks(root, names, verbose, no_cache, interactive, out, err)?;
-
-    let config_path = find_config(root)?;
-    let config_root = config_path.parent().unwrap().to_path_buf();
-    let config = load_config(&config_path)?;
 
     // Restore symlinks for unlinked clones and remove orphaned links before
     // pushing, so local hygiene isn't blocked by a remote/auth failure.
@@ -38,15 +35,17 @@ pub fn run(
 }
 
 /// Update each existing clone's `origin` remote to match the configured URL.
-fn reconcile_remotes(root: Option<&Path>, names: &[String], out: &mut dyn Write) -> Result<()> {
-    let config_path = find_config(root)?;
-    let config_root = config_path.parent().unwrap().to_path_buf();
-    let config = load_config(&config_path)?;
-    let selected = crate::commands::clone::filter_entries(&config.repos, names)?;
+fn reconcile_remotes(
+    config: &GitScaleConfig,
+    config_root: &Path,
+    names: &[String],
+    out: &mut dyn Write,
+) -> Result<()> {
+    let selected = filter_entries(&config.repos, names)?;
 
     let mut header_done = false;
     for entry in &selected {
-        if crate::git::reconcile_remote(entry, &config_root)? {
+        if crate::git::reconcile_remote(entry, config_root)? {
             if !header_done {
                 writeln!(out, "Reconciling remotes...")?;
                 header_done = true;

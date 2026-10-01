@@ -1,15 +1,13 @@
 use anyhow::{bail, Context, Result};
-use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 
-use crate::cache::{self, Cache};
-use crate::commands::cache as cache_cmd;
-use crate::config::{find_config, load_config, CacheSettings, RepoEntry, CONFIG_FILENAME};
-use crate::git::{clone_repo, is_ci, pull_repo};
-use crate::progress::{run_parallel, RepoStatus};
+use crate::cache::Cache;
+use crate::commands::cache::Sources;
+use crate::config::{filter_entries, load_workspace, CacheSettings, RepoEntry, CONFIG_FILENAME};
+use crate::git::{clone_repo, pull_repo};
+use crate::progress::{run_entries, RepoStatus};
 use crate::resolve::is_outer_link;
-use crate::share;
 use crate::storage::clone_artefact;
 
 pub fn run(
@@ -34,9 +32,7 @@ pub fn run(
         );
     }
 
-    let config_path = find_config(root)?;
-    let config_root = config_path.parent().unwrap().to_path_buf();
-    let config = load_config(&config_path)?;
+    let (config, config_root) = load_workspace(root)?;
     let selected = filter_entries(&config.repos, names)?;
 
     if selected.is_empty() {
@@ -44,24 +40,16 @@ pub fn run(
         return Ok(());
     }
 
-    let entry_map: HashMap<&str, &RepoEntry> =
-        selected.iter().map(|e| (e.directory.as_str(), e)).collect();
-    let dir_names: Vec<String> = selected.iter().map(|e| e.directory.clone()).collect();
     let storage_url = &config.storage_url;
-    let ci = is_ci();
-    // Resolved once: every entry is mapped onto the same source workspace, and
-    // the lookup shells out to git.
-    let source = share::source_workspace(&config_root);
-    let dissociate = config.share.dissociate;
-    let cache = cache_cmd::open(&config, no_cache);
-    cache_cmd::adopt_root(cache.as_ref(), &config, &config_root, out)?;
+    let sources = Sources::adopting(&config, &config_root, no_cache, verbose, out)?;
 
-    let failed = run_parallel(
+    run_entries(
         "Cloning missing repos...",
-        &dir_names,
+        "clone",
+        &selected,
         interactive,
-        |name| {
-            let entry = &entry_map[name];
+        |entry| {
+            let name = entry.directory.as_str();
             let dest = config_root.join(&entry.directory);
 
             // Replace symlinks with actual clones — except, unless the entry
@@ -97,14 +85,7 @@ pub fn run(
 
             // Cache first: the entry talks to the remote, then the workspace
             // is built from whatever that left on local disk.
-            let from = cache::source_for(
-                cache.as_ref(),
-                source.as_deref(),
-                entry,
-                dissociate,
-                ci,
-                verbose,
-            );
+            let from = sources.for_entry(entry);
             match clone_repo(entry, &config_root, verbose, &from) {
                 Ok(()) => RepoStatus::Ok(name.to_string()),
                 Err(e) => RepoStatus::Fail(format!("{}: {}", name, e)),
@@ -114,38 +95,19 @@ pub fn run(
         err,
     )?;
 
-    if failed > 0 {
-        anyhow::bail!("{} repo(s) failed to clone", failed);
-    }
-
     let adopted = crate::resolve::resolve_and_link(&config.repos, &config_root)?;
-    move_to_adopted(
-        &config.repos,
-        &config_root,
-        adopted,
-        cache.as_ref(),
-        source.as_deref(),
-        dissociate,
-        ci,
-        verbose,
-    )?;
-
-    Ok(())
+    move_to_adopted(&config.repos, &config_root, adopted, &sources, verbose)
 }
 
 /// Move each root entry with no revision of its own to the one a child pins,
 /// the way `pull` moves any checkout: readonly files stay readonly, a shallow
 /// clone fetches the ref it was never cloned at, and CI's cache pins that
 /// revision rather than the default branch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn move_to_adopted(
     repos: &[RepoEntry],
     config_root: &Path,
     adopted: impl IntoIterator<Item = (String, String)>,
-    cache: Option<&Cache>,
-    source: Option<&Path>,
-    dissociate: bool,
-    ci: bool,
+    sources: &Sources,
     verbose: bool,
 ) -> Result<()> {
     for (directory, revision) in adopted {
@@ -162,7 +124,7 @@ pub(crate) fn move_to_adopted(
             revision,
             ..original.clone()
         };
-        let from = cache::source_for(cache, source, &entry, dissociate, ci, verbose);
+        let from = sources.for_entry(&entry);
         pull_repo(&entry, config_root, verbose, &from).with_context(|| {
             format!(
                 "{}: moving to adopted revision '{}'",
@@ -266,27 +228,6 @@ fn default_directory(url: &str) -> String {
     } else {
         name.to_string()
     }
-}
-
-pub fn filter_entries(entries: &[RepoEntry], names: &[String]) -> Result<Vec<RepoEntry>> {
-    if names.is_empty() {
-        return Ok(entries.to_vec());
-    }
-    let matched: Vec<RepoEntry> = entries
-        .iter()
-        .filter(|e| names.contains(&e.directory))
-        .cloned()
-        .collect();
-    let matched_names: Vec<&str> = matched.iter().map(|e| e.directory.as_str()).collect();
-    let unknown: Vec<&str> = names
-        .iter()
-        .filter(|n| !matched_names.contains(&n.as_str()))
-        .map(|n| n.as_str())
-        .collect();
-    if !unknown.is_empty() {
-        anyhow::bail!("Unknown repos: {}", unknown.join(", "));
-    }
-    Ok(matched)
 }
 
 #[cfg(test)]

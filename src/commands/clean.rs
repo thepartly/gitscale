@@ -3,8 +3,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::commands::clone::filter_entries;
-use crate::config::{find_config, load_config, RepoEntry, CONFIG_FILENAME};
+use crate::config::{filter_entries, load_config, load_workspace, RepoEntry, CONFIG_FILENAME};
 use crate::git::{clean_repo, is_repo_root};
 use crate::progress::{run_parallel, RepoStatus};
 use crate::resolve::resolve_recursive;
@@ -40,9 +39,7 @@ pub fn run(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
-    let config_path = find_config(root)?;
-    let config_root = config_path.parent().unwrap().to_path_buf();
-    let config = load_config(&config_path)?;
+    let (config, config_root) = load_workspace(root)?;
 
     for pattern in cli_excludes {
         if pattern.is_empty() {

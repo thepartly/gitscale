@@ -1,5 +1,8 @@
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use std::collections::HashMap;
 use std::io::Write;
+
+use crate::config::RepoEntry;
 
 /// Returns true if stdout is a terminal (interactive session).
 pub fn is_interactive() -> bool {
@@ -32,6 +35,38 @@ fn note_hint(hints: &mut Vec<String>, hint: Option<&str>) {
             hints.push(hint.to_string());
         }
     }
+}
+
+/// Run `op` on each of `entries` through [`run_parallel`] — the shape every
+/// multi-repo command shares — and fail with "N repo(s) failed to `verb`" if
+/// any did.
+pub fn run_entries<F>(
+    heading: &str,
+    verb: &str,
+    entries: &[RepoEntry],
+    interactive: bool,
+    op: F,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> anyhow::Result<()>
+where
+    F: Fn(&RepoEntry) -> RepoStatus + Send + Sync,
+{
+    let by_name: HashMap<&str, &RepoEntry> =
+        entries.iter().map(|e| (e.directory.as_str(), e)).collect();
+    let names: Vec<String> = entries.iter().map(|e| e.directory.clone()).collect();
+    let failed = run_parallel(
+        heading,
+        &names,
+        interactive,
+        |name| op(by_name[name]),
+        out,
+        err,
+    )?;
+    if failed > 0 {
+        anyhow::bail!("{} repo(s) failed to {}", failed, verb);
+    }
+    Ok(())
 }
 
 /// Run operations on repos in parallel with a live-updating display on TTY,

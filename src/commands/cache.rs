@@ -9,13 +9,13 @@
 use anyhow::Result;
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::cache::{self, Adoption, Cache};
-use crate::commands::clone::filter_entries;
-use crate::config::{find_config, load_config, GitScaleConfig, RepoEntry};
+use crate::config::{filter_entries, load_workspace, GitScaleConfig, RepoEntry};
 use crate::git::is_ci;
 use crate::progress::{run_parallel, RepoStatus};
+use crate::share::Source;
 
 /// The cache a command should use: what the config asks for, unless
 /// `--no-cache` was given.
@@ -24,6 +24,57 @@ pub fn open(config: &GitScaleConfig, no_cache: bool) -> Option<Cache> {
         return None;
     }
     Cache::open(&config.cache)
+}
+
+/// Where a command's checkouts get their objects, worked out once per command:
+/// the cache (unless `--no-cache`), the workspace this one was derived from,
+/// and whether this is CI. [`Sources::for_entry`] answers for each entry.
+pub struct Sources {
+    pub cache: Option<Cache>,
+    workspace: Option<PathBuf>,
+    dissociate: bool,
+    pub ci: bool,
+    verbose: bool,
+}
+
+impl Sources {
+    pub fn new(config: &GitScaleConfig, config_root: &Path, no_cache: bool, verbose: bool) -> Self {
+        Sources {
+            cache: open(config, no_cache),
+            // Resolved once: every entry maps onto the same source workspace,
+            // and the lookup shells out to git.
+            workspace: crate::share::source_workspace(config_root),
+            dissociate: config.share.dissociate,
+            ci: is_ci(),
+            verbose,
+        }
+    }
+
+    /// Like [`Sources::new`], for a command that updates the cache: the
+    /// workspace root is put on it too, as the config asks — see
+    /// [`adopt_root`].
+    pub fn adopting(
+        config: &GitScaleConfig,
+        config_root: &Path,
+        no_cache: bool,
+        verbose: bool,
+        out: &mut dyn Write,
+    ) -> Result<Self> {
+        let sources = Sources::new(config, config_root, no_cache, verbose);
+        adopt_root(sources.cache.as_ref(), config, config_root, out)?;
+        Ok(sources)
+    }
+
+    pub fn for_entry(&self, entry: &RepoEntry) -> Source {
+        cache::source_for(
+            self.cache.as_ref(),
+            self.workspace.as_deref(),
+            entry,
+            self.dissociate,
+            self.ci,
+            self.verbose,
+        )
+    }
 }
 
 /// Relink the workspace's own root repository to the cache, if the config asks
@@ -68,7 +119,7 @@ pub fn adopt_root(
 /// From a linked worktree it refuses unless `shared` is set: the object store
 /// it would relink belongs to the main worktree, and to every sibling with it.
 pub fn adopt(root: Option<&Path>, shared: bool, no_cache: bool, out: &mut dyn Write) -> Result<()> {
-    let (config, config_root) = load(root)?;
+    let (config, config_root) = load_workspace(root)?;
     let Some(cache) = open(&config, no_cache) else {
         writeln!(out, "The object cache is off.")?;
         return Ok(());
@@ -167,7 +218,7 @@ pub fn update(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
-    let (config, _config_root) = load(root)?;
+    let (config, _config_root) = load_workspace(root)?;
     let Some(cache) = open(&config, no_cache) else {
         writeln!(out, "The object cache is off.")?;
         return Ok(());
@@ -242,7 +293,7 @@ pub fn status(
     // As with `compact`: the cache belongs to the user, so this works from
     // anywhere. A config is used when there is one, to name the entries this
     // workspace declares and to honour `[cache] dir`.
-    let (config, _) = load(root).unwrap_or_default();
+    let (config, _) = load_workspace(root).unwrap_or_default();
     let Some(cache) = open(&config, no_cache) else {
         writeln!(out, "The object cache is off.")?;
         return Ok(());
@@ -405,7 +456,7 @@ pub fn repair(
     no_cache: bool,
     out: &mut dyn Write,
 ) -> Result<()> {
-    let (config, config_root) = load(root)?;
+    let (config, config_root) = load_workspace(root)?;
     let Some(cache) = open(&config, no_cache) else {
         writeln!(out, "The object cache is off.")?;
         return Ok(());
@@ -455,10 +506,7 @@ pub fn compact(
     // A config is not required here: the cache belongs to the user, not to any
     // one workspace, so this works from anywhere. One is used when there is
     // one, so that `[cache] dir` is honoured.
-    let config = find_config(root)
-        .ok()
-        .and_then(|path| load_config(&path).ok())
-        .unwrap_or_default();
+    let (config, _) = load_workspace(root).unwrap_or_default();
     let Some(cache) = open(&config, no_cache) else {
         writeln!(out, "The object cache is off.")?;
         return Ok(());
@@ -481,12 +529,6 @@ pub fn compact(
         cache::human_size(after.bytes)
     )?;
     Ok(())
-}
-
-fn load(root: Option<&Path>) -> Result<(GitScaleConfig, std::path::PathBuf)> {
-    let config_path = find_config(root)?;
-    let config_root = config_path.parent().unwrap().to_path_buf();
-    Ok((load_config(&config_path)?, config_root))
 }
 
 /// The selected entries a cache can hold anything for. An artefact is an

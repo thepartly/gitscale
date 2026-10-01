@@ -3,13 +3,10 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::cache::{self, Cache};
-use crate::commands::cache as cache_cmd;
-use crate::config::{find_config, load_config};
-use crate::git::{
-    fetch_repo, get_artefact_status, get_repo_status, is_ci, is_tree_modified, RepoStatus,
-};
+use crate::commands::cache::Sources;
+use crate::config::load_workspace;
+use crate::git::{fetch_repo, get_artefact_status, get_repo_status, is_tree_modified, RepoStatus};
 use crate::resolve::resolve_recursive;
-use crate::share;
 use crate::storage::fetch_artefact;
 
 pub fn run(
@@ -21,20 +18,17 @@ pub fn run(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
-    let config_path = find_config(root)?;
-    let config_root = config_path.parent().unwrap().to_path_buf();
-    let config = load_config(&config_path)?;
+    let (config, config_root) = load_workspace(root)?;
 
     if config.repos.is_empty() {
         writeln!(out, "No repos declared in .gitscale.toml")?;
         return Ok(());
     }
 
-    let cache = cache_cmd::open(&config, no_cache);
+    // Never `Sources::adopting`: status changes nothing, even with --fetch.
+    let sources = Sources::new(&config, &config_root, no_cache, verbose);
 
     if do_fetch {
-        let ci = is_ci();
-        let workspace = share::source_workspace(&config_root);
         for entry in &config.repos {
             let dest = config_root.join(&entry.directory);
             let fetched = if entry.is_artefact() {
@@ -51,14 +45,7 @@ pub fn run(
                 if verbose {
                     writeln!(out, "Fetching {}...", entry.directory)?;
                 }
-                let from = cache::source_for(
-                    cache.as_ref(),
-                    workspace.as_deref(),
-                    entry,
-                    config.share.dissociate,
-                    ci,
-                    verbose,
-                );
+                let from = sources.for_entry(entry);
                 fetch_repo(entry, &config_root, &from)
             } else {
                 Ok(())
@@ -131,7 +118,7 @@ pub fn run(
     }
 
     if output_format == "json" {
-        print_json(&statuses, &orphans, cache.as_ref(), out)?;
+        print_json(&statuses, &orphans, sources.cache.as_ref(), out)?;
     } else {
         print_table(&statuses, &orphans, out)?;
     }

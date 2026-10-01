@@ -1,15 +1,11 @@
 use anyhow::Result;
-use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 
-use crate::cache;
-use crate::commands::cache as cache_cmd;
-use crate::commands::clone::filter_entries;
-use crate::config::{find_config, load_config};
-use crate::git::{fetch_repo, is_ci};
-use crate::progress::{run_parallel, RepoStatus};
-use crate::share;
+use crate::commands::cache::Sources;
+use crate::config::{filter_entries, load_workspace};
+use crate::git::fetch_repo;
+use crate::progress::{run_entries, RepoStatus};
 use crate::storage::fetch_artefact;
 
 pub fn run(
@@ -21,9 +17,7 @@ pub fn run(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
-    let config_path = find_config(root)?;
-    let config_root = config_path.parent().unwrap().to_path_buf();
-    let config = load_config(&config_path)?;
+    let (config, config_root) = load_workspace(root)?;
     let selected = filter_entries(&config.repos, names)?;
 
     if selected.is_empty() {
@@ -31,21 +25,16 @@ pub fn run(
         return Ok(());
     }
 
-    let entry_map: HashMap<&str, &crate::config::RepoEntry> =
-        selected.iter().map(|e| (e.directory.as_str(), e)).collect();
-    let dir_names: Vec<String> = selected.iter().map(|e| e.directory.clone()).collect();
     let storage_url = &config.storage_url;
-    let ci = is_ci();
-    let workspace = share::source_workspace(&config_root);
-    let dissociate = config.share.dissociate;
-    let cache = cache_cmd::open(&config, no_cache);
+    let sources = Sources::adopting(&config, &config_root, no_cache, verbose, out)?;
 
-    let failed = run_parallel(
+    run_entries(
         "Fetching...",
-        &dir_names,
+        "fetch",
+        &selected,
         interactive,
-        |name| {
-            let entry = &entry_map[name];
+        |entry| {
+            let name = entry.directory.as_str();
 
             if entry.is_artefact() {
                 if storage_url.is_empty() {
@@ -77,14 +66,7 @@ pub fn run(
             // Updates the cache entry as well: a fetch that only advanced
             // this workspace's refs would leave every other one to download
             // the same objects again.
-            let from = cache::source_for(
-                cache.as_ref(),
-                workspace.as_deref(),
-                entry,
-                dissociate,
-                ci,
-                verbose,
-            );
+            let from = sources.for_entry(entry);
             match fetch_repo(entry, &config_root, &from) {
                 Ok(()) => RepoStatus::Ok(name.to_string()),
                 Err(e) => RepoStatus::Fail(format!("{}: {}", name, e)),
@@ -92,10 +74,5 @@ pub fn run(
         },
         out,
         err,
-    )?;
-
-    if failed > 0 {
-        anyhow::bail!("{} repo(s) failed to fetch", failed);
-    }
-    Ok(())
+    )
 }
