@@ -51,10 +51,11 @@ gitscale status
 ```
 
 ```
-      REPO             PATH   MODE        REF    EXPECTED   STATUS
-✔     imports/core     -      readonly    main   main       ok
-✔     imports/utils    -      readwrite   v2.1   v2.1       ok
-⤷     imports/shared   ../s   readonly    main   main       symlink
+    REPO             PATH   MODE        REF       EXPECTED   STATUS     RESOLUTION
+✔   imports/core     -      readonly    main      main       ok
+⤷   imports/shared   ../s   readonly    main      main       symlink
+◆   imports/utils    -      readwrite   3f2a9c1   v2.3       detached   raised from v2.1 by imports/core, 2 requests
+hint: gitscale status --why <dir> lists every request behind a revision
 ```
 
 ## Cloning a workspace
@@ -97,9 +98,12 @@ gitscale clone https://github.com/org/root.git
   disk), and `artefact`: the build output the repository's own pipeline
   published with `gitscale artefact publish`, one OCI image per commit, pulled
   from GitLab's registry, GHCR or any other.
-- **Transitive dependencies deduped by symlink**, hoisted to the root, with
-  conflicting revision claims reported as an error rather than silently
-  divergent copies.
+- **Transitive dependencies resolved as one graph**: every repository asks for
+  what it needs, the highest version wins, each major is checked out once and
+  linked into every dependant, and dependencies the root never names are
+  brought in under a configurable directory (`imports/` by default) from an
+  allowlist. `status --why` shows how each
+  revision was chosen.
 - **An object cache, on by default**, so a second workspace, a second worktree
   or the next CI job on the same runner costs nothing over the wire.
 - **Git hooks** that make `git clone`, `git checkout` and `git worktree add`

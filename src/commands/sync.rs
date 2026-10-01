@@ -2,10 +2,10 @@ use anyhow::Result;
 use std::io::Write;
 use std::path::Path;
 
-use crate::config::{filter_entries, load_workspace, GitScaleConfig};
+use crate::config::{filter_entries, load_workspace};
 use crate::git::is_tree_modified;
 use crate::hooks;
-use crate::resolve::{create_symlinks, resolve_recursive};
+use crate::resolve::create_symlinks;
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -19,29 +19,106 @@ pub fn run(
     err: &mut dyn Write,
 ) -> Result<()> {
     let (config, config_root) = load_workspace(root)?;
-    crate::commands::clone::run(root, names, verbose, no_cache, interactive, out, err)?;
-    reconcile_remotes(&config, &config_root, names, out)?;
+    // Every step runs, whatever an earlier one could not do for some entry:
+    // one repository failing must not leave the rest unpulled, unlinked or
+    // unpushed. The first failure is what sync exits with, at the end.
+    let mut failed: Option<anyhow::Error> = None;
+    let mut keep = |result: Result<()>| {
+        if let Err(e) = result {
+            failed.get_or_insert(e);
+        }
+    };
+    keep(crate::commands::clone::run(
+        root,
+        names,
+        verbose,
+        no_cache,
+        interactive,
+        out,
+        err,
+    ));
+    // Every checkout the workspace has, implicit ones included — offline:
+    // clone has just fetched what resolution reads.
+    let checkouts = crate::resolve::workspace(
+        &config,
+        &config_root,
+        false,
+        crate::commands::cache::open(&config, no_cache),
+        None,
+        verbose,
+    )
+    .map(|r| r.entries())
+    .unwrap_or_else(|_| config.repos.clone());
+    keep(reconcile_remotes(&checkouts, &config_root, names, out));
     // pull runs its own post_sync hook, skip it here to avoid double-run
-    crate::commands::pull::run_no_hooks(root, names, verbose, no_cache, interactive, out, err)?;
+    keep(crate::commands::pull::run_no_hooks(
+        root,
+        names,
+        verbose,
+        no_cache,
+        interactive,
+        out,
+        err,
+    ));
 
     // Restore symlinks for unlinked clones and remove orphaned links before
     // pushing, so local hygiene isn't blocked by a remote/auth failure.
-    relink(&config.repos, names, &config_root, force, out)?;
+    // A graph that does not resolve has no links to restore: clone already
+    // failed with the reason.
+    let resolved = crate::resolve::workspace(
+        &config,
+        &config_root,
+        false,
+        crate::commands::cache::open(&config, no_cache),
+        None,
+        verbose,
+    );
+    match resolved {
+        Ok(resolution) => keep(relink(
+            &resolution,
+            names,
+            &config_root,
+            &config.resolve.hoist_dir,
+            force,
+            out,
+        )),
+        Err(e) => keep(Err(e)),
+    }
 
-    crate::commands::push::run(root, names, verbose, interactive, out, err)?;
+    // An implicit checkout is readonly, and nothing of it is pushed: named,
+    // it simply has no push step. Declared ones go on as named.
+    let declared: Vec<String> = names
+        .iter()
+        .filter(|n| config.repos.iter().any(|e| &e.directory == *n))
+        .cloned()
+        .collect();
+    if names.is_empty() || !declared.is_empty() {
+        keep(crate::commands::push::run(
+            root,
+            &declared,
+            verbose,
+            interactive,
+            out,
+            err,
+        ));
+    }
 
+    // The hook is for a workspace that synced: not one left half done.
+    if let Some(e) = failed {
+        return Err(e);
+    }
     hooks::run_post_sync(&config.hooks, &config_root, verbose, out)?;
     Ok(())
 }
 
 /// Update each existing clone's `origin` remote to match the configured URL.
 fn reconcile_remotes(
-    config: &GitScaleConfig,
+    checkouts: &[crate::config::RepoEntry],
     config_root: &Path,
     names: &[String],
     out: &mut dyn Write,
 ) -> Result<()> {
-    let selected = filter_entries(&config.repos, names)?;
+    let selected = filter_entries(checkouts, names)?;
 
     let mut header_done = false;
     for entry in &selected {
@@ -62,17 +139,20 @@ fn reconcile_remotes(
 }
 
 fn relink(
-    repos: &[crate::config::RepoEntry],
+    resolution: &crate::resolution::Resolution,
     names: &[String],
     config_root: &Path,
+    hoist_dir: &str,
     force: bool,
     out: &mut dyn Write,
 ) -> Result<()> {
     // Resolved against every repo, so dependencies are checked as a whole;
     // acted on only inside the repos named, since a link belongs to the repo
     // it sits in and that repo was not asked to sync.
-    let (all_symlinks, _) = resolve_recursive(repos, config_root)?;
-    let selected = crate::config::filter_entries(repos, names)?;
+    let repos = resolution.entries();
+    let repos = repos.as_slice();
+    let all_symlinks = &resolution.links;
+    let selected = resolution.select(names)?;
     let symlinks: Vec<_> = all_symlinks
         .iter()
         .filter(|sym| {
@@ -82,10 +162,40 @@ fn relink(
         .cloned()
         .collect();
 
+    // Checkouts gitscale made that nothing needs any more — an entry
+    // removed or renamed, an implicit dependency nobody asks for — go, unless
+    // that would lose something: then only with --force, like an unlinked
+    // clone. An artefact holds nobody's work: every pull replaces it whole.
+    let mut stale_skipped = 0usize;
+    if names.is_empty() {
+        for (dir, kind) in crate::ledger::left_behind(config_root, repos) {
+            let stale = config_root.join(&dir);
+            let git = kind == crate::ledger::Recorded::Git;
+            if git && is_tree_modified(&stale) && !force {
+                writeln!(
+                    out,
+                    "  skip  {} (no longer needed, but modified; use --force to remove)",
+                    dir
+                )?;
+                stale_skipped += 1;
+                continue;
+            }
+            crate::git::restore_writable(&stale)?;
+            std::fs::remove_dir_all(&stale)?;
+            if !git {
+                crate::artefact::forget_install(config_root, &dir);
+            }
+            crate::ledger::forget(config_root, &dir)?;
+            writeln!(out, "  remove  {} (no longer needed)", dir)?;
+        }
+        crate::ledger::prune(config_root)?;
+    }
+
     // Remove orphaned symlinks (links whose dep was removed from config).
     // Broken orphans are always safe to remove; orphans that still resolve to a
     // valid checkout are only removed with --force.
-    let orphans = crate::resolve::find_orphan_links(&selected, config_root, &all_symlinks);
+    let orphans =
+        crate::resolve::find_orphan_links(&selected, config_root, all_symlinks, hoist_dir);
     let mut orphan_skipped = 0usize;
     for orphan in &orphans {
         let link_abs = config_root.join(&orphan.link_path);
@@ -135,7 +245,7 @@ fn relink(
     // Restore symlinks for any that were removed
     create_symlinks(&symlinks, config_root)?;
 
-    if skipped > 0 || orphan_skipped > 0 {
+    if skipped > 0 || orphan_skipped > 0 || stale_skipped > 0 {
         let mut parts = Vec::new();
         if skipped > 0 {
             parts.push(format!(
@@ -147,6 +257,12 @@ fn relink(
             parts.push(format!(
                 "{} orphaned link(s) with valid targets",
                 orphan_skipped
+            ));
+        }
+        if stale_skipped > 0 {
+            parts.push(format!(
+                "{} checkout(s) no longer needed, with local modifications",
+                stale_skipped
             ));
         }
         anyhow::bail!("{} (use --force to override)", parts.join(" and "));

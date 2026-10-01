@@ -3,6 +3,8 @@
 - [Where the file lives](#where-the-file-lives)
 - [A complete example](#a-complete-example)
 - [`[repos]`](#repos)
+- [`[resolve]`](#resolve)
+- [`singleton`](#singleton)
 - [`[registries]`](#registries)
 - [`[artefact]`](#artefact)
 - [`[cache]`](#cache)
@@ -24,7 +26,7 @@ A checked-out sub-repository may carry its own `.gitscale.toml`. Which parts of
 it are read, and when, is covered under [nested configs](#nested-configs).
 
 Unknown keys and unknown tables are ignored on read, except inside
-[`[artefact]`](#artefact), where a misspelt key would quietly publish less than
+[`[artefact]`](#artefact) and [`[resolve]`](#resolve), where a misspelt key would quietly publish less than
 meant — but see
 [how `add` and `remove` rewrite the file](#how-add-and-remove-rewrite-the-file).
 
@@ -78,11 +80,44 @@ the config.
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `url` | string | **required** | Repository URL: HTTPS, SSH (`git@host:owner/repo.git` or `ssh://git@host/owner/repo.git`), or a local path |
-| `revision` | string | `""` | Branch, tag or full commit SHA (40 or 64 hex digits). Empty means the remote's default branch, or a revision [adopted from a child config](recursive-dependencies.md#revision-resolution-and-the-mismatch-check). See [pinning a revision](dependencies.md#pinning-a-revision) |
+| `revision` | string | `""` | Branch, tag or full commit SHA (40 or 64 hex digits). A minimum: [resolution](recursive-dependencies.md#how-a-revision-is-chosen) may raise it to what a dependency asks for. Empty asks for nothing, leaving it to the dependencies — or, when nobody asks, the remote's default branch. See [pinning a revision](dependencies.md#pinning-a-revision) |
 | `mode` | string | `"readwrite"` | `"readwrite"`, `"readonly"` or `"artefact"`. See [checkout modes](dependencies.md#checkout-modes) |
 | `recursive` | bool | `true` | Read this repository's own `.gitscale.toml`: resolve its transitive dependencies, and clean it by its own `[clean]` rules. With `false`, that config is not read at all, and [`clean`](clean.md#per-repo-clean) cleans the repository without its keep-list |
+| `override` | bool | `false` | Exactly this revision, and nothing higher: wins over every request from a repository below this one, and must agree with the rest. Needs a `revision`. See [overrides](recursive-dependencies.md#overrides) |
+| `singleton` | bool | unset | `true`: this repository may be checked out only once, whatever majors are asked for. `false`: relaxes a `true` from repositories below this one. See [singleton](recursive-dependencies.md#singleton) |
 
 The directory key must be relative and free of `..`, and must not be empty.
+Two entries for one repository need revisions to tell which major each is for.
+
+## `[resolve]`
+
+How dependencies the root does not declare are
+[checked out](recursive-dependencies.md#implicit-dependencies). Read from the
+root only.
+
+```toml
+[resolve]
+hoist_dir = "imports"
+allow = ["github.com/partner-org/*", "gitlab.example.com/platform/*"]
+```
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `hoist_dir` | string | `"imports"` | Where implicit checkouts go, relative to the config. Must stay inside the workspace |
+| `allow` | list of strings | `[]` | Patterns for repositories an implicit dependency may come from, on top of the host and owner of every repository the root declares. Globs over `host/owner/repo`, as [`hook install --allow`](hooks.md) takes them; `*` crosses `/`, so `github.com/org/*` covers nested groups. A local path is allowed only by a pattern here |
+
+## `singleton`
+
+```toml
+singleton = true
+
+[repos]
+# …
+```
+
+A top-level key, before any table: this repository says of itself that a
+workspace may hold only one checkout of it. Read from a dependency's config at
+the revision selected. See [singleton](recursive-dependencies.md#singleton).
 
 ## `[registries]`
 
@@ -205,15 +240,17 @@ repositories on that hook's [allowlist](hooks.md#the-hook-allowlist).
 ## Nested configs
 
 When a checked-out repository carries its own `.gitscale.toml` and the entry is
-`recursive = true` (the default), GitScale reads two things from it:
+`recursive = true` (the default), GitScale reads three things from it:
 
 - **`[repos]`** — to resolve [transitive dependencies](recursive-dependencies.md):
-  every entry must also be declared at the root, and a symlink is created
-  instead of a nested checkout.
+  every entry is a request, resolved with the rest of the workspace, checked
+  out once and linked instead of nested.
+- **`singleton`** — whether the repository allows only one checkout of itself.
 - **`[clean]`** — to decide what [`clean`](clean.md) keeps in that repository.
 
-Everything else in a nested config — `[registries]`, `[artefact]`,
-`[cache]`, `[share]`, `[hooks]` — belongs to that repository when it is used as a workspace in its own
+Everything else in a nested config — `[resolve]`, `[registries]`, `[artefact]`,
+`[cache]`, `[share]`, `[hooks]` — is not even parsed by the parent, so nothing
+in those tables can break it. It belongs to that repository when it is used as a workspace in its own
 right, and is not read by the parent.
 
 ## Values GitScale refuses to pass to git
@@ -245,12 +282,15 @@ parsed. Consequences:
 - Defaults are not written back: `mode = "readwrite"`, `recursive = true`, an
   empty revision, and every default `[cache]` / `[share]` / `[clean]` / `[hooks]`
   value are simply omitted.
-- Tables are emitted in a fixed order: `[share]`, `[cache]`,
-  `[registries]`, `[artefact]`, `[hooks]`, `[clean]`, `[repos]`, with
+- Tables are emitted in a fixed order: a top-level `singleton`, `[resolve]`,
+  `[share]`, `[cache]`, `[registries]`, `[artefact]`, `[hooks]`, `[clean]`,
+  `[repos]`, with
   entries inline and sorted by directory. A single `[artefact]` group named
   `default` is written in the short form, with `include` directly in the table.
 
 If you keep comments in the file, edit it by hand instead.
+[`gitscale resolve --write`](cli.md#gitscale-resolve) is the exception: it changes only
+the revisions it reports, and keeps everything else as it was.
 
 ## Environment variables
 

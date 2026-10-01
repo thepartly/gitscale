@@ -132,7 +132,12 @@ fn a_pin_the_remote_does_not_have_fails_instead_of_staying_put() {
     let out = env.run_with_env(&[("CI", "true")], &["pull"]);
     let text = format!("{}{}", out.stdout, out.stderr);
     assert!(!out.success, "{}", text);
-    assert!(text.contains("revision 'v9' does not exist"), "{}", text);
+    // Refused while resolving, before any checkout is touched.
+    assert!(
+        text.contains("'v9' is not a branch, tag or commit"),
+        "{}",
+        text
+    );
 }
 
 /// In place is what keeps the build cache valid, and what lets the last job's

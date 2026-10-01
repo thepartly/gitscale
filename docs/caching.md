@@ -136,6 +136,22 @@ Resolving a pin costs at most one ref advertisement: a SHA needs no network at
 all, and a branch or tag costs one `git ls-remote` — no objects. If the head has
 not moved, the commit is already in the entry and nothing further transfers.
 
+## What resolution reads
+
+[Resolution](recursive-dependencies.md#when-resolution-runs-and-what-it-fetches)
+needs each repository's branches and tags and the `.gitscale.toml` of each
+selected commit — never history. On a developer machine it reads them from the
+mirror the checkout is about to be built from, updated once per command, so
+resolving costs nothing extra over the wire; an implicit dependency the
+workspace has never seen gets a mirror entry like any other.
+
+In CI, and with `--no-cache`, it keeps a small store per repository in the
+workspace's own git directory (`.git/gitscale/resolve/`): the refs from
+`git ls-remote`, and each config from that one commit fetched at depth 1
+without other files — in CI with the cache on, read from the snapshot the
+checkout is built from. Artefact repositories always use such a store, so an
+artefact's source history is never mirrored just to read its refs.
+
 ## Artefact entries
 
 [Artefact](artefacts.md) images are cached too, one OCI image layout per

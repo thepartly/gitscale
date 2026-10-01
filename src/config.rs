@@ -44,6 +44,27 @@ pub struct RepoEntry {
     pub revision: String,
     pub mode: RepoMode,
     pub recursive: bool,
+    /// `override = true`: exactly this revision and nothing higher. It wins
+    /// over every request from a repository the declaring one dominates, and
+    /// must agree with the rest — see [`crate::resolution`].
+    pub is_override: bool,
+    /// `singleton = true` or `false`: whether this repository may be checked
+    /// out once per compatibility class (`false`, the default) or only once.
+    pub singleton: Option<bool>,
+}
+
+impl Default for RepoEntry {
+    fn default() -> Self {
+        RepoEntry {
+            directory: String::new(),
+            repo_url: String::new(),
+            revision: String::new(),
+            mode: RepoMode::Readwrite,
+            recursive: true,
+            is_override: false,
+            singleton: None,
+        }
+    }
 }
 
 impl RepoEntry {
@@ -183,9 +204,37 @@ pub struct LayerSpec {
     pub exclude: Vec<String>,
 }
 
+/// `[resolve]`: where dependencies nobody declared at the root are checked
+/// out, and which repositories may arrive that way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolveSettings {
+    /// The directory implicit checkouts go in, relative to the config.
+    pub hoist_dir: String,
+    /// Patterns, in the syntax `hook install --allow` takes, for repositories
+    /// an implicit dependency may come from beyond the ones the root's own
+    /// entries already allow.
+    pub allow: Vec<String>,
+}
+
+/// Where implicit checkouts go when `[resolve] hoist_dir` is not set.
+pub const DEFAULT_HOIST_DIR: &str = "imports";
+
+impl Default for ResolveSettings {
+    fn default() -> Self {
+        ResolveSettings {
+            hoist_dir: DEFAULT_HOIST_DIR.to_string(),
+            allow: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct GitScaleConfig {
     pub repos: Vec<RepoEntry>,
+    /// A top-level `singleton = true`: this repository says of itself that a
+    /// workspace may hold only one checkout of it.
+    pub singleton: bool,
+    pub resolve: ResolveSettings,
     /// `[registries]`: where artefacts of a host, or of a repository URL
     /// prefix, are published — for anything the built-in forge mapping
     /// does not cover. See [`crate::registry::image_for`].
@@ -199,6 +248,8 @@ pub struct GitScaleConfig {
 
 #[derive(Deserialize)]
 struct RawConfig {
+    singleton: Option<bool>,
+    resolve: Option<RawResolve>,
     storage: Option<toml::Value>,
     registries: Option<BTreeMap<String, String>>,
     artefact: Option<RawArtefact>,
@@ -227,6 +278,13 @@ struct RawLayer {
     name: Option<String>,
     include: Option<Vec<String>>,
     exclude: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawResolve {
+    hoist_dir: Option<String>,
+    allow: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -259,6 +317,9 @@ struct RawRepo {
     revision: Option<String>,
     mode: Option<String>,
     recursive: Option<bool>,
+    #[serde(rename = "override")]
+    is_override: Option<bool>,
+    singleton: Option<bool>,
 }
 
 pub fn find_config(start: Option<&Path>) -> Result<PathBuf> {
@@ -285,8 +346,14 @@ pub fn find_config(start: Option<&Path>) -> Result<PathBuf> {
 pub fn load_config(config_path: &Path) -> Result<GitScaleConfig> {
     let text = std::fs::read_to_string(config_path)
         .with_context(|| format!("cannot read {}", config_path.display()))?;
-    let raw: RawConfig = toml::from_str(&text)
-        .with_context(|| format!("{}: invalid TOML", config_path.display()))?;
+    parse_config(&text, config_path)
+}
+
+/// Read a config from its text. `config_path` names where it came from in
+/// every message: a file on disk, or a revision of a dependency's repository.
+pub fn parse_config(text: &str, config_path: &Path) -> Result<GitScaleConfig> {
+    let raw: RawConfig =
+        toml::from_str(text).with_context(|| format!("{}: invalid TOML", config_path.display()))?;
 
     let registries = parse_registries(raw.storage.as_ref(), raw.registries.as_ref(), config_path)?;
     let artefact = parse_artefact(raw.artefact.as_ref(), config_path)?;
@@ -302,15 +369,38 @@ pub fn load_config(config_path: &Path) -> Result<GitScaleConfig> {
 
     let clean = parse_clean(raw.clean.as_ref(), config_path)?;
     let cache = parse_cache(raw.cache.as_ref(), config_path)?;
+    let resolve = parse_resolve(raw.resolve.as_ref(), config_path)?;
 
     Ok(GitScaleConfig {
         repos,
+        singleton: raw.singleton.unwrap_or(false),
+        resolve,
         registries,
         artefact,
         hooks,
         share,
         clean,
         cache,
+    })
+}
+
+/// What a parent reads from a dependency's config: its `[repos]` and whether
+/// it is a singleton — validated, since they decide what gets cloned — and
+/// nothing else. The rest of that file belongs to the dependency used as a
+/// workspace of its own, and a table a parent never reads must not be able to
+/// break it.
+pub fn parse_dependency_config(text: &str, config_path: &Path) -> Result<GitScaleConfig> {
+    #[derive(Deserialize)]
+    struct Dependency {
+        singleton: Option<bool>,
+        repos: Option<BTreeMap<String, RawRepo>>,
+    }
+    let raw: Dependency =
+        toml::from_str(text).with_context(|| format!("{}: invalid TOML", config_path.display()))?;
+    Ok(GitScaleConfig {
+        repos: parse_repos(raw.repos.as_ref(), config_path)?,
+        singleton: raw.singleton.unwrap_or(false),
+        ..GitScaleConfig::default()
     })
 }
 
@@ -548,6 +638,15 @@ fn parse_artefact(raw: Option<&RawArtefact>, config_path: &Path) -> Result<Optio
                 layer.name
             );
         }
+        if layer.name == crate::artefact::CONFIG_LAYER {
+            bail!(
+                "{}: layer name \"{}\" is reserved: publish adds that layer itself, to carry \
+                 the repository's {}",
+                at(""),
+                layer.name,
+                CONFIG_FILENAME
+            );
+        }
         if !seen.insert(layer.name.as_str()) {
             bail!("{}: layer name \"{}\" is used twice", at(""), layer.name);
         }
@@ -632,6 +731,15 @@ fn parse_repos(
         };
 
         let recursive = spec.recursive.unwrap_or(true);
+        let is_override = spec.is_override.unwrap_or(false);
+        if is_override && revision.is_empty() {
+            bail!(
+                "{}: repos.{} sets override = true without a revision; an override names \
+                 the exact revision to hold the dependency at",
+                config_path.display(),
+                directory
+            );
+        }
 
         entries.push(RepoEntry {
             directory: directory.clone(),
@@ -639,9 +747,62 @@ fn parse_repos(
             revision,
             mode,
             recursive,
+            is_override,
+            singleton: spec.singleton,
         });
     }
+    check_unambiguous(&entries, config_path)?;
     Ok(entries)
+}
+
+/// Two entries for one repository need revisions to tell which checkout is
+/// which: without them, nothing says which major each one is for.
+fn check_unambiguous(entries: &[RepoEntry], config_path: &Path) -> Result<()> {
+    for (i, a) in entries.iter().enumerate() {
+        for b in &entries[i + 1..] {
+            if a.revision.is_empty()
+                && b.revision.is_empty()
+                && a.is_artefact() == b.is_artefact()
+                && crate::urls::normalize(&a.repo_url) == crate::urls::normalize(&b.repo_url)
+            {
+                bail!(
+                    "{}: repos.{} and repos.{} are the same repository with no revision \
+                     to tell their checkouts apart; give each a revision",
+                    config_path.display(),
+                    a.directory,
+                    b.directory
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `[resolve]`. The hoist directory must stay inside the workspace, like any
+/// checkout directory.
+fn parse_resolve(raw: Option<&RawResolve>, config_path: &Path) -> Result<ResolveSettings> {
+    let Some(resolve) = raw else {
+        return Ok(ResolveSettings::default());
+    };
+    let hoist_dir = resolve
+        .hoist_dir
+        .clone()
+        .unwrap_or_else(|| DEFAULT_HOIST_DIR.to_string());
+    check_relative(&hoist_dir)
+        .with_context(|| format!("{}: resolve.hoist_dir", config_path.display()))?;
+    let allow: Vec<String> = resolve
+        .allow
+        .iter()
+        .flatten()
+        .map(|p| p.trim().to_lowercase())
+        .collect();
+    if allow.iter().any(String::is_empty) {
+        bail!(
+            "{}: resolve.allow contains an empty pattern",
+            config_path.display()
+        );
+    }
+    Ok(ResolveSettings { hoist_dir, allow })
 }
 
 fn parse_hooks(raw: Option<&RawHooks>, config_path: &Path) -> Result<Hooks> {
@@ -702,6 +863,32 @@ fn toml_string(value: &str) -> String {
 /// write is a table it deletes.
 pub fn write_config(config_path: &Path, config: &GitScaleConfig) -> Result<()> {
     let mut lines: Vec<String> = Vec::new();
+
+    // A top-level key: it must come before the first table.
+    if config.singleton {
+        lines.push("singleton = true".to_string());
+        lines.push(String::new());
+    }
+
+    if config.resolve != ResolveSettings::default() {
+        lines.push("[resolve]".to_string());
+        if config.resolve.hoist_dir != DEFAULT_HOIST_DIR {
+            lines.push(format!(
+                "hoist_dir = {}",
+                toml_string(&config.resolve.hoist_dir)
+            ));
+        }
+        if !config.resolve.allow.is_empty() {
+            let quoted: Vec<String> = config
+                .resolve
+                .allow
+                .iter()
+                .map(|p| toml_string(p))
+                .collect();
+            lines.push(format!("allow = [{}]", quoted.join(", ")));
+        }
+        lines.push(String::new());
+    }
 
     if config.share.dissociate {
         lines.push("[share]".to_string());
@@ -792,7 +979,9 @@ pub fn write_config(config_path: &Path, config: &GitScaleConfig) -> Result<()> {
 
     if !config.repos.is_empty() {
         lines.push("[repos]".to_string());
-        for entry in &config.repos {
+        let mut sorted: Vec<&RepoEntry> = config.repos.iter().collect();
+        sorted.sort_by(|a, b| a.directory.cmp(&b.directory));
+        for entry in sorted {
             let mut parts = vec![format!("url = {}", toml_string(&entry.repo_url))];
             if !entry.revision.is_empty() {
                 parts.push(format!("revision = {}", toml_string(&entry.revision)));
@@ -802,6 +991,12 @@ pub fn write_config(config_path: &Path, config: &GitScaleConfig) -> Result<()> {
             }
             if !entry.recursive {
                 parts.push("recursive = false".to_string());
+            }
+            if entry.is_override {
+                parts.push("override = true".to_string());
+            }
+            if let Some(singleton) = entry.singleton {
+                parts.push(format!("singleton = {}", singleton));
             }
             let inline = parts.join(", ");
             lines.push(format!(
@@ -999,6 +1194,28 @@ mod tests {
             assert_eq!(before.registries, after.registries);
             assert_eq!(before.artefact, after.artefact);
         }
+    }
+
+    #[test]
+    fn entries_are_written_sorted_by_directory() {
+        let mut config =
+            load("[repos]\n\"imports/z\" = { url = \"https://example.com/z.git\" }\n").unwrap();
+        config.repos.push(RepoEntry {
+            directory: "imports/a".to_string(),
+            repo_url: "https://example.com/a.git".to_string(),
+            ..RepoEntry::default()
+        });
+        let dir = std::env::temp_dir().join(format!("gitscale-cfg-sort-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CONFIG_FILENAME);
+        write_config(&path, &config).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            text.find("imports/a").unwrap() < text.find("imports/z").unwrap(),
+            "{}",
+            text
+        );
     }
 
     #[test]

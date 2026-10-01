@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use crate::config::{filter_entries, load_config, load_workspace, RepoEntry, CONFIG_FILENAME};
 use crate::git::{clean_repo, is_repo_root};
 use crate::progress::{run_parallel, RepoStatus};
-use crate::resolve::resolve_recursive;
 
 /// How the workspace repo itself is named on the command line.
 const SELF_NAME: &str = ".";
@@ -76,20 +75,33 @@ fn plan(
 ) -> Result<Vec<Target>> {
     // `.` addresses the workspace repo; every other name must be a declared
     // repo. An empty selection means all of them, the root included.
+    // A config `resolve` cannot make sense of is a config whose symlink set —
+    // and whose implicit checkouts — are unknown, and those are the things
+    // standing between a clean and a broken workspace. Refuse rather than
+    // guess. Offline: a clean never fetches.
+    let resolution = crate::resolve::workspace(
+        config,
+        config_root,
+        false,
+        crate::cache::Cache::open(&config.cache),
+        None,
+        false,
+    )?;
+    // Every checkout, the implicit ones included: each is an untracked
+    // directory to whatever repo holds it.
+    let all = resolution.entries();
+
     let want_self = names.is_empty() || names.iter().any(|n| n == SELF_NAME);
     let repo_names: Vec<String> = names.iter().filter(|n| *n != SELF_NAME).cloned().collect();
     let selected = if names.is_empty() {
-        config.repos.clone()
+        all.clone()
     } else if repo_names.is_empty() {
         Vec::new()
     } else {
-        filter_entries(&config.repos, &repo_names)?
+        filter_entries(&all, &repo_names)?
     };
 
-    // A config `resolve` cannot make sense of is a config whose symlink set is
-    // unknown, and the links are the thing standing between a clean and a
-    // broken workspace. Refuse rather than guess.
-    let managed_links = managed_link_excludes(&config.repos, config_root)?;
+    let managed_links = managed_link_excludes(&resolution, &all);
 
     let mut targets = Vec::new();
 
@@ -101,7 +113,7 @@ fn plan(
             let mut excludes = vec![ALWAYS_KEEP.to_string()];
             excludes.extend(config.clean.exclude.iter().cloned());
             excludes.extend(cli_excludes.iter().cloned());
-            excludes.extend(nested_checkouts(&config.repos, Path::new("")));
+            excludes.extend(nested_checkouts(&all, Path::new("")));
             targets.push(Target {
                 name: SELF_NAME.to_string(),
                 dir: config_root.to_path_buf(),
@@ -135,7 +147,7 @@ fn plan(
             continue;
         }
         if !crate::git::is_checkout(&dir) {
-            targets.push(stray(config, entry, &dir));
+            targets.push(stray(&all, entry, &dir));
             continue;
         }
         if !is_repo_root(&dir) {
@@ -158,7 +170,7 @@ fn plan(
         }
         // A repo declared inside this one is a checkout in its own right, and
         // cleaning is not how it gets removed.
-        excludes.extend(nested_checkouts(&config.repos, Path::new(&entry.directory)));
+        excludes.extend(nested_checkouts(&all, Path::new(&entry.directory)));
         if let Some(links) = managed_links.get(&entry.directory) {
             excludes.extend(links.iter().cloned());
         }
@@ -184,8 +196,8 @@ fn plan(
 /// alone, a clean would leave behind the one thing standing between it and a
 /// working `pull`. The exception is a directory holding another declared
 /// checkout that is on disk: removing it would take that checkout with it.
-fn stray(config: &crate::config::GitScaleConfig, entry: &RepoEntry, dir: &Path) -> Target {
-    let holds_checkout = nested_checkouts(&config.repos, Path::new(&entry.directory))
+fn stray(all: &[RepoEntry], entry: &RepoEntry, dir: &Path) -> Target {
+    let holds_checkout = nested_checkouts(all, Path::new(&entry.directory))
         .iter()
         .any(|inner| {
             dir.join(inner.trim_start_matches('/'))
@@ -267,10 +279,10 @@ fn own_excludes(entry: &RepoEntry, dir: &Path) -> Result<Vec<String>> {
 /// of view those links are untracked files, so a clean would take them with
 /// it and leave the child repo's declared dependency paths dangling.
 fn managed_link_excludes(
+    resolution: &crate::resolution::Resolution,
     repos: &[RepoEntry],
-    config_root: &Path,
-) -> Result<HashMap<String, Vec<String>>> {
-    let (symlinks, _) = resolve_recursive(repos, config_root)?;
+) -> HashMap<String, Vec<String>> {
+    let symlinks = &resolution.links;
 
     // Longest directory first, so a link inside `libs/core` is attributed to
     // that repo rather than to a `libs` that also happens to be declared.
@@ -278,7 +290,7 @@ fn managed_link_excludes(
     by_depth.sort_by_key(|e| std::cmp::Reverse(Path::new(&e.directory).components().count()));
 
     let mut by_repo: HashMap<String, Vec<String>> = HashMap::new();
-    for link in &symlinks {
+    for link in symlinks {
         for repo in &by_depth {
             if let Ok(inner) = link.link_path.strip_prefix(&repo.directory) {
                 by_repo
@@ -289,7 +301,7 @@ fn managed_link_excludes(
             }
         }
     }
-    Ok(by_repo)
+    by_repo
 }
 
 /// List what would go, without touching anything.
@@ -400,6 +412,7 @@ mod tests {
             revision: "main".to_string(),
             mode: RepoMode::Readwrite,
             recursive: true,
+            ..Default::default()
         }
     }
 

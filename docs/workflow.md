@@ -47,6 +47,12 @@ Cloning missing repos...
 Create the checkouts that do not exist yet. Existing checkouts are left
 untouched.
 
+First, [resolution](recursive-dependencies.md#how-a-revision-is-chosen) works
+out every checkout the workspace needs and the revision of each — implicit
+dependencies included — from the remotes, before anything is cloned. A graph
+that does not resolve (a cycle, two revisions nothing orders, a repository off
+the allowlist) fails the command with nothing cloned.
+
 ```
 gitscale clone                  # everything declared
 gitscale clone imports/core        # one entry
@@ -66,11 +72,9 @@ Per entry:
 | Artefact entry, no registry known for its host | `FAIL … no registry is known for …`, naming the [`[registries]`](configuration.md#registries) entry to add |
 | Artefact entry, the commit has no image | `FAIL … no artefact for <image>:<commit> (<revision>); its pipeline may not have published yet` |
 
-Afterwards GitScale resolves [recursive dependencies](recursive-dependencies.md):
-it reads each checkout's own `.gitscale.toml`, moves any checkout whose revision
-is adopted from a child to that revision the way [`pull`](#pull) would (a readonly
-checkout stays read-only, a shallow one fetches just that ref; an artefact keeps
-what it installed), and plants the dedup symlinks.
+Afterwards it plants the [dedup symlinks](recursive-dependencies.md#deduplication-by-symlink).
+A checkout that already exists at another revision is not moved — that is
+[`pull`](#pull)'s job.
 
 Note the symlink rule: a path that is a symlink is replaced by a real clone.
 That is how a deduped [recursive dependency](recursive-dependencies.md) is
@@ -151,9 +155,23 @@ run in a dirty workspace.
 ## pull
 
 Bring every checkout to where a fresh `clone` would put it: anything missing is
-cloned first, and an entry with no revision of its own follows the one a child
-config pins, as [`clone`](#clone) does — including a pin the pull itself brings
-in.
+cloned first, and every checkout moves to the revision
+[resolution](recursive-dependencies.md#how-a-revision-is-chosen) settles on
+against the remotes as they are now — including one a dependency starts asking
+for in this very pull, and implicit dependencies new to the graph.
+
+A checkout is **moved only when nothing can be lost**. Changes to tracked
+files, staged or not, fail the entry with
+`not moved: uncommitted changes; commit or stash, then pull again`; so does a
+detached HEAD with commits no branch, tag or remote holds, with the command to
+keep them. Untracked files do not block a move: git keeps them, and refuses
+rather than overwrite one. On a branch, commits no remote has stay on it —
+except where the move itself resets that branch (a shallow checkout, which is
+updated with `checkout -B`), and then they block it too. Commits a shallow
+fetch brought are the remote's, and never do. In CI, where checkouts hold
+nobody's work, GitScale does not check: a shallow or snapshot checkout is
+forced, and a full one is an ordinary checkout and fast-forward, which git
+itself may still refuse.
 
 ```
 gitscale pull                   # everything
@@ -164,10 +182,10 @@ gitscale pull imports/core         # one entry
 |---|---|
 | Missing directory, or an empty one | Cloned, exactly as `clone` would |
 | Directory holding files but no repository | `FAIL`, left as it is, exactly as `clone` would |
-| Full clone, on a branch | Refs refreshed, checked out if it is on the wrong revision, then fast-forwarded (`--ff-only`). A diverged branch is left alone rather than forced; a remote that cannot be reached, or local changes that block the fast-forward, fail the entry |
+| Full clone, on a branch | Refs refreshed, moved if it is on another revision, then fast-forwarded (`--ff-only`). A diverged branch is left alone rather than forced; a remote that cannot be reached, or local changes that block the fast-forward or the move, fail the entry |
 | Full clone, no revision | Stays on the branch it is on, which is fast-forwarded |
-| Shallow clone | Only the pinned branch or tag is fetched, at depth 1, and checked out: on the branch, or detached at the tag. With no revision, refetched and reset to the upstream commit |
-| Shallow clone pinned to a SHA | That one commit is fetched and reset to |
+| Shallow clone | Only the pinned branch or tag is fetched, at depth 1 (from a cache mirror, every branch and tag at depth 1), and checked out: on the branch, or detached at the tag. With no revision, refetched and reset to the upstream commit. Changes to tracked files fail the entry rather than be overwritten, and the move is a plain checkout, so an untracked file in the way fails it too instead of being overwritten (in CI, the checkout is forced as before) |
+| Shallow clone pinned to a SHA | That one commit is fetched and checked out, detached |
 | CI, served by a cache snapshot | The pinned commit is taken from local disk; no network at all |
 | readonly | Made writable, updated, then made read-only again |
 | artefact | Nothing to do, and nothing asked of the registry, when the revision still names the installed commit. Otherwise the new image is downloaded — only the layers the cache does not hold — then the files are replaced. A commit with no image fails and leaves the installed files alone |
@@ -177,6 +195,11 @@ gitscale pull imports/core         # one entry
 Afterwards the [recursive dependency](recursive-dependencies.md) symlinks are
 re-created — a child config may have changed — and the
 [`post_sync` hook](hooks.md#post_sync) runs if one is configured.
+
+An entry that fails — a remote that cannot be reached, a move refused, an
+artefact whose pipeline has not published yet — does not stop the others:
+every other checkout is still pulled and linked, and then `pull` exits non-zero
+naming how many failed. `clone` does the same.
 
 This is also the command an [installed git hook](hooks.md#git-hooks) runs, which
 is what makes a fresh clone or a new worktree populate itself.
@@ -204,7 +227,8 @@ The one-command "make the workspace match the config", in this order:
    `update <repo> -> <url>`.
 3. **pull** everything.
 4. **Relink** — restore [recursive dependency](recursive-dependencies.md)
-   symlinks that have been replaced by real clones, and remove orphaned links.
+   symlinks that have been replaced by real clones, remove checkouts nothing
+   needs any more, and remove orphaned links.
 5. **push** everything pushable.
 6. Run the [`post_sync` hook](hooks.md#post_sync).
 
@@ -214,11 +238,29 @@ gitscale sync imports/core         # one entry
 gitscale sync --force           # also relink modified clones, remove valid-target orphans
 ```
 
+Every step runs even when an earlier one failed for some entry, so one
+repository that cannot be cloned or pulled does not leave the rest unlinked or
+unpushed. `sync` then exits non-zero with the first failure, and the
+`post_sync` hook runs only when every step succeeded.
+
 Step 4 happens *before* the push so that local hygiene is not blocked by a
 remote or authentication failure. It is also the step that can refuse: an
-unlinked clone with local work, or an orphaned link whose target still resolves,
-is reported and left in place, and `sync` exits non-zero asking for `--force`.
-Broken orphans are always removed.
+unlinked clone with local work, a checkout nothing needs but with local work,
+or an orphaned link whose target still resolves, is reported and left in place,
+and `sync` exits non-zero asking for `--force`. Broken orphans are always
+removed.
+
+**A checkout nothing needs any more** is one whose entry you removed or
+renamed in `.gitscale.toml`, or an implicit dependency no repository asks for
+now. A `sync` given no names removes it when that loses nothing — no
+uncommitted changes, unpushed commits or stash, while untracked symlinks (the
+links gitscale planted) and files git ignores go with it; an artefact never
+holds any work, since every pull replaces it whole. `clone` and `pull` keep a
+record of the checkouts they manage — `.git/gitscale/checkouts.json`, or
+`.gitscale/checkouts.json` beside a config that is not the top of a repository
+— and only those are ever removed: a directory gitscale did not make is never
+touched. A workspace made before the record existed is covered from its first
+`pull`.
 
 ## commit
 

@@ -13,7 +13,7 @@ GitScale manages several git repositories as one workspace, from a single
 |---|---|
 | 2.1 | [Declaring dependencies](dependencies.md) — adding and removing entries, the three checkout modes, and pinning to a branch, tag or SHA |
 | 2.2 | [Status](status.md) — reading `gitscale status`, every flag it prints, and its JSON output |
-| 2.3 | [Recursive dependencies](recursive-dependencies.md) — transitive deps, hoisting to the root, symlink dedup, and the version-mismatch check |
+| 2.3 | [Recursive dependencies](recursive-dependencies.md) — how every repository's requests resolve to one revision per major, overrides, implicit dependencies, and symlink dedup |
 | 2.4 | [Everyday workflow](workflow.md) — `clone`, `fetch`, `pull`, `push`, `sync`, `commit` |
 | 2.5 | [The object cache](caching.md) — where objects come from, mirrors vs snapshots, what changes in CI, `dissociate`, `adopt_root`, and the `cache` commands |
 | 2.6 | [Hooks](hooks.md) — `[hooks]` config commands, and installing GitScale as a git hook |

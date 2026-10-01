@@ -11,6 +11,7 @@
 - [`gitscale commit`](#gitscale-commit)
 - [`gitscale clean`](#gitscale-clean)
 - [`gitscale status`](#gitscale-status)
+- [`gitscale resolve`](#gitscale-resolve)
 - [`gitscale add`](#gitscale-add)
 - [`gitscale remove`](#gitscale-remove)
 - [`gitscale artefact`](#gitscale-artefact)
@@ -37,7 +38,8 @@ command.
 | [`sync`](#gitscale-sync) | clone + reconcile remotes + pull + relink + push |
 | [`commit`](#gitscale-commit) | Commit across the workspace with one message |
 | [`clean`](#gitscale-clean) | Remove untracked files, safely |
-| [`status`](#gitscale-status) | Report the state of every declared repository |
+| [`status`](#gitscale-status) | Report the state of every checkout, and how each got its revision |
+| [`resolve`](#gitscale-resolve) | Show where resolution moved the root's revisions, and record them |
 | [`add`](#gitscale-add) / [`remove`](#gitscale-remove) | Edit `.gitscale.toml` |
 | [`artefact`](#gitscale-artefact) | Publish this repository's build output as an artefact, and see what the registry holds |
 | [`cache`](#gitscale-cache) | Inspect and maintain the object cache |
@@ -88,7 +90,10 @@ gitscale clone [OPTIONS] <URL> [DIRECTORY]
 ```
 
 Create the checkouts that do not exist yet, or — given a URL — clone a whole
-workspace. Full behaviour: [workflow → clone](workflow.md#clone).
+workspace. Every checkout lands at the revision
+[resolution](recursive-dependencies.md#how-a-revision-is-chosen) settles on,
+worked out before anything is cloned, implicit dependencies included. Full
+behaviour: [workflow → clone](workflow.md#clone).
 
 The URL form is not the usual way to set a workspace up: with a
 [git hook](hooks.md#git-hooks) installed, a plain `git clone` does it. Use this
@@ -96,7 +101,7 @@ where no hook applies.
 
 | Argument | Meaning |
 |---|---|
-| `NAMES...` | Declared directories to clone. Empty means all |
+| `NAMES...` | Directories to clone, declared or implicit. Empty means all |
 | `URL [DIRECTORY]` | A repository to clone the workspace from, and optionally the directory to create (default: the repository name) |
 
 The first argument is read as a URL when it has a scheme, is an scp-style SSH
@@ -118,7 +123,11 @@ gitscale fetch [OPTIONS] [NAMES...]
 Update remote state without modifying working trees: `git fetch` for git
 entries (through the cache); for artefact entries, the commit the revision
 names and whether it has an image, recorded without downloading anything — a
-commit with no image fails. Git entries with no checkout are skipped. See [workflow → fetch](workflow.md#fetch).
+commit with no image fails. Git entries with no checkout are skipped. Also
+refreshes what resolution reads, so the next offline `status` sees the remotes
+as they are now. When resolution itself fails, the declared entries are fetched
+anyway and the command fails afterwards with the reason — alongside the count
+of entries that failed to fetch, when some did. See [workflow → fetch](workflow.md#fetch).
 
 ## `gitscale pull`
 
@@ -126,10 +135,14 @@ commit with no image fails. Git entries with no checkout are skipped. See [workf
 gitscale pull [OPTIONS] [NAMES...]
 ```
 
-Bring every selected checkout up to date, cloning anything missing first — into
-an empty directory too, while one holding files but no repository fails — then
+Bring every selected checkout to the revision
+[resolution](recursive-dependencies.md#how-a-revision-is-chosen) settles on
+against the remotes now, cloning anything missing first — into an empty
+directory too, while one holding files but no repository fails — then
 re-create [recursive dependency](recursive-dependencies.md) symlinks and run the
-[`post_sync` hook](hooks.md#post_sync). See
+[`post_sync` hook](hooks.md#post_sync). A checkout is moved to another revision
+only when that loses nothing: changes to tracked files, or a detached HEAD no
+ref holds, fail the entry and leave it as it was. See
 [workflow → pull](workflow.md#pull).
 
 ## `gitscale push`
@@ -149,7 +162,7 @@ gitscale sync [OPTIONS] [NAMES...]
 
 | Option | Meaning |
 |---|---|
-| `--force` | Also relink unlinked clones that have local modifications, and remove orphaned symlinks whose target still resolves |
+| `--force` | Also relink unlinked clones that have local modifications, remove orphaned symlinks whose target still resolves, and remove checkouts nothing needs any more that have local modifications |
 
 clone → reconcile remotes → pull → relink → push → `post_sync`. See
 [workflow → sync](workflow.md#sync).
@@ -198,11 +211,37 @@ gitscale status [OPTIONS]
 
 | Option | Meaning |
 |---|---|
-| `--fetch` | Fetch remote state before reporting |
+| `--fetch` | Fetch remote state before reporting, and resolve against it |
 | `-f, --format <FORMAT>` | `table` (default) or `json` |
+| `--why [DIR...]` | Instead of the table, every request for each checkout named and which one won — see [--why](status.md#why-a-checkout-has-its-revision---why). With no directories, every checkout more than one repository asks for |
 
 Note that `-f` here is `--format`, not `--force`. Status takes no repository
-names; it always reports everything. See [status](status.md).
+names; it always reports everything. Without `--fetch` it resolves from what
+is on this machine, and never touches the network. See [status](status.md).
+
+## `gitscale resolve`
+
+```
+gitscale resolve [OPTIONS]
+```
+
+| Option | Meaning |
+|---|---|
+| `--write` | Write each resolved revision into the root's entry for it |
+| `-C, --root <PATH>` | Workspace to resolve |
+
+Resolve against the remotes and list the root entries whose revision
+resolution raised:
+
+```
+$ gitscale resolve
+imports/d   v1.2.0 → v1.5.0   raised by imports/c
+1 entry would change; run with --write to update .gitscale.toml
+```
+
+`--write` records them, editing only those revisions: comments, key order and
+every other table stay as they were. Entries without a revision, and entries
+marked `override`, are left alone; implicit dependencies are never added.
 
 ## `gitscale add`
 

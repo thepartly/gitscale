@@ -136,7 +136,7 @@ impl Allowlist {
 /// subgroup as well as a repository directly under the owner. The flip side is
 /// that a pattern must be ended deliberately — `github.com/acme*` also matches
 /// `github.com/acme-evil/x`, where `github.com/acme/*` does not.
-fn glob_match(pattern: &str, subject: &str) -> bool {
+pub(crate) fn glob_match(pattern: &str, subject: &str) -> bool {
     let pat: Vec<char> = pattern.chars().collect();
     let sub: Vec<char> = subject.to_lowercase().chars().collect();
     let (mut p, mut s) = (0usize, 0usize);

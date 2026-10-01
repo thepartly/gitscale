@@ -154,6 +154,16 @@ less than meant.
 Split along how often things change: a large dependency layer that changes
 once a month, and a small application layer that changes every commit.
 
+**The repository's own `.gitscale.toml` is always shipped**, as a first layer
+of its own named `gitscale`, at the top of the artefact — even when `root` is a
+subdirectory that does not contain it. It is how a consumer learns the
+artefact's [dependencies](recursive-dependencies.md): resolution downloads just
+that layer, a few hundred bytes, before deciding anything else, and keeps it in
+the cache, where every commit that left the file alone shares it. A
+`.gitscale.toml` at the top of `root` is not shipped, since it would clash with
+it; and a group may not be named `gitscale`. The dependencies are linked inside
+the extracted artefact like any checkout's.
+
 ### artefact publish
 
 ```
@@ -182,8 +192,10 @@ Run in the source repository's pipeline, after the build:
 
 ```
 Publishing ghcr.io/org/app/gitscale:9fceb02d0ae598e95dc970b74767f19372d61af8
+  layer gitscale: 1 file, 312 B, sha256:e91d…
   layer vendor: 412 files, 3.1 MiB, sha256:4c1f…
   layer app: 12 files, 84.0 KiB, sha256:a90e…
+  gitscale already in the registry
   vendor already in the registry
   pushed app
   pushed config
@@ -197,6 +209,8 @@ and says which of those it could not work out instead of failing.
 ```
 $ gitscale artefact publish --dry-run
 Would publish ghcr.io/org/app/gitscale:9fceb02d0ae598e95dc970b74767f19372d61af8
+  layer gitscale: 1 file, 312 B, sha256:e91d…
+    .gitscale.toml
   layer vendor: 2 files, 1.1 KiB, sha256:4c1f…
     vendor/lib.js
     vendor/lib.css

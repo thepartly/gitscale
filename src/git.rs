@@ -283,6 +283,53 @@ pub fn ls_remote_refs(url: &str) -> Result<Vec<(String, String)>> {
         .collect())
 }
 
+/// `(commit, full ref name)` for each branch and tag of a remote.
+pub type RemoteRefs = Vec<(String, String)>;
+
+/// Every branch and tag of the remote at `url`, as `(commit, full ref name)`,
+/// a tag peeled to the commit it points at, and the branch its `HEAD` names —
+/// its default branch. One ref advertisement, no objects.
+pub fn ls_remote_full(url: &str) -> Result<(RemoteRefs, Option<String>)> {
+    let listed = run_git(
+        &[
+            "ls-remote",
+            "--symref",
+            url,
+            "HEAD",
+            "refs/heads/*",
+            "refs/tags/*",
+        ],
+        None,
+        true,
+    )?;
+    let text = String::from_utf8_lossy(&listed.stdout);
+    let default = text.lines().find_map(|line| {
+        line.strip_prefix("ref: refs/heads/")?
+            .split_once('\t')
+            .filter(|(_, name)| *name == "HEAD")
+            .map(|(branch, _)| branch.to_string())
+    });
+    let lines: Vec<(&str, &str)> = text
+        .lines()
+        .filter(|l| !l.starts_with("ref: "))
+        .filter_map(|l| l.split_once('\t'))
+        .filter(|(_, name)| name.starts_with("refs/"))
+        .collect();
+    let peeled: std::collections::HashMap<&str, &str> = lines
+        .iter()
+        .filter_map(|(sha, name)| name.strip_suffix("^{}").map(|n| (n, *sha)))
+        .collect();
+    let refs = lines
+        .iter()
+        .filter(|(_, name)| !name.ends_with("^{}"))
+        .map(|(sha, name)| {
+            let commit = peeled.get(name).copied().unwrap_or(sha);
+            (commit.to_string(), name.to_string())
+        })
+        .collect();
+    Ok((refs, default))
+}
+
 /// A commit as people read it: its first 7 hex digits, git's (and GitHub's)
 /// default abbreviation. For display only — never resolve one of these.
 pub fn short_sha(sha: &str) -> &str {
@@ -758,6 +805,8 @@ fn pull_repo_at(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source) 
         if let Some(pinned) = &source.pinned {
             // CI, cached: the commit came out of the snapshot entry, so a job
             // that runs after another has nothing at all to download.
+            let branch = head_ref(&dest).and_then(|(b, detached)| (!detached).then_some(b));
+            ensure_movable(&dest, &pinned.sha, branch.as_deref())?;
             run_git(
                 &["reset", "--hard", "--quiet", &pinned.sha],
                 Some(&dest),
@@ -767,11 +816,10 @@ fn pull_repo_at(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source) 
             if is_full_sha(&entry.revision) {
                 // Detach rather than reset: a checkout moved here from a
                 // branch pin would otherwise drag that branch to this commit.
-                run_git(
-                    &["checkout", "--quiet", "-f", "--detach", "FETCH_HEAD"],
-                    Some(&dest),
-                    true,
-                )?;
+                if let Some(target) = resolve_ref(&dest, "FETCH_HEAD") {
+                    ensure_movable(&dest, &target, None)?;
+                }
+                move_checkout(&dest, &["--detach", "FETCH_HEAD"])?;
             } else {
                 land_shallow(entry, &dest)?;
             }
@@ -779,7 +827,10 @@ fn pull_repo_at(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source) 
             // No revision means whatever branch the clone landed on, as in
             // `clone_repo`: there is nothing to switch to, only to
             // fast-forward.
-            if !entry.revision.is_empty() && get_current_ref(entry, root)? != entry.revision {
+            if !entry.revision.is_empty() && !is_on_revision(&dest, &entry.revision) {
+                if ref_exists(&dest, &format!("{}^{{commit}}", entry.revision)) {
+                    ensure_switchable(&dest, None)?;
+                }
                 checkout_revision(entry, root)?;
             }
             fast_forward(&dest)?;
@@ -791,6 +842,123 @@ fn pull_repo_at(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source) 
         apply_readonly(&dest)?;
     }
     result
+}
+
+/// Whether the checkout at `dest` is where `revision` puts it: on that branch,
+/// or detached at the commit a tag or SHA names. Moving it would change
+/// nothing.
+fn is_on_revision(dest: &Path, revision: &str) -> bool {
+    match head_ref(dest) {
+        Some((branch, false)) => branch == revision,
+        Some((_, true)) => {
+            let target = resolve_ref(dest, &format!("{}^{{commit}}", revision));
+            target.is_some() && target == resolve_ref(dest, "HEAD")
+        }
+        None => false,
+    }
+}
+
+/// Refuse to move the checkout at `dest` to `target` when that could lose
+/// anything — the one condition on which a pull moves somebody's checkout.
+/// Staying where it is moves nothing, and is always allowed. `resets` names
+/// the branch the move points somewhere else (`checkout -B`, `reset`), whose
+/// own commits then need a remote or a tag to survive.
+fn ensure_movable(dest: &Path, target: &str, resets: Option<&str>) -> Result<()> {
+    if resolve_ref(dest, "HEAD").as_deref() == Some(target) {
+        return Ok(());
+    }
+    ensure_switchable(dest, resets)
+}
+
+/// [`ensure_movable`] for a switch of branch, which is a move even when both
+/// branches sit at the same commit.
+fn ensure_switchable(dest: &Path, resets: Option<&str>) -> Result<()> {
+    // A CI checkout holds no one's work: what the last job left behind is
+    // what the pull's own scrub exists to remove, so it must not stop the
+    // move the scrub follows.
+    if is_ci() {
+        return Ok(());
+    }
+    // Changes to tracked files are what a move could lose. Untracked files
+    // are not: a checkout keeps them, and refuses rather than overwrite one —
+    // which is as well, since the links gitscale plants for a repository's own
+    // dependencies are untracked files in every repository that does not
+    // ignore its import directory.
+    let dirty = run_git(
+        &["status", "--porcelain", "--untracked-files=no"],
+        Some(dest),
+        true,
+    )?;
+    if !stdout_str(&dirty).is_empty() {
+        bail!("not moved: uncommitted changes; commit or stash, then pull again");
+    }
+    let lost = commits_a_move_would_lose(dest, resets)?;
+    let Some(first) = lost.first() else {
+        return Ok(());
+    };
+    match head_ref(dest) {
+        Some((branch, false)) => bail!(
+            "not moved: {} on {} no remote has would be lost ({}); push them, then pull \
+             again",
+            if lost.len() == 1 {
+                "a commit"
+            } else {
+                "commits"
+            },
+            branch,
+            short_sha(first)
+        ),
+        _ => {
+            let head = resolve_ref(dest, "HEAD").unwrap_or_default();
+            bail!(
+                "not moved: HEAD {} is on no branch; keep it with `git branch <name> {}`, then \
+                 pull again",
+                short_sha(&head),
+                head
+            )
+        }
+    }
+}
+
+/// Commits HEAD, and the branch a move resets, hold that nothing else would
+/// once the move is made: no remote, no tag, no other local branch. A commit
+/// a shallow fetch brought — listed in `.git/shallow`, its parents never
+/// fetched — is the remote's, not somebody's work, though no ref holds it.
+fn commits_a_move_would_lose(dest: &Path, resets: Option<&str>) -> Result<Vec<String>> {
+    let reset_ref = resets.map(|branch| format!("refs/heads/{}", branch));
+    let mut args: Vec<String> = vec!["rev-list".into(), "HEAD".into()];
+    if let Some(reset) = &reset_ref {
+        if ref_exists(dest, reset) {
+            args.push(reset.clone());
+        }
+    }
+    args.extend(["--not", "--tags", "--remotes"].map(String::from));
+    // Every other local branch keeps its commits through the move.
+    let branches = query(
+        dest,
+        &["for-each-ref", "--format=%(refname)", "refs/heads/"],
+    )
+    .unwrap_or_default();
+    for branch in branches.lines() {
+        if Some(branch) != reset_ref.as_deref() {
+            args.push(branch.to_string());
+        }
+    }
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let listed = run_git(&refs, Some(dest), false)?;
+    if !listed.status.success() {
+        // Unknown is not safe: say HEAD itself would be lost.
+        return Ok(resolve_ref(dest, "HEAD").into_iter().collect());
+    }
+    let fetched: std::collections::HashSet<String> = git_path(dest, "shallow")
+        .and_then(|path| fs::read_to_string(path).ok())
+        .map(|text| text.lines().map(str::to_string).collect())
+        .unwrap_or_default();
+    Ok(stdout_str(&listed)
+        .lines()
+        .filter(|commit| !fetched.contains(*commit))
+        .map(str::to_string)
+        .collect())
 }
 
 /// Bring what `entry.revision` names into a shallow checkout from the remote,
@@ -862,37 +1030,54 @@ fn fetch_shallow_revision(entry: &RepoEntry, dest: &Path) -> Result<()> {
     );
 }
 
+/// `git checkout` with `args`, after [`ensure_movable`] has passed: no
+/// tracked file has changes to lose, so a plain checkout moves it — and
+/// refuses, rather than overwrite, an untracked file in the way. In CI, where
+/// a checkout holds nobody's work and the scrub after the pull removes what
+/// the last job left, it is forced, as it always was.
+fn move_checkout(dest: &Path, args: &[&str]) -> Result<()> {
+    let mut full = vec!["checkout", "--quiet"];
+    if is_ci() {
+        full.push("-f");
+    }
+    full.extend_from_slice(args);
+    run_git(&full, Some(dest), true)?;
+    Ok(())
+}
+
 /// Move a shallow checkout to `entry.revision`, leaving it where
 /// `clone --depth 1 --branch` would have: on the branch and tracking it, or
-/// detached at a tag. Tracked files are forced to match, as `reset --hard`
-/// did; files that do not change keep their mtimes.
+/// detached at a tag. Files that do not change keep their mtimes.
 fn land_shallow(entry: &RepoEntry, dest: &Path) -> Result<()> {
     let rev = &entry.revision;
     if rev.is_empty() {
         // Detached, or a branch with no upstream: nothing to follow. Otherwise
-        // the reset is checked, like every other move here.
-        if ref_exists(dest, "@{upstream}") {
-            run_git(&["reset", "--hard", "@{upstream}"], Some(dest), true)?;
+        // the move is checked, like every other move here.
+        if let Some(target) = resolve_ref(dest, "@{upstream}") {
+            let branch = head_ref(dest).and_then(|(b, detached)| (!detached).then_some(b));
+            ensure_movable(dest, &target, branch.as_deref())?;
+            match head_ref(dest) {
+                Some((branch, false)) if !is_ci() => {
+                    move_checkout(dest, &["-B", &branch, "@{upstream}"])?
+                }
+                _ => {
+                    run_git(&["reset", "--hard", "@{upstream}"], Some(dest), true)?;
+                }
+            }
         }
         return Ok(());
     }
     let tracking = format!("refs/remotes/origin/{}", rev);
-    if ref_exists(dest, &tracking) {
-        run_git(
-            &["checkout", "--quiet", "-f", "-B", rev, &tracking],
-            Some(dest),
-            true,
-        )?;
+    if let Some(target) = resolve_ref(dest, &tracking) {
+        ensure_movable(dest, &target, Some(rev))?;
+        move_checkout(dest, &["-B", rev, &tracking])?;
         track_branch(dest, rev)?;
         return Ok(());
     }
     let tag = format!("refs/tags/{}", rev);
-    if ref_exists(dest, &format!("{}^{{commit}}", tag)) {
-        run_git(
-            &["checkout", "--quiet", "-f", "--detach", &tag],
-            Some(dest),
-            true,
-        )?;
+    if let Some(target) = resolve_ref(dest, &format!("{}^{{commit}}", tag)) {
+        ensure_movable(dest, &target, None)?;
+        move_checkout(dest, &["--detach", &tag])?;
         return Ok(());
     }
     bail!(
@@ -1067,6 +1252,10 @@ pub struct RepoStatus {
     pub symlink_target: String,
     pub has_unlinked: bool,
     pub has_unlinked_modified: bool,
+    /// The links gitscale planted in this checkout that git sees as untracked
+    /// files, because the repository does not ignore where they live. Filled
+    /// in by the caller, which knows the links.
+    pub untracked_links: Vec<String>,
     /// What the cache is doing for this checkout. Filled in by the caller,
     /// which is the one that knows where the cache is.
     pub cache: crate::cache::CacheUse,
@@ -1101,6 +1290,7 @@ impl RepoStatus {
             symlink_target: String::new(),
             has_unlinked: false,
             has_unlinked_modified: false,
+            untracked_links: Vec::new(),
             cache: crate::cache::CacheUse::Unused,
             at_expected: true,
             artefact: None,
@@ -1162,6 +1352,33 @@ pub(crate) fn ahead_behind(dir: &Path) -> (i32, i32) {
     }
 }
 
+/// What `git status` lists in `dir`, every untracked file named on its own
+/// line rather than folded into its directory: `(untracked, path)` per entry.
+/// `None` when git cannot say.
+pub fn porcelain(dir: &Path) -> Option<Vec<(bool, String)>> {
+    let output = run_git(
+        &["status", "--porcelain", "--untracked-files=all"],
+        Some(dir),
+        false,
+    )
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.len() > 3)
+            .map(|line| {
+                (
+                    line.starts_with("??"),
+                    line[3..].trim_matches('"').to_string(),
+                )
+            })
+            .collect(),
+    )
+}
+
 /// Whether any commit reachable from HEAD or a local branch is missing from
 /// every remote-tracking ref. Unlike `ahead_behind`, this needs no upstream: a
 /// branch that was never pushed is all unpushed. A git failure counts as yes,
@@ -1197,10 +1414,16 @@ fn has_stash(path: &Path) -> bool {
 /// Whether the checkout at `path`, or any gitscale checkout nested in it,
 /// holds work that replacing it would lose: uncommitted changes, commits no
 /// remote has (on HEAD or any local branch, tracking or not), or a stash.
-/// Ignored files are not work: they are what a build leaves behind.
+/// Ignored files are not work: they are what a build leaves behind. Nor is an
+/// untracked symlink, which holds a path and no content — the links gitscale
+/// plants for a repository's own dependencies are exactly that.
 pub fn is_tree_modified(path: &Path) -> bool {
-    let dirty = run_git(&["status", "--porcelain"], Some(path), false)
-        .map(|o| !stdout_str(&o).is_empty())
+    let dirty = porcelain(path)
+        .map(|listed| {
+            listed
+                .iter()
+                .any(|(untracked, file)| !(*untracked && path.join(file).is_symlink()))
+        })
         .unwrap_or(false);
     if dirty || has_unpushed_commits(path) || has_stash(path) {
         return true;

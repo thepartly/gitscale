@@ -516,6 +516,7 @@ dependencies = [
  "tar",
  "tempfile",
  "toml",
+ "toml_edit",
  "url",
 ]
 

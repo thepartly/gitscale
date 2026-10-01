@@ -6,14 +6,18 @@ pub mod config;
 pub mod git;
 pub mod gitlab;
 pub mod hooks;
+pub mod ledger;
 pub mod oci_layout;
 pub mod progress;
 pub mod registry;
+pub mod resolution;
 pub mod resolve;
 pub mod share;
 mod ssh;
+pub mod stores;
 pub mod trust;
 pub mod urls;
+pub mod version;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -105,6 +109,20 @@ enum Commands {
         fetch: bool,
         #[arg(short, long, value_parser = ["table", "json"], default_value = "table")]
         format: String,
+        /// Show how each checkout got its revision: every request, who made
+        /// it, and which one won. With no directories, every checkout more
+        /// than one repository asks for
+        #[arg(long, num_args = 0.., value_name = "DIR")]
+        why: Option<Vec<String>>,
+    },
+    /// Show where resolution moved the root's own revisions, and with
+    /// --write record them in .gitscale.toml
+    Resolve {
+        #[arg(short = 'C', long)]
+        root: Option<PathBuf>,
+        /// Write each resolved revision into the root's entry for it
+        #[arg(long)]
+        write: bool,
     },
     /// Add a sub-repository entry to .gitscale config
     Add {
@@ -396,7 +414,20 @@ fn run_cli_inner(
             root,
             fetch,
             format,
-        } => commands::status::run(root.as_deref(), fetch, &format, verbose, no_cache, out, err),
+            why,
+        } => commands::status::run(
+            root.as_deref(),
+            fetch,
+            &format,
+            why.as_deref(),
+            verbose,
+            no_cache,
+            out,
+            err,
+        ),
+        Commands::Resolve { root, write } => {
+            commands::resolve::run(root.as_deref(), write, verbose, no_cache, out)
+        }
         Commands::Add {
             directory,
             repo_url,

@@ -19,7 +19,9 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use crate::cache::Cache;
-use crate::config::{find_config, load_config, ArtefactSpec, GitScaleConfig, RepoEntry};
+use crate::config::{
+    find_config, load_config, ArtefactSpec, GitScaleConfig, RepoEntry, CONFIG_FILENAME,
+};
 use crate::git::{is_full_sha, short_sha};
 use crate::registry::{
     image_for, Access, Client, HashingWriter, Image, CONFIG_MEDIA_TYPE, LAYER_MEDIA_TYPE,
@@ -27,6 +29,12 @@ use crate::registry::{
 };
 
 const TITLE: &str = "org.opencontainers.image.title";
+
+/// The layer `publish` adds to every image, first, carrying the repository's
+/// own `.gitscale.toml` — so a consumer can read an artefact's dependencies
+/// by downloading a few hundred bytes, before deciding anything else. A user
+/// group may not take the name.
+pub const CONFIG_LAYER: &str = "gitscale";
 const REVISION: &str = "org.opencontainers.image.revision";
 const SOURCE: &str = "org.opencontainers.image.source";
 
@@ -222,7 +230,13 @@ pub fn pack(spec: &ArtefactSpec, base: &Path, work: &Path) -> Result<Vec<PackedL
             root.display()
         );
     }
-    let files = collect_files(&root)?;
+    // The top-level `.gitscale.toml` of every image is the repository's own,
+    // carried by the config layer; one under the artefact root would clash
+    // with it, and is not shipped.
+    let files: Vec<String> = collect_files(&root)?
+        .into_iter()
+        .filter(|f| f != CONFIG_FILENAME)
+        .collect();
     let groups = assign(spec, &files)?;
     fs::create_dir_all(work)?;
     groups
@@ -242,6 +256,24 @@ pub fn pack(spec: &ArtefactSpec, base: &Path, work: &Path) -> Result<Vec<PackedL
             })
         })
         .collect()
+}
+
+/// The config layer: `base`'s `.gitscale.toml`, alone, at the top of the
+/// image.
+pub fn pack_config(base: &Path, work: &Path) -> Result<PackedLayer> {
+    fs::create_dir_all(work)?;
+    let files = vec![CONFIG_FILENAME.to_string()];
+    let path = work.join("layer-config.tar.gz");
+    let (digest, size, diff_id) = write_layer(base, &files, &path)
+        .with_context(|| format!("cannot pack layer \"{}\"", CONFIG_LAYER))?;
+    Ok(PackedLayer {
+        name: CONFIG_LAYER.to_string(),
+        files,
+        path,
+        digest,
+        size,
+        diff_id,
+    })
 }
 
 /// Write `files` as a reproducible gzip tar: entries in the order given,
@@ -449,6 +481,22 @@ impl Markers {
 /// whatever the record remembers.
 pub fn is_downloaded(markers: &Markers, dest: &Path) -> bool {
     !is_empty_dir(dest) && read_marker(&markers.installed).is_some()
+}
+
+/// The commit installed into the artefact checkout at `directory`, if any.
+pub fn installed_commit(config_root: &Path, directory: &str) -> Option<String> {
+    let dest = config_root.join(directory);
+    read_marker(&Markers::new(config_root, directory).installed)
+        .filter(|_| !is_empty_dir(&dest))
+        .map(|m| m.commit)
+}
+
+/// Drop what gitscale recorded about the artefact checkout at `directory`,
+/// once the checkout itself is gone.
+pub fn forget_install(config_root: &Path, directory: &str) {
+    let markers = Markers::new(config_root, directory);
+    let _ = fs::remove_file(&markers.installed);
+    let _ = fs::remove_file(&markers.remote);
 }
 
 /// Whether `dest` is missing or holds nothing at all.
@@ -838,6 +886,91 @@ impl Artefacts {
         crate::oci_layout::Layout::new(path).verify().map(Some)
     }
 
+    /// The `.gitscale.toml` the image of `commit` carries in its config
+    /// layer, for resolution: from the cache when it holds it, else — when
+    /// `online` — downloaded into it. `None` for an image without one.
+    pub fn config_layer(&self, url: &str, commit: &str, online: bool) -> Result<Option<String>> {
+        let not_here = || {
+            crate::resolution::unavailable(format!(
+                "the artefact of {} at {} is not on this machine",
+                url,
+                short_sha(commit)
+            ))
+        };
+        let image = image_for(url, &self.registries)?;
+        let entry = self
+            .cache
+            .as_ref()
+            .map(|cache| (cache, cache.artefact_path(&crate::ci::remote_url(url))));
+        let _lock = match &entry {
+            Some((cache, path)) => Some(cache.lock(path)?),
+            None => None,
+        };
+        let layout = entry
+            .as_ref()
+            .map(|(_, path)| crate::oci_layout::Layout::new(path.clone()));
+
+        let held = layout.as_ref().and_then(|layout| {
+            let found = layout.held().into_iter().find(|h| h.commit == commit)?;
+            let blob = layout.verified_blob(&found.digest)?;
+            fs::read(blob).ok()
+        });
+        let manifest_bytes = match held {
+            Some(bytes) => bytes,
+            None if !online => return Err(not_here()),
+            None => {
+                let digest = self
+                    .client
+                    .manifest_digest(&image, commit)?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "no artefact for {}:{}; its pipeline may not have published yet",
+                            image.reference(),
+                            short_sha(commit)
+                        )
+                    })?;
+                let bytes = self.client.manifest(&image, &digest)?;
+                if let Some(layout) = &layout {
+                    layout.ensure()?;
+                    let target = layout.blob_path(&digest)?;
+                    let partial = target.with_extension("partial");
+                    fs::write(&partial, &bytes)?;
+                    fs::rename(&partial, &target)?;
+                    layout.record(commit, &digest, bytes.len() as u64)?;
+                }
+                bytes
+            }
+        };
+        let manifest = parse_manifest(&manifest_bytes)?;
+        let Some(layer) = manifest
+            .layers
+            .iter()
+            .find(|l| l.annotations.get(TITLE).map(String::as_str) == Some(CONFIG_LAYER))
+        else {
+            return Ok(None);
+        };
+        let gzip = layer.gzip()?;
+        let (blob, _temp) = match layout.as_ref().and_then(|l| l.verified_blob(&layer.digest)) {
+            Some(found) => (found, None),
+            None if !online => return Err(not_here()),
+            None => match &layout {
+                Some(layout) => {
+                    let target = layout.blob_path(&layer.digest)?;
+                    self.client.download_blob(&image, &layer.digest, &target)?;
+                    (target, None)
+                }
+                None => {
+                    let temp = WorkDir(unique_temp("config-layer"));
+                    fs::create_dir_all(&temp.0)?;
+                    let target = temp.0.join("layer");
+                    self.client.download_blob(&image, &layer.digest, &target)?;
+                    (target, Some(temp))
+                }
+            },
+        };
+        read_from_layer(&blob, gzip, CONFIG_FILENAME)
+    }
+
     fn install(
         &self,
         entry: &RepoEntry,
@@ -949,6 +1082,29 @@ impl Artefacts {
     }
 }
 
+/// The file at `name` in the tar layer `blob`, if the layer has one.
+fn read_from_layer(blob: &Path, gzip: bool, name: &str) -> Result<Option<String>> {
+    use std::io::Read;
+    let file = fs::File::open(blob).with_context(|| format!("cannot open {}", blob.display()))?;
+    let reader: Box<dyn Read> = if gzip {
+        Box::new(flate2::read::GzDecoder::new(file))
+    } else {
+        Box::new(file)
+    };
+    let mut archive = tar::Archive::new(reader);
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.into_owned();
+        let path = path.strip_prefix(".").unwrap_or(&path);
+        if path == Path::new(name) {
+            let mut text = String::new();
+            entry.read_to_string(&mut text)?;
+            return Ok(Some(text));
+        }
+    }
+    Ok(None)
+}
+
 /// A directory under the system temp dir that no other operation — in this
 /// process or another — will be handed.
 fn unique_temp(purpose: &str) -> PathBuf {
@@ -1027,7 +1183,8 @@ pub fn publish(
     }
 
     let work = WorkDir(unique_temp("publish"));
-    let layers = pack(spec, base, &work.0)?;
+    let mut layers = vec![pack_config(base, &work.0)?];
+    layers.extend(pack(spec, base, &work.0)?);
     let config_blob = image_config(&layers);
     let config_digest = crate::registry::sha256_digest(&config_blob);
 
@@ -1446,6 +1603,7 @@ mod tests {
             revision: revision.into(),
             mode: crate::config::RepoMode::Artefact,
             recursive: true,
+            ..Default::default()
         }
     }
 

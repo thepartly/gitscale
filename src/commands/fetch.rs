@@ -18,17 +18,32 @@ pub fn run(
     err: &mut dyn Write,
 ) -> Result<()> {
     let (config, config_root) = load_workspace(root)?;
-    let selected = filter_entries(&config.repos, names)?;
-
-    if selected.is_empty() {
+    if config.repos.is_empty() {
         writeln!(out, "Nothing to fetch.")?;
         return Ok(());
     }
 
     let sources = Sources::adopting(&config, &config_root, no_cache, verbose, out)?;
     let artefacts = Artefacts::new(&config, &config_root, sources.cache.clone());
+    // Refreshes what resolution reads, so the next offline `status` sees what
+    // the remotes have now; and covers the checkouts nobody declared. A fetch
+    // changes no checkout, so a graph that will not resolve — a remote that
+    // cannot be reached, a conflict — still gets the declared entries fetched,
+    // and the command fails afterwards with the reason.
+    let resolved = crate::resolve::workspace(
+        &config,
+        &config_root,
+        true,
+        sources.cache.clone(),
+        Some(&artefacts),
+        verbose,
+    );
+    let (selected, unresolved) = match resolved {
+        Ok(resolution) => (resolution.select(names)?, None),
+        Err(e) => (filter_entries(&config.repos, names)?, Some(e)),
+    };
 
-    run_entries(
+    let fetched = run_entries(
         "Fetching...",
         "fetch",
         &selected,
@@ -72,5 +87,19 @@ pub fn run(
         },
         out,
         err,
-    )
+    );
+    // The reasons in the message itself: the CLI prints only the outermost
+    // error of a chain, and neither failure may hide the other.
+    match (fetched, unresolved) {
+        (fetched, None) => fetched,
+        (Ok(()), Some(e)) => Err(anyhow::anyhow!(
+            "cannot resolve the workspace's dependencies: {:#}",
+            e
+        )),
+        (Err(failed), Some(e)) => Err(anyhow::anyhow!(
+            "{:#}; and cannot resolve the workspace's dependencies: {:#}",
+            failed,
+            e
+        )),
+    }
 }

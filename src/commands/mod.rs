@@ -9,5 +9,6 @@ pub mod hook;
 pub mod pull;
 pub mod push;
 pub mod remove;
+pub mod resolve;
 pub mod status;
 pub mod sync;

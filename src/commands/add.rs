@@ -50,6 +50,7 @@ pub fn run(
         revision: revision.to_string(),
         mode: mode_enum,
         recursive: true,
+        ..Default::default()
     });
 
     write_config(&config_path, &config)?;

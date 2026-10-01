@@ -85,7 +85,9 @@ fn publish_tags_the_commit_and_annotates_the_image() {
                 .unwrap()
         })
         .collect();
-    assert_eq!(titles, vec!["vendor", "app"]);
+    // The repository's own .gitscale.toml first, for consumers resolving
+    // its dependencies; then the groups, in order.
+    assert_eq!(titles, vec!["gitscale", "vendor", "app"]);
 }
 
 #[test]
@@ -335,7 +337,8 @@ fn a_pull_downloads_only_the_layer_that_changed() {
     layered(&env, &bare, "app v1");
     env.write_config(&entry_config(&env, &bare, "main"));
     assert!(env.run(&["clone"]).success);
-    assert_eq!(blob_downloads(&env), 2);
+    // The config layer, read by resolution and kept, then vendor and app.
+    assert_eq!(blob_downloads(&env), 3);
 
     env.push_commit(&bare, "main", "README.md", "v2");
     layered(&env, &bare, "app v2");
@@ -378,7 +381,9 @@ fn without_the_cache_every_layer_is_downloaded() {
         let _ = std::fs::remove_dir_all(env.playground.join("meta"));
         assert!(env.run(&["clone"]).success);
     }
-    assert_eq!(blob_downloads(&env), 4);
+    // Without a cache to keep it, the config layer resolution reads is
+    // downloaded again by the install: four blobs a clone.
+    assert_eq!(blob_downloads(&env), 8);
     assert!(env.cache_entries("artefacts").is_empty());
 }
 
@@ -419,7 +424,7 @@ fn parallel_cold_clones_download_each_blob_once() {
             "app v1"
         );
     }
-    assert_eq!(blob_downloads(&env), 2, "{:?}", env.registry().log());
+    assert_eq!(blob_downloads(&env), 3, "{:?}", env.registry().log());
 }
 
 // ---------------------------------------------------------------------------
@@ -577,7 +582,8 @@ fn records_live_in_the_git_directory_not_the_checkout() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
-    assert_eq!(names, vec![".env", "app.bin"]);
+    // The producer's .gitscale.toml arrives with its config layer.
+    assert_eq!(names, vec![".env", ".gitscale.toml", "app.bin"]);
     let records = env.playground.join(".git/gitscale/artefacts");
     assert_eq!(
         std::fs::read_dir(&records).unwrap().count(),
@@ -652,7 +658,7 @@ fn show_says_what_the_registry_and_the_checkout_hold() {
         out.stdout
     );
     assert!(
-        shown(&out.stdout, "layers").starts_with("vendor "),
+        shown(&out.stdout, "layers").starts_with("gitscale "),
         "{}",
         out.stdout
     );

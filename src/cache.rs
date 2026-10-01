@@ -142,6 +142,10 @@ fn digest12(value: &str) -> String {
 pub struct Cache {
     root: PathBuf,
     dissociate: bool,
+    /// Mirror entries already brought up to date by this command: resolution
+    /// fetches each one before the checkout built from it, and the second
+    /// fetch would only ask the remote the same question again.
+    updated: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<PathBuf>>>,
 }
 
 impl Cache {
@@ -154,6 +158,7 @@ impl Cache {
         Some(Self {
             root: resolve_dir(&settings.dir)?,
             dissociate: settings.dissociate,
+            updated: Default::default(),
         })
     }
 
@@ -189,6 +194,9 @@ impl Cache {
     /// could have fetched for itself.
     pub fn mirror(&self, url: &str) -> Result<PathBuf> {
         let path = self.mirror_path(url);
+        if self.updated.lock().unwrap().contains(&path) && is_entry(&path) {
+            return Ok(path);
+        }
         let _lock = self.lock(&path)?;
         ensure_entry(&path, url)?;
         // `remote update -p` rather than `fetch`: the entry is configured as a
@@ -197,6 +205,7 @@ impl Cache {
         git_in(&path, &["remote", "update", "-p"], true)
             .with_context(|| format!("cannot update the cache entry for {}", url))?;
         touch(&path.join(LAST_USED));
+        self.updated.lock().unwrap().insert(path.clone());
         Ok(path)
     }
 

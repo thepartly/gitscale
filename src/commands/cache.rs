@@ -225,11 +225,25 @@ pub fn update(
         writeln!(out, "The object cache is off.")?;
         return Ok(());
     };
-    let selected = cacheable(&config, names)?;
-    if selected.is_empty() {
+    if config.repos.is_empty() {
         writeln!(out, "Nothing to cache.")?;
         return Ok(());
     }
+    // The revisions resolution settles on, implicit dependencies included:
+    // what the next clone or pull will ask the cache for.
+    let resolution = crate::resolve::workspace(
+        &config,
+        &config_root,
+        true,
+        Some(cache.clone()),
+        Some(&crate::artefact::Artefacts::new(
+            &config,
+            &config_root,
+            Some(cache.clone()),
+        )),
+        verbose,
+    )?;
+    let selected = resolution.select(names)?;
 
     let ci = is_ci();
     let names: Vec<String> = selected.iter().map(|e| e.directory.clone()).collect();

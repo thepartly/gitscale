@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 380" role="img" aria-label="One checkout of D, at the highest revision anyone asked for" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13">
+  <style>
+    .ink { fill: #1f2328; }
+    .quiet { fill: #59636e; }
+    .edge { stroke: #8c959f; }
+    .head { fill: #8c959f; }
+    .box { fill: none; stroke: #8c959f; stroke-width: 1.25; }
+    .accent { fill: #0969da; fill-opacity: 0.12; stroke: #0969da; stroke-width: 2; }
+    .accent-edge { stroke: #0969da; }
+    .accent-head { fill: #0969da; }
+    @media (prefers-color-scheme: dark) {
+      .ink { fill: #e6edf3; }
+      .quiet { fill: #9198a1; }
+      .edge { stroke: #656c76; }
+      .head { fill: #656c76; }
+      .box { stroke: #656c76; }
+      .accent { fill: #4493f8; fill-opacity: 0.16; stroke: #4493f8; }
+      .accent-edge { stroke: #4493f8; }
+      .accent-head { fill: #4493f8; }
+    }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" class="head"/>
+    </marker>
+    <marker id="arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" class="accent-head"/>
+    </marker>
+  </defs>
+
+  <text x="24" y="30" font-size="15" font-weight="600" class="ink">One checkout of D, at the highest revision anyone asked for</text>
+
+  <g fill="none" stroke-width="1.25" class="edge">
+    <path d="M290 80H180V166" marker-end="url(#arrow)"/>
+    <path d="M470 80H580V166" marker-end="url(#arrow)"/>
+    <path d="M380 104V284" marker-end="url(#arrow)"/>
+    <path d="M180 214V320H260" marker-end="url(#arrow)"/>
+  </g>
+  <path d="M580 214V320H500" fill="none" stroke-width="2" class="accent-edge" marker-end="url(#arrow-accent)"/>
+
+  <rect x="290" y="56" width="180" height="48" rx="8" class="box"/>
+  <text x="380" y="84" text-anchor="middle" font-weight="600" class="ink">root (A)</text>
+
+  <rect x="80" y="166" width="200" height="48" rx="8" class="box"/>
+  <text x="180" y="194" text-anchor="middle" class="ink">imports/b at v2.1.0</text>
+
+  <rect x="480" y="166" width="200" height="48" rx="8" class="box"/>
+  <text x="580" y="194" text-anchor="middle" class="ink">imports/c at v0.9.0</text>
+
+  <rect x="260" y="284" width="240" height="72" rx="8" class="accent"/>
+  <text x="380" y="308" text-anchor="middle" font-weight="600" class="ink">imports/d at v1.5.0</text>
+  <text x="380" y="326" text-anchor="middle" font-size="11.5" class="ink">one checkout, highest requested</text>
+  <text x="380" y="342" text-anchor="middle" font-size="11.5" class="quiet">b and c reach it through symlinks</text>
+
+  <text x="388" y="244" font-size="11.5" class="quiet">root declares v1.2.0</text>
+  <text x="188" y="262" font-size="11.5" class="quiet">wants v1.3.1</text>
+  <text x="588" y="262" font-size="11.5" class="ink">wants v1.5.0, selected</text>
+</svg>

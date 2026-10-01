@@ -1,12 +1,12 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use std::io::Write;
 use std::path::Path;
 
 use crate::artefact::{is_empty_dir, Artefacts};
 use crate::cache::Cache;
 use crate::commands::cache::Sources;
-use crate::config::{filter_entries, load_workspace, CacheSettings, RepoEntry, CONFIG_FILENAME};
-use crate::git::{clone_repo, pull_repo};
+use crate::config::{load_workspace, CacheSettings, CONFIG_FILENAME};
+use crate::git::clone_repo;
 use crate::progress::{run_entries, RepoStatus};
 use crate::resolve::is_outer_link;
 
@@ -33,17 +33,28 @@ pub fn run(
     }
 
     let (config, config_root) = load_workspace(root)?;
-    let selected = filter_entries(&config.repos, names)?;
-
-    if selected.is_empty() {
+    if config.repos.is_empty() {
         writeln!(out, "Nothing to clone.")?;
         return Ok(());
     }
 
     let sources = Sources::adopting(&config, &config_root, no_cache, verbose, out)?;
     let artefacts = Artefacts::new(&config, &config_root, sources.cache.clone());
+    // Before anything is cloned: every checkout then lands at the revision
+    // the whole graph settles on, implicit dependencies included.
+    let resolution = crate::resolve::workspace(
+        &config,
+        &config_root,
+        true,
+        sources.cache.clone(),
+        Some(&artefacts),
+        verbose,
+    )?;
+    let selected = resolution.select(names)?;
 
-    run_entries(
+    // A failed entry fails the command, but only after the rest is done:
+    // every other checkout still gets its links.
+    let cloned = run_entries(
         "Cloning missing repos...",
         "clone",
         &selected,
@@ -96,46 +107,11 @@ pub fn run(
         },
         out,
         err,
-    )?;
+    );
 
-    let adopted = crate::resolve::resolve_and_link(&config.repos, &config_root)?;
-    move_to_adopted(&config.repos, &config_root, adopted, &sources, verbose)
-}
-
-/// Move each root entry with no revision of its own to the one a child pins,
-/// the way `pull` moves any checkout: readonly files stay readonly, a shallow
-/// clone fetches the ref it was never cloned at, and CI's cache pins that
-/// revision rather than the default branch.
-pub(crate) fn move_to_adopted(
-    repos: &[RepoEntry],
-    config_root: &Path,
-    adopted: impl IntoIterator<Item = (String, String)>,
-    sources: &Sources,
-    verbose: bool,
-) -> Result<()> {
-    for (directory, revision) in adopted {
-        let Some(original) = repos.iter().find(|e| e.directory == directory) else {
-            continue;
-        };
-        let dest = config_root.join(&directory);
-        // An artefact has no git checkout to move, and a symlink is someone
-        // else's checkout.
-        if original.is_artefact() || dest.is_symlink() || !crate::git::is_checkout(&dest) {
-            continue;
-        }
-        let entry = RepoEntry {
-            revision,
-            ..original.clone()
-        };
-        let from = sources.for_entry(&entry);
-        pull_repo(&entry, config_root, verbose, &from).with_context(|| {
-            format!(
-                "{}: moving to adopted revision '{}'",
-                directory, entry.revision
-            )
-        })?;
-    }
-    Ok(())
+    crate::resolve::create_symlinks(&resolution.links, &config_root)?;
+    crate::ledger::record(&config_root, &resolution.entries())?;
+    cloned
 }
 
 /// The URL and directory a bootstrapping `gitscale clone <url> [directory]`

@@ -104,15 +104,17 @@ gitscale remove imports/core
 yet, it creates one next to `--root` (or the current directory).
 
 Neither command touches the filesystem — they edit `.gitscale.toml` only. Run
-[`gitscale clone`](workflow.md#clone) afterwards to materialise a new entry;
-remove the directory by hand after `gitscale remove`, since
-[`clean`](clean.md) deliberately does not delete checkouts.
+[`gitscale clone`](workflow.md#clone) afterwards to materialise a new entry,
+and [`gitscale sync`](workflow.md#sync) after `gitscale remove` to remove its
+checkout — which it does only when that loses nothing (files git ignores, such
+as build output, go with it).
+[`clean`](clean.md) deliberately never deletes checkouts.
 
 > **Both commands rewrite the whole file.** The config is re-emitted from what
 > GitScale parsed, so comments, key order and formatting are lost, and any table
 > GitScale does not know about is dropped. Edit `.gitscale.toml` by hand if you
-> keep comments in it. Entries always come back with `recursive = true` unless
-> the file already said otherwise.
+> keep comments in it. Entries come back sorted by directory, and keep
+> `recursive = false`, `override` and `singleton` when the file said so.
 
 ## Checkout modes
 
@@ -222,12 +224,71 @@ and GitLab both permit it.
 
 ### No revision
 
-Omitting `revision` leaves the choice to the remote's default branch — except
-where a [recursive dependency](recursive-dependencies.md) supplies one, which is
-how a root config can defer the decision to the repositories that actually care.
+Omitting `revision` asks for nothing: the repositories that depend on it
+decide, through [resolution](recursive-dependencies.md#how-a-revision-is-chosen),
+which is how a root config defers the decision to the repositories that
+actually care. When nobody asks for a revision, a fresh clone lands on the
+remote's default branch, and a pull keeps the checkout on the branch it is on.
 
 For an artefact entry, an omitted revision means the commit the remote's
 default branch is on.
+
+## Revision kinds
+
+What a revision *is* decides how it compares with another request for the same
+repository — see [comparing two requests](recursive-dependencies.md#comparing-two-requests).
+Only a tag is ever read as a version; a branch called `v2.0.0` is a branch.
+
+| Kind | Recognised by | Compared |
+|---|---|---|
+| Semver | A tag `MAJOR.MINOR.PATCH[-pre][+build]`, with `v` or without: `v1.2.3`, `1.2.3` | By semver precedence, within one major (`0.N` for `0.x`) |
+| Calendar version | A tag whose first number is a four-digit year: `v2026.10.01`, `2026.10.01-2` | By date, then modifier |
+| Branch, commit, any other tag | — | By position in the graph, never by history |
+
+**Calendar versions** follow [CalVer](https://calver.org/), spelt like semver
+tags: `v` or nothing, then `YYYY.0M.0D` (or `YYYY.0M.MICRO`), then an optional
+modifier after a hyphen. Within one date:
+
+- a text modifier is a pre-release and comes first: `2026.10.01-rc1` before `2026.10.01`;
+- a numeric modifier is a later release that day, compared as a number: `2026.10.01` before `-2` before `-11`;
+- text modifiers compare naturally, so `rc2` comes before `rc10`.
+
+```
+2026.10.01-dev < 2026.10.01-rc2 < 2026.10.01-rc10 < 2026.10.01
+               < 2026.10.01-2   < 2026.10.01-11   < 2026.10.02
+```
+
+Semver tools read a numeric `-2` as a pre-release instead, so a repository
+whose tags other tools also read should keep to text modifiers. Short-year
+tags such as `26.10.0` look exactly like semver and are read as semver; `26.10`,
+with only two numbers, is not a version at all and is decided by position.
+
+**Streams.** Text before the version other than a lone `v` names a stream:
+`api-v1.4.0` and `api-1.4.1` are both stream `api-`, and versions are only ever
+compared within one. A monorepo can tag `api-…` and `web-…` side by side.
+`v` and no prefix are the same stream.
+
+**Recommended for producers:** `vYYYY.0M.0D`, or `vMAJOR.MINOR.PATCH`, and no
+other prefix unless the repository releases more than one product.
+
+## Holding a dependency down: `override`
+
+A revision is a minimum: resolution may raise it to what a dependency needs.
+`override = true` asks for exactly that revision instead, and wins over every
+request from a repository below this one — see
+[overrides](recursive-dependencies.md#overrides).
+
+```toml
+"imports/d" = { url = "git@github.com:org/d.git", revision = "v1.4.0", override = true }
+```
+
+## One checkout only: `singleton`
+
+`singleton = true` says this repository may be checked out only once, whatever
+majors are asked for; `singleton = false` on the root's entry relaxes a
+dependency's `true`. A repository can say it of itself with a top-level
+`singleton = true` in its own `.gitscale.toml`. See
+[singleton](recursive-dependencies.md#singleton).
 
 ## Shallow clones
 
@@ -249,11 +310,12 @@ A shallow repo cannot report an exact behind count, so `gitscale status` shows
 
 ## Recursive dependencies
 
-If a checked-out repository carries its own `.gitscale.toml`, GitScale reads it,
-requires everything it declares to also be declared at the root, and creates a
-symlink instead of a second checkout. Turn it off per entry with
-`recursive = false`. The whole mechanism — hoisting, dedup, and the
-version-mismatch check — is [its own page](recursive-dependencies.md).
+If a repository carries its own `.gitscale.toml`, GitScale reads it: what it
+declares is resolved with everything else, checked out once — under the
+[hoist directory](configuration.md#resolve), `imports/` unless configured, when
+the root does not declare it — and linked in place of a second
+checkout. Turn it off per entry with `recursive = false`. The whole mechanism
+is [its own page](recursive-dependencies.md).
 
 ---
 

@@ -609,8 +609,8 @@ fn pull_replaces_an_in_workspace_symlink_with_a_clone() {
 /// A revision a child pins for a root entry that has none is applied by pull
 /// too, as a fresh clone would — including one the pull itself brings in.
 #[test]
-fn pull_moves_to_a_revision_a_child_adopts_later() {
-    let env = TestEnv::new("pull_adopts_later");
+fn pull_moves_to_a_revision_a_dependency_starts_asking_for() {
+    let env = TestEnv::new("pull_dep_asks_later");
     let bare_b = env.create_bare_repo("repoB", "main", &[("b.txt", "B main")]);
     bare_git_stdout(&bare_b, &["branch", "develop", "main"]);
     let develop_tip = commit_to_bare(&bare_b, "develop", "b.txt", "B develop");
@@ -720,7 +720,18 @@ fn artefact_is_readonly_at_every_depth() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
-    assert_eq!(names, vec![".config", ".env", "app.bin", "bin", "share"]);
+    // The producer's .gitscale.toml arrives with its config layer.
+    assert_eq!(
+        names,
+        vec![
+            ".config",
+            ".env",
+            ".gitscale.toml",
+            "app.bin",
+            "bin",
+            "share"
+        ]
+    );
 
     // An update has to get past the read-only files it replaces.
     env.push_commit(&bare, "main", "README.md", "v2");
@@ -1124,6 +1135,7 @@ fn status_json() {
         "[].current_ref" => "[ref]",
         "[].cache_dir" => "[cache-dir]",
         "[].bytes" => "[bytes]",
+        "[].resolved_commit" => "[commit]",
     });
 }
 
@@ -1464,6 +1476,10 @@ fn recursive_basic_symlink() {
     assert_eq!(content, "hello from B");
 }
 
+/// A dependency the root does not declare is checked out implicitly, under
+/// `imports/` and readonly — but only from somewhere the allowlist covers.
+/// The root's own entries allow their host and owner; a local path is never
+/// allowed that way, only by `[resolve] allow`.
 #[test]
 fn recursive_missing_dep_errors() {
     let env = TestEnv::new("recursive_missing_dep_errors");
@@ -1495,17 +1511,59 @@ fn recursive_missing_dep_errors() {
     ));
 
     let out = env.run(&["clone"]);
-    assert!(!out.success, "should fail when child dep is not in root");
+    assert!(!out.success, "should fail when child dep is not allowed");
     assert!(
-        out.stderr.contains("not declared in the root"),
+        out.stderr.contains("not on the allowlist"),
         "stderr: {}",
         out.stderr
     );
+    assert!(
+        !env.playground.join("repoA").exists(),
+        "nothing is cloned before resolution succeeds"
+    );
+
+    env.write_config(&format!(
+        r#"[resolve]
+allow = ["{}/*"]
+
+[repos]
+"repoA" = {{ url = "{}", revision = "main" }}
+"#,
+        env.repos_remote.display(),
+        bare_a.display(),
+    ));
+    let out = env.run(&["clone"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    let implicit = env.playground.join("imports/b");
+    assert_eq!(
+        std::fs::read_to_string(implicit.join("b.txt")).unwrap(),
+        "B"
+    );
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(implicit.join("b.txt"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o222, 0, "an implicit checkout is readonly");
+    let link = env.playground.join("repoA/libs/b");
+    assert!(link.is_symlink());
+    assert_eq!(
+        std::fs::read_link(&link).unwrap(),
+        std::path::PathBuf::from("../../imports/b")
+    );
+
+    let status = strip_ansi(&env.run(&["status"]).stdout);
+    let row = status
+        .lines()
+        .find(|l| l.contains("imports/b"))
+        .unwrap_or_default();
+    assert!(row.contains("implicit via repoA"), "{}", status);
 }
 
+/// A root entry without a revision gets the one a dependency asks for.
 #[test]
-fn recursive_revision_adoption() {
-    let env = TestEnv::new("recursive_revision_adoption");
+fn recursive_revision_from_a_dependency() {
+    let env = TestEnv::new("recursive_revision_from_dep");
 
     // Create B with two branches
     let bare_b = env.create_bare_repo("repoB", "main", &[("b.txt", "B main")]);
@@ -1570,6 +1628,8 @@ fn recursive_revision_conflict() {
     let env = TestEnv::new("recursive_revision_conflict");
 
     let bare_c = env.create_bare_repo("repoC", "main", &[("c.txt", "C")]);
+    bare_git_stdout(&bare_c, &["branch", "develop", "main"]);
+    commit_to_bare(&bare_c, "develop", "c.txt", "C develop");
 
     // A wants C at "main"
     let bare_a = env.create_bare_repo(
@@ -1615,10 +1675,12 @@ fn recursive_revision_conflict() {
         bare_c.display(),
     ));
 
+    // Two branches are not versions, and neither A nor B is above the
+    // other: without history to consult, nothing orders them.
     let out = env.run(&["clone"]);
     assert!(!out.success, "should fail on conflicting revisions");
     assert!(
-        out.stderr.contains("conflicting revisions"),
+        out.stderr.contains("cannot order"),
         "stderr: {}",
         out.stderr
     );
@@ -1670,6 +1732,8 @@ fn recursive_root_revision_wins() {
     let env = TestEnv::new("recursive_root_revision_wins");
 
     let bare_b = env.create_bare_repo("repoB", "main", &[("b.txt", "B main")]);
+    bare_git_stdout(&bare_b, &["branch", "develop", "main"]);
+    commit_to_bare(&bare_b, "develop", "b.txt", "B develop");
 
     // A wants B at "develop"
     let bare_a = env.create_bare_repo(
@@ -1687,7 +1751,8 @@ fn recursive_root_revision_wins() {
         ],
     );
 
-    // Root pins B at "main" — root wins, no conflict
+    // Root pins B at "main". Neither branch is a version, so position
+    // decides: the root is above every repository, and wins.
     env.write_config(&format!(
         r#"[repos]
 "repoA" = {{ url = "{}", revision = "main" }}
@@ -1713,13 +1778,13 @@ fn recursive_root_revision_wins() {
     assert!(link.is_symlink());
 }
 
-/// An adopted revision moves the checkout the way `pull` does: a shallow
-/// readonly clone fetches the tag it was never cloned at, and the files that
-/// move stay readonly.
+/// A tag a dependency asks for, for a root entry without a revision, is where a
+/// shallow readonly clone lands — not on the default branch's tip — and its
+/// files are readonly.
 #[test]
-fn adopted_tag_lands_in_a_shallow_readonly_clone() {
+fn a_tag_a_dependency_asks_for_lands_in_a_shallow_readonly_clone() {
     use std::os::unix::fs::PermissionsExt;
-    let env = TestEnv::new("adopt_shallow_readonly");
+    let env = TestEnv::new("dep_tag_shallow_readonly");
     let bare_b = env.create_bare_repo("repoB", "main", &[("b.txt", "B v1")]);
     let tagged = bare_git_stdout(&bare_b, &["rev-parse", "main"]);
     helpers::run_git_pub(&bare_b, &["tag", "v1", &tagged]);
@@ -1766,15 +1831,16 @@ fn adopted_tag_lands_in_a_shallow_readonly_clone() {
     assert_eq!(mode & 0o222, 0, "b.txt should still be readonly");
 }
 
-/// An artefact has no git checkout to move: a revision a child pins for it
+/// An artefact has no git checkout to move: a revision a dependency asks for
 /// must not send `git checkout` up into the workspace repo.
 #[test]
-fn an_adopted_revision_leaves_an_artefact_alone() {
-    let env = TestEnv::new("adopt_artefact");
+fn a_revision_a_dependency_asks_for_leaves_the_workspace_repo_alone() {
+    let env = TestEnv::new("dep_rev_artefact");
     env.init_playground_git();
     let root_head = git_stdout(&env.playground, &["rev-parse", "HEAD"]);
     // No revision: the default branch's commit, whatever the branch is called.
     let bare_art = env.artefact_repo("art", &[("art.bin", "binary")]);
+    run_git_pub(&bare_art, &["tag", "v9", "main"]);
     let bare_a = env.create_bare_repo(
         "repoA",
         "main",
@@ -1815,15 +1881,18 @@ fn recursive_artefact_with_config() {
     let bare_art = env.create_bare_repo("art", "main", &[("README.md", "art")]);
     run_git_pub(&bare_art, &["tag", "v1", "main"]);
 
-    // An artefact that contains a .gitscale.toml
-    let child_config = format!(
-        "[repos]\n\"vendor/dep\" = {{ url = \"{}\", revision = \"main\" }}\n",
+    // The producer's own .gitscale.toml declares the dependency; publish
+    // ships it as the image's config layer.
+    let producer = format!(
+        "[artefact]\nroot = \"dist\"\ninclude = [\"**\"]\n\n[repos]\n\"vendor/dep\" = {{ url = \"{}\", revision = \"main\" }}\n",
         bare_dep.display()
     );
-    env.publish(
-        &bare_art,
-        "v1",
-        &[("art.bin", "binary"), (".gitscale.toml", &child_config)],
+    let (published, _) =
+        env.publish_with(&bare_art, "v1", &producer, &[("art.bin", "binary")], &[]);
+    assert!(
+        published.success,
+        "{}{}",
+        published.stdout, published.stderr
     );
 
     // Root declares both artefact and the dep
@@ -2477,6 +2546,7 @@ fn shallow_entry(url: &str, revision: &str) -> gitscale::config::RepoEntry {
         revision: revision.to_string(),
         mode: gitscale::config::RepoMode::Readwrite,
         recursive: false,
+        ..Default::default()
     }
 }
 

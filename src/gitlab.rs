@@ -152,6 +152,7 @@ mod tests {
             revision: String::new(),
             mode: crate::config::RepoMode::Readwrite,
             recursive: true,
+            ..Default::default()
         }
     }
 

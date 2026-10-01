@@ -44,9 +44,10 @@ The problems GitScale is built for:
   any other) as one image per commit, and fetched with the CI job token. No
   `docker`, `oras` or cloud CLI is needed. See [artefacts](artefacts.md).
 - **Shared transitive dependencies checked out once.** When two repositories in
-  the workspace both depend on a third, it is checked out once at the root and
-  symlinked into each dependant, and conflicting revision claims are an error
-  rather than two silently divergent copies. See
+  the workspace both depend on a third, it is checked out once — at the highest
+  version either asks for, one checkout per major — and symlinked into each
+  dependant, rather than two silently divergent copies. A dependency the root
+  never declares is brought in on its own. See
   [recursive dependencies](recursive-dependencies.md).
 - **A checkout that populates itself.** With GitScale installed as a git hook,
   `git clone`, `git checkout` and `git worktree add` materialise the whole
