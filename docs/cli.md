@@ -248,7 +248,7 @@ gitscale cache <status|update|adopt|repair|compact> [OPTIONS]
 | Option | Subcommand | Meaning |
 |---|---|---|
 | `--shared` | `adopt` | Adopt from a linked worktree, relinking the object store it shares with its main worktree and every sibling |
-| `--keep-recent <PERIOD>` | `compact` | How recently an entry must have been used to be kept. Default `12months`; accepts `12h`, `30d`, `2 weeks`, `1y`, and a bare number as days |
+| `--keep-recent <PERIOD>` | `compact` | How recently an entry must have been used to be kept. Default `12months`; accepts any [humantime](https://docs.rs/humantime) period, such as `12h`, `30d`, `2 weeks`, `1y` or `1d 12h`; a month is 30.44 days. A bare `m` is refused as ambiguous: write `min` or `months` |
 
 `status` and `compact` work from anywhere — the cache belongs to the user, not
 to a workspace. A config is used when there is one, so `[cache] dir` is honoured.

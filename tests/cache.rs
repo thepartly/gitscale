@@ -618,13 +618,17 @@ fn an_unknown_period_is_refused_before_anything_is_deleted() {
     env.write_config(&config_for(&bare.display().to_string()));
     assert!(env.run(&["clone"]).success);
 
-    let out = cache_cmd(&env, &["compact", "--keep-recent", "soon"]);
-    assert!(!out.success);
-    assert_eq!(
-        env.cache_entries("mirror").len(),
-        1,
-        "a period it could not read must not evict anything"
-    );
+    // `6m` reads as six minutes to humantime and as six months to a person.
+    for period in ["soon", "6m"] {
+        let out = cache_cmd(&env, &["compact", "--keep-recent", period]);
+        assert!(!out.success, "{}", period);
+        assert_eq!(
+            env.cache_entries("mirror").len(),
+            1,
+            "a period it could not read must not evict anything: {}",
+            period
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

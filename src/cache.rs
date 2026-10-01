@@ -31,6 +31,7 @@
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
 use crate::config::{CacheSettings, RepoEntry};
@@ -926,30 +927,22 @@ pub fn ago(when: Option<SystemTime>) -> String {
     format!("{} ago", plural(count as usize, one, many))
 }
 
-/// Parse a `--keep-recent` period: a count and a unit, as in `1month`, `30d`
+/// Parse a `--keep-recent` period in humantime's syntax, as in `1month`, `30d`
 /// or `2 weeks`.
+///
+/// A bare `m` or `M` is refused: humantime reads them as minutes and months,
+/// and taking one for the other here would evict nearly the whole cache.
 pub fn parse_period(text: &str) -> Result<Duration> {
-    let text = text.trim();
-    let split = text
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(text.len());
-    let (count, unit) = text.split_at(split);
-    let count: u64 = count
-        .parse()
-        .map_err(|_| anyhow::anyhow!("'{}' does not start with a number", text))?;
-    let unit = unit.trim().trim_end_matches('s');
-    let seconds = match unit {
-        "h" | "hour" => 3_600,
-        "d" | "day" | "" => 86_400,
-        "w" | "week" => 7 * 86_400,
-        "m" | "month" => 30 * 86_400,
-        "y" | "year" => 365 * 86_400,
-        other => bail!(
-            "unknown period unit '{}' (expected hours, days, weeks, months or years)",
-            other
-        ),
-    };
-    Ok(Duration::from_secs(count * seconds))
+    static BARE_M: OnceLock<regex::Regex> = OnceLock::new();
+    let bare_m = BARE_M.get_or_init(|| regex::Regex::new(r"\d\s*[mM](?:$|[\s\d])").unwrap());
+    if bare_m.is_match(text.trim()) {
+        bail!(
+            "'{}' is ambiguous: write 'min' for minutes or 'months' for months",
+            text
+        );
+    }
+    humantime::parse_duration(text.trim())
+        .map_err(|e| anyhow::anyhow!("invalid period '{}': {}", text, e))
 }
 
 /// An exclusive lock on one cache entry, released when the guard is dropped —
@@ -1008,9 +1001,14 @@ mod tests {
 
     #[test]
     fn periods_parse_the_way_the_flag_spells_them() {
+        // humantime's month and year: 30.44 and 365.25 days.
         assert_eq!(
             parse_period("1month").unwrap(),
-            Duration::from_secs(30 * 86_400)
+            Duration::from_secs(2_630_016)
+        );
+        assert_eq!(
+            parse_period("12months").unwrap(),
+            Duration::from_secs(12 * 2_630_016)
         );
         assert_eq!(
             parse_period("30d").unwrap(),
@@ -1024,10 +1022,36 @@ mod tests {
             parse_period("12h").unwrap(),
             Duration::from_secs(12 * 3_600)
         );
-        // A bare number is a count of days.
-        assert_eq!(parse_period("7").unwrap(), Duration::from_secs(7 * 86_400));
+        assert_eq!(
+            parse_period("1d 12h").unwrap(),
+            Duration::from_secs(36 * 3_600)
+        );
         assert!(parse_period("soon").is_err());
         assert!(parse_period("3 fortnights").is_err());
+        // A count needs a unit.
+        assert!(parse_period("7").is_err());
+    }
+
+    #[test]
+    fn small_units_are_not_read_as_large_ones() {
+        assert_eq!(parse_period("30s").unwrap(), Duration::from_secs(30));
+        assert_eq!(parse_period("10min").unwrap(), Duration::from_secs(600));
+        assert_eq!(parse_period("10ms").unwrap(), Duration::from_millis(10));
+    }
+
+    #[test]
+    fn a_bare_m_is_refused_as_ambiguous() {
+        for text in ["6m", "6M", "6 m", "1h30m", "1m 2d"] {
+            let err = parse_period(text).unwrap_err().to_string();
+            assert!(err.contains("ambiguous"), "{}: {}", text, err);
+        }
+        assert!(parse_period("6min").is_ok());
+        assert!(parse_period("6months").is_ok());
+    }
+
+    #[test]
+    fn an_overflowing_period_is_an_error_not_a_panic() {
+        assert!(parse_period("99999999999999999999y").is_err());
     }
 
     #[test]
