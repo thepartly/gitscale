@@ -148,6 +148,12 @@ pub(crate) fn looks_like_sha(revision: &str) -> bool {
     revision.len() >= 7 && revision.len() <= 64 && revision.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// A commit as people read it: its first 7 hex digits, git's (and GitHub's)
+/// default abbreviation. For display only — never resolve one of these.
+pub fn short_sha(sha: &str) -> &str {
+    sha.get(..7).unwrap_or(sha)
+}
+
 /// Shallow-clone a repo pinned to a commit SHA: init an empty repo and fetch
 /// just that commit. Returns `false` if the remote refused to serve the commit
 /// (not every server allows fetching an arbitrary SHA), leaving the caller to
@@ -831,14 +837,20 @@ pub fn clean_repo(dir: &Path, excludes: &[String], force: bool) -> Result<Vec<St
         args.push(pattern);
     }
     let output = run_git(&args, Some(dir), true)?;
-    Ok(stdout_str(&output)
+    Ok(clean_report(&output))
+}
+
+/// The paths a `git clean` run reports, removed or (with `-n`) to be removed,
+/// as git prints them: a directory keeps its trailing `/`.
+pub(crate) fn clean_report(output: &std::process::Output) -> Vec<String> {
+    stdout_str(output)
         .lines()
         .filter_map(|line| {
             line.strip_prefix("Removing ")
                 .or_else(|| line.strip_prefix("Would remove "))
                 .map(str::to_string)
         })
-        .collect())
+        .collect()
 }
 
 pub fn is_repo_root(dir: &Path) -> bool {

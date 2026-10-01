@@ -255,11 +255,11 @@ fn colorize(text: &str, ansi_code: &str, bold: bool) -> String {
     }
 }
 
-/// A SHA-pinned revision abbreviated to the width `git rev-parse --short` uses,
-/// so it lines up with the REF column. Branch and tag names pass through.
+/// A SHA-pinned revision abbreviated the way the REF column spells a detached
+/// HEAD, so the two line up. Branch and tag names pass through.
 fn abbreviate_revision(revision: &str) -> String {
-    if crate::git::looks_like_sha(revision) && revision.len() > 7 {
-        revision[..7].to_string()
+    if crate::git::looks_like_sha(revision) {
+        crate::git::short_sha(revision).to_string()
     } else {
         revision.to_string()
     }
@@ -318,18 +318,17 @@ fn print_table(
         ]);
     }
 
-    // Compute column widths
+    // Column widths in characters, the unit `{:<width$}` pads in: counted in
+    // bytes, every multi-byte icon and dash widened its column.
     let mut widths = [0usize; 7];
     for (i, h) in headers.iter().enumerate() {
-        widths[i] = h.len();
+        widths[i] = h.chars().count();
     }
     for row in &rows {
         for (i, cell) in row.iter().enumerate() {
-            widths[i] = widths[i].max(cell.len());
+            widths[i] = widths[i].max(cell.chars().count());
         }
     }
-    // Icon column needs at least 1 (UTF-8 icons are multi-byte but display as 1 char)
-    widths[0] = widths[0].max(1);
 
     let gap = "   ";
 

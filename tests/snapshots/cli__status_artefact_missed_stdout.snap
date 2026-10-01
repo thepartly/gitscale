@@ -2,5 +2,5 @@
 source: tests/cli.rs
 expression: plain
 ---
-      REPO       PATH   MODE       REF   EXPECTED   STATUS
-✘     meta/app   -      artefact   —     main       missed
+    REPO       PATH   MODE       REF   EXPECTED   STATUS
+✘   meta/app   -      artefact   —     main       missed

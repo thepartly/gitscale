@@ -2,5 +2,5 @@
 source: tests/cli.rs
 expression: plain
 ---
-      REPO         PATH   MODE        REF    EXPECTED   STATUS
-✔     libs/mylib   -      readwrite   main   main       ok
+    REPO         PATH   MODE        REF    EXPECTED   STATUS
+✔   libs/mylib   -      readwrite   main   main       ok

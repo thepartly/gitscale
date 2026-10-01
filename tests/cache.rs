@@ -1227,9 +1227,9 @@ fn cache_status_lists_every_revision_a_snapshot_holds() {
         row
     );
     for sha in [&first, &second] {
-        let short: String = sha.chars().take(12).collect();
+        let short = gitscale::git::short_sha(sha);
         assert!(
-            out.stdout.contains(&short),
+            out.stdout.contains(short),
             "every cached revision should be listed, missing {}: {}",
             short,
             out.stdout

@@ -303,8 +303,8 @@ cache  /home/dev/.local/share/gitscale  (4 entries, 104.8 KiB)
   REPO             MIRROR  SNAPSHOTS     TOTAL  REVS  LAST USED
   imports/core   26.2 KiB          -  26.2 KiB     9  2 hours ago
   imports/utils         -   26.2 KiB  26.2 KiB     2  just now
-      c6e8981d205b  just now
-      73739376c62a  6 days ago
+      c6e8981  just now
+      7373937  6 days ago
 ```
 
 One line per **repository**, not per entry — a machine that both develops and
@@ -337,7 +337,7 @@ gitscale cache update imports/core       # one of them
 Refresh entries without touching any checkout — the one command that warms a
 repository nobody has pulled yet. On a developer machine it updates mirrors; in
 CI it adds a pin for each entry's revision, reporting
-`imports/core (pinned at 9fceb02a)`, and skips anything it cannot pin
+`imports/core (pinned at 9fceb02)`, and skips anything it cannot pin
 (`nothing to pin`). `-v` prints the cache's total size afterwards.
 
 ### cache adopt

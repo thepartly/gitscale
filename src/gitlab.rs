@@ -16,8 +16,8 @@ use anyhow::{bail, Result};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use crate::config::{find_config, load_config, RepoEntry};
-use crate::git::run_git;
+use crate::config::{load_workspace, RepoEntry};
+use crate::git::{clean_report, run_git};
 
 /// What the runner uses when a pipeline does not set `GIT_CLEAN_FLAGS`.
 const DEFAULT_CLEAN_FLAGS: &str = "-ffdx";
@@ -42,9 +42,7 @@ fn check_runner_clean_with(root: &Path, var: &dyn Fn(&str) -> Option<String>) ->
         return Ok(());
     }
 
-    let config_path = find_config(Some(root))?;
-    let config_root = config_path.parent().unwrap().to_path_buf();
-    let config = load_config(&config_path)?;
+    let (config, config_root) = load_workspace(Some(root))?;
 
     // The runner cleans from the top of the checkout, which is not necessarily
     // where the config sits.
@@ -61,9 +59,8 @@ fn check_runner_clean_with(root: &Path, var: &dyn Fn(&str) -> Option<String>) ->
     let mut args = vec!["clean", "-n"];
     args.extend(flags.split_whitespace());
     let listed = run_git(&args, Some(&top), true)?;
-    let removed: Vec<PathBuf> = String::from_utf8_lossy(&listed.stdout)
-        .lines()
-        .filter_map(|line| line.strip_prefix("Would remove "))
+    let removed: Vec<PathBuf> = clean_report(&listed)
+        .iter()
         .map(|path| PathBuf::from(path.trim_end_matches('/')))
         .collect();
 

@@ -330,8 +330,8 @@ fn report(targets: &[Target], out: &mut dyn Write) -> Result<()> {
         writeln!(
             out,
             "\n{} in {}.",
-            count(total, "path"),
-            count(repos, "repo")
+            crate::cache::plural(total, "path", "paths"),
+            crate::cache::plural(repos, "repo", "repos")
         )?;
     }
     Ok(())
@@ -370,7 +370,11 @@ fn execute(
                 Ok(paths) if paths.is_empty() => {
                     RepoStatus::Skip(format!("{} (nothing to remove)", name))
                 }
-                Ok(paths) => RepoStatus::Ok(format!("{} ({})", name, count(paths.len(), "path"))),
+                Ok(paths) => RepoStatus::Ok(format!(
+                    "{} ({})",
+                    name,
+                    crate::cache::plural(paths.len(), "path", "paths")
+                )),
                 Err(e) => RepoStatus::Fail(format!("{}: {}", name, e)),
             }
         },
@@ -382,14 +386,6 @@ fn execute(
         bail!("{} repo(s) failed to clean", failed);
     }
     Ok(())
-}
-
-fn count(n: usize, noun: &str) -> String {
-    if n == 1 {
-        format!("{} {}", n, noun)
-    } else {
-        format!("{} {}s", n, noun)
-    }
 }
 
 #[cfg(test)]

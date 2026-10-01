@@ -243,7 +243,11 @@ pub fn update(
             let url = crate::git::remote_url(entry);
             let result = if ci {
                 cache.pin(&url, &entry.revision).map(|pinned| match pinned {
-                    Some(pinned) => Some(format!("{} (pinned at {})", name, short(&pinned.sha))),
+                    Some(pinned) => Some(format!(
+                        "{} (pinned at {})",
+                        name,
+                        crate::git::short_sha(&pinned.sha)
+                    )),
                     None => None,
                 })
             } else {
@@ -439,7 +443,7 @@ fn size_or_dash(bytes: u64) -> String {
 /// name anyone scans a column for.
 fn short_revision(name: &str) -> String {
     match name.strip_prefix("pin/") {
-        Some(sha) => sha.chars().take(12).collect(),
+        Some(sha) => crate::git::short_sha(sha).to_string(),
         None => name.to_string(),
     }
 }
@@ -538,8 +542,4 @@ fn cacheable(config: &GitScaleConfig, names: &[String]) -> Result<Vec<RepoEntry>
         .into_iter()
         .filter(|e| !e.is_artefact())
         .collect())
-}
-
-fn short(sha: &str) -> String {
-    sha.chars().take(8).collect()
 }
