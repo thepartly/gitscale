@@ -1,9 +1,9 @@
 use anyhow::Result;
 use std::io::Write;
 use std::path::Path;
-use std::process::Stdio;
 
-use crate::config::{find_config, load_config, load_config_optional, CONFIG_FILENAME};
+use crate::config::{find_config, load_config};
+use crate::git::is_tree_modified;
 use crate::hooks;
 use crate::resolve::{create_symlinks, resolve_recursive};
 
@@ -141,53 +141,4 @@ fn relink(
     }
 
     Ok(())
-}
-
-fn is_tree_modified(path: &Path) -> bool {
-    let dirty = crate::git::git_command()
-        .args(["status", "--porcelain"])
-        .current_dir(path)
-        .stdin(Stdio::null())
-        .output()
-        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
-        .unwrap_or(false);
-    if dirty {
-        return true;
-    }
-
-    let ahead = crate::git::git_command()
-        .args(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
-        .current_dir(path)
-        .stdin(Stdio::null())
-        .output()
-        .map(|o| {
-            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            let parts: Vec<&str> = s.split_whitespace().collect();
-            parts
-                .first()
-                .and_then(|v| v.parse::<i32>().ok())
-                .unwrap_or(0)
-                > 0
-        })
-        .unwrap_or(false);
-    if ahead {
-        return true;
-    }
-
-    let child_config_path = path.join(CONFIG_FILENAME);
-    if let Some(child_config) = load_config_optional(&child_config_path) {
-        for entry in &child_config.repos {
-            if entry.is_artefact() {
-                continue;
-            }
-            let child_path = path.join(&entry.directory);
-            if child_path.is_dir() && !child_path.is_symlink() {
-                if is_tree_modified(&child_path) {
-                    return true;
-                }
-            }
-        }
-    }
-
-    false
 }

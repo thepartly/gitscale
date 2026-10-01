@@ -2435,6 +2435,44 @@ fn pull_fails_when_the_remote_is_unreachable() {
     }
 }
 
+/// The refs come first, then the move: a full checkout pinned to a branch
+/// that did not exist when it was cloned finds it, cache or no cache.
+#[test]
+fn pull_moves_a_full_checkout_to_a_branch_made_after_the_clone() {
+    for (name, flags) in [
+        ("pull_new_branch_cached", &[][..]),
+        ("pull_new_branch_no_cache", &["--no-cache"][..]),
+    ] {
+        let env = TestEnv::new(name);
+        let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "v1")]);
+        let config = |revision: &str| {
+            format!(
+                "[repos]\n\"libs/mylib\" = {{ url = \"{}\", revision = \"{}\" }}\n",
+                bare.display(),
+                revision
+            )
+        };
+        env.write_config(&config("main"));
+        let clone = [&["clone"][..], flags].concat();
+        assert!(env.run(&clone).success, "{}: clone failed", name);
+
+        bare_git_stdout(&bare, &["branch", "feature", "main"]);
+        let tip = commit_to_bare(&bare, "feature", "a.txt", "feature");
+        env.write_config(&config("feature"));
+        let pull = [&["pull"][..], flags].concat();
+        let out = env.run(&pull);
+        assert!(out.success, "{}: {}{}", name, out.stdout, out.stderr);
+        let dest = env.playground.join("libs/mylib");
+        assert_eq!(git_stdout(&dest, &["rev-parse", "HEAD"]), tip, "{}", name);
+        assert_eq!(
+            git_stdout(&dest, &["symbolic-ref", "--short", "HEAD"]),
+            "feature",
+            "{}",
+            name
+        );
+    }
+}
+
 /// Fast-forward only: a branch with commits of its own and new ones upstream
 /// is left where it is, and the pull still succeeds.
 #[test]

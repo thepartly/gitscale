@@ -388,16 +388,7 @@ pub fn checkout_revision(entry: &RepoEntry, root: &Path) -> Result<()> {
     // Try branch checkout first, then detached HEAD for tags/SHAs
     let result = run_git(&["checkout", &entry.revision], Some(&dest), false)?;
     if !result.status.success() {
-        let result = run_git(
-            &[
-                "rev-parse",
-                "--verify",
-                &format!("{}^{{commit}}", entry.revision),
-            ],
-            Some(&dest),
-            false,
-        )?;
-        if !result.status.success() {
+        if !ref_exists(&dest, &format!("{}^{{commit}}", entry.revision)) {
             bail!(
                 "revision '{}' does not exist in {}",
                 entry.revision,
@@ -420,17 +411,31 @@ pub fn is_shallow(dest: &Path) -> bool {
 }
 
 pub fn fetch_repo(entry: &RepoEntry, root: &Path, source: &Source) -> Result<()> {
-    let dest = root.join(&entry.directory);
-    if source.local.is_some() {
-        return fetch_from_cache(&dest, source);
+    refresh(entry, &root.join(&entry.directory), source)
+}
+
+/// Bring into `dest` the refs `entry.revision` needs, without moving the
+/// checkout: the one place `fetch` and `pull` decide between cache and remote,
+/// shallow and full.
+///
+/// From the cache entry when there is one, which was itself just updated from
+/// the remote — except a shallow checkout pinned to a SHA: an arbitrary
+/// commit is not something a mirror serves by default, so that one asks the
+/// remote. A shallow checkout fetches only what its revision names, at depth 1;
+/// a full one fetches its remote.
+fn refresh(entry: &RepoEntry, dest: &Path, source: &Source) -> Result<()> {
+    let shallow = is_shallow(dest);
+    let sha_pin = shallow && looks_like_sha(&entry.revision) && source.pinned.is_none();
+    if source.local.is_some() && !sha_pin {
+        return fetch_from_cache(dest, source);
     }
-    ensure_ci_remote(entry, &dest)?;
-    if is_shallow(&dest) {
-        fetch_shallow(entry, &dest)?;
+    ensure_ci_remote(entry, dest)?;
+    if shallow {
+        fetch_shallow(entry, dest)
     } else {
-        run_git(&["fetch", "--all", "--quiet"], Some(&dest), true)?;
+        run_git(&["fetch", "--quiet"], Some(dest), true)?;
+        Ok(())
     }
-    Ok(())
 }
 
 /// Step two of cache-first: take locally everything the entry just fetched
@@ -530,21 +535,14 @@ fn walkdir_recursive(dir: &Path, result: &mut Vec<PathBuf>) {
     }
 }
 
-/// Fast-forward the checked-out branch to its upstream.
+/// Fast-forward the checked-out branch to its just-refreshed upstream — a
+/// local move, checked: a merge that fails (local changes in the way) is an
+/// error, not a checkout reported as updated.
 ///
-/// With a cache entry behind it the tracking ref was just updated from there,
-/// so this is a local move. Without one the refs come from the remote first —
-/// the trip `git pull` would make, but checked: a pull that could not reach
-/// the remote must fail, not report a checkout it never updated.
-///
-/// Only a branch that is behind is moved, and a merge that then fails (local
-/// changes in the way) is an error too. One that is up to date, ahead or has
+/// Only a branch that is behind is moved. One that is up to date, ahead or has
 /// diverged is left alone rather than forced, and so is a detached HEAD or a
 /// branch with no upstream: there is nothing to fast-forward to.
-fn fast_forward(dest: &Path, source: &Source) -> Result<()> {
-    if source.local.is_none() {
-        run_git(&["fetch", "--quiet"], Some(dest), true)?;
-    }
+fn fast_forward(dest: &Path) -> Result<()> {
     if !ref_exists(dest, "@{upstream}") {
         return Ok(());
     }
@@ -581,30 +579,18 @@ pub fn pull_repo(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source)
         restore_writable(&dest)?;
     }
 
-    if source.local.is_none() {
-        ensure_ci_remote(entry, &dest)?;
-    }
-
     let result = (|| -> Result<()> {
+        refresh(entry, &dest, source)?;
         if let Some(pinned) = &source.pinned {
-            // CI, cached: the commit comes out of the snapshot entry, so a job
+            // CI, cached: the commit came out of the snapshot entry, so a job
             // that runs after another has nothing at all to download.
-            fetch_from_cache(&dest, source)?;
             run_git(
                 &["reset", "--hard", "--quiet", &pinned.sha],
                 Some(&dest),
                 true,
             )?;
-            return Ok(());
-        }
-        if is_shallow(&dest) {
+        } else if is_shallow(&dest) {
             if looks_like_sha(&entry.revision) {
-                // An arbitrary commit is not something a mirror serves by
-                // default, so this one asks the remote even with a cache.
-                if source.local.is_some() {
-                    ensure_ci_remote(entry, &dest)?;
-                }
-                fetch_shallow(entry, &dest)?;
                 // Detach rather than reset: a checkout moved here from a
                 // branch pin would otherwise drag that branch to this commit.
                 run_git(
@@ -613,25 +599,17 @@ pub fn pull_repo(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source)
                     true,
                 )?;
             } else {
-                if source.local.is_some() {
-                    fetch_from_cache(&dest, source)?;
-                } else {
-                    fetch_shallow(entry, &dest)?;
-                }
                 land_shallow(entry, &dest)?;
             }
-            return Ok(());
+        } else {
+            // No revision means whatever branch the clone landed on, as in
+            // `clone_repo`: there is nothing to switch to, only to
+            // fast-forward.
+            if !entry.revision.is_empty() && get_current_ref(entry, root)? != entry.revision {
+                checkout_revision(entry, root)?;
+            }
+            fast_forward(&dest)?;
         }
-        // A full checkout: refs come from the cache when there is one, which
-        // makes the fast-forward below local; without one, nothing is fetched
-        // here and the fast-forward is the `git pull` it always was.
-        fetch_from_cache(&dest, source)?;
-        // No revision means whatever branch the clone landed on, as in
-        // `clone_repo`: there is nothing to switch to, only to fast-forward.
-        if !entry.revision.is_empty() && get_current_ref(entry, root)? != entry.revision {
-            checkout_revision(entry, root)?;
-        }
-        fast_forward(&dest, source)?;
         Ok(())
     })();
 
@@ -750,14 +728,20 @@ fn land_shallow(entry: &RepoEntry, dest: &Path) -> Result<()> {
     );
 }
 
-fn ref_exists(dest: &Path, name: &str) -> bool {
-    run_git(
+/// What `name` resolves to in `dir` (a ref, `HEAD`, `<rev>^{commit}`…), or
+/// `None` when it does not.
+pub(crate) fn resolve_ref(dir: &Path, name: &str) -> Option<String> {
+    let output = run_git(
         &["rev-parse", "--verify", "--quiet", name],
-        Some(dest),
+        Some(dir),
         false,
     )
-    .map(|o| o.status.success())
-    .unwrap_or(false)
+    .ok()?;
+    output.status.success().then(|| stdout_str(&output))
+}
+
+pub(crate) fn ref_exists(dir: &Path, name: &str) -> bool {
+    resolve_ref(dir, name).is_some()
 }
 
 /// Make `branch` track `origin/<branch>`, as a clone at that branch does.
@@ -930,6 +914,110 @@ pub struct RepoStatus {
     pub at_expected: bool,
 }
 
+impl RepoStatus {
+    /// An existing, clean checkout of `entry` with nothing to report — what
+    /// each status below starts from and says only how it differs.
+    fn new(entry: &RepoEntry) -> Self {
+        RepoStatus {
+            directory: entry.directory.clone(),
+            exists: true,
+            current_ref: String::new(),
+            expected_ref: entry.revision.clone(),
+            is_clean: true,
+            is_detached: false,
+            ahead: 0,
+            behind: 0,
+            mode: entry.mode.to_string(),
+            is_stale: false,
+            is_symlink: false,
+            symlink_target: String::new(),
+            has_unlinked: false,
+            has_unlinked_modified: false,
+            cache: crate::cache::CacheUse::Unused,
+            at_expected: true,
+        }
+    }
+
+    /// An entry whose path is a symlink: where it points, and — for a git
+    /// entry, `with_ref` — the ref of the checkout it points at.
+    fn symlink(entry: &RepoEntry, dest: &Path, with_ref: bool) -> Self {
+        let symlink_target = fs::read_link(dest)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let current_ref = if with_ref {
+            dest.canonicalize()
+                .ok()
+                .and_then(|resolved| head_ref(&resolved))
+                .map(|(name, _)| name)
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        RepoStatus {
+            current_ref,
+            is_symlink: true,
+            symlink_target,
+            ..RepoStatus::new(entry)
+        }
+    }
+}
+
+/// HEAD in `dir`, as status shows it: the branch name, or the abbreviated
+/// commit when detached, with whether it is detached. `None` when HEAD does not
+/// resolve at all.
+fn head_ref(dir: &Path) -> Option<(String, bool)> {
+    let branch = run_git(&["symbolic-ref", "--short", "HEAD"], Some(dir), false).ok()?;
+    if branch.status.success() {
+        return Some((stdout_str(&branch), false));
+    }
+    let commit = run_git(&["rev-parse", "--short", "HEAD"], Some(dir), false).ok()?;
+    commit.status.success().then(|| (stdout_str(&commit), true))
+}
+
+/// Commits `dir`'s HEAD has that its upstream does not, and the reverse;
+/// `(0, 0)` without an upstream.
+pub(crate) fn ahead_behind(dir: &Path) -> (i32, i32) {
+    let Ok(output) = run_git(
+        &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+        Some(dir),
+        false,
+    ) else {
+        return (0, 0);
+    };
+    let counts = stdout_str(&output);
+    match counts.split_whitespace().collect::<Vec<_>>()[..] {
+        [ahead, behind] if output.status.success() => {
+            (ahead.parse().unwrap_or(0), behind.parse().unwrap_or(0))
+        }
+        _ => (0, 0),
+    }
+}
+
+/// Whether the checkout at `path`, or any gitscale checkout nested in it,
+/// holds work that replacing it would lose: uncommitted changes, or commits
+/// its upstream does not have.
+pub fn is_tree_modified(path: &Path) -> bool {
+    let dirty = run_git(&["status", "--porcelain"], Some(path), false)
+        .map(|o| !stdout_str(&o).is_empty())
+        .unwrap_or(false);
+    if dirty || ahead_behind(path).0 > 0 {
+        return true;
+    }
+    let Some(config) =
+        crate::config::load_config_optional(&path.join(crate::config::CONFIG_FILENAME))
+    else {
+        return false;
+    };
+    config
+        .repos
+        .iter()
+        .filter(|e| !e.is_artefact())
+        .any(|entry| {
+            let child = path.join(&entry.directory);
+            is_checkout(&child) && !child.is_symlink() && is_tree_modified(&child)
+        })
+}
+
 /// Whether `dest` is at the commit `revision` names.
 ///
 /// Both sides are resolved rather than compared as text. Anything that will
@@ -940,33 +1028,17 @@ fn is_at_revision(dest: &Path, revision: &str) -> bool {
     if revision.is_empty() {
         return true;
     }
-    let wanted = run_git(
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{}^{{commit}}", revision),
-        ],
-        Some(dest),
-        false,
-    );
-    let head = run_git(&["rev-parse", "HEAD"], Some(dest), false);
-    match (wanted, head) {
-        (Ok(wanted), Ok(head)) if wanted.status.success() && head.status.success() => {
-            stdout_str(&wanted) == stdout_str(&head)
-        }
+    let wanted = resolve_ref(dest, &format!("{}^{{commit}}", revision));
+    match (wanted, resolve_ref(dest, "HEAD")) {
+        (Some(wanted), Some(head)) => wanted == head,
         _ => true,
     }
 }
 
 pub fn get_current_ref(entry: &RepoEntry, root: &Path) -> Result<String> {
-    let dest = root.join(&entry.directory);
-    let result = run_git(&["symbolic-ref", "--short", "HEAD"], Some(&dest), false)?;
-    if result.status.success() {
-        return Ok(stdout_str(&result));
-    }
-    let result = run_git(&["rev-parse", "--short", "HEAD"], Some(&dest), true)?;
-    Ok(stdout_str(&result))
+    head_ref(&root.join(&entry.directory))
+        .map(|(name, _)| name)
+        .ok_or_else(|| anyhow::anyhow!("HEAD does not resolve in {}", entry.directory))
 }
 
 pub fn is_detached(entry: &RepoEntry, root: &Path) -> bool {
@@ -983,218 +1055,75 @@ pub fn is_clean(entry: &RepoEntry, root: &Path) -> bool {
         .unwrap_or(false)
 }
 
-pub fn get_ahead_behind(entry: &RepoEntry, root: &Path) -> (i32, i32) {
-    let dest = root.join(&entry.directory);
-    let result = run_git(
-        &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
-        Some(&dest),
-        false,
-    );
-    match result {
-        Ok(o) if o.status.success() => {
-            let s = stdout_str(&o);
-            let parts: Vec<&str> = s.split_whitespace().collect();
-            if parts.len() == 2 {
-                let ahead = parts[0].parse().unwrap_or(0);
-                let behind = parts[1].parse().unwrap_or(0);
-                return (ahead, behind);
-            }
-            (0, 0)
-        }
-        _ => (0, 0),
-    }
-}
-
 fn is_stale(dest: &Path) -> bool {
-    let local = run_git(&["rev-parse", "HEAD"], Some(dest), false);
-    let remote = run_git(&["rev-parse", "@{upstream}"], Some(dest), false);
-    match (local, remote) {
-        (Ok(l), Ok(r)) if l.status.success() && r.status.success() => {
-            stdout_str(&l) != stdout_str(&r)
-        }
+    match (resolve_ref(dest, "HEAD"), resolve_ref(dest, "@{upstream}")) {
+        (Some(local), Some(remote)) => local != remote,
         _ => false,
     }
 }
 
 pub fn get_repo_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
     let dest = root.join(&entry.directory);
-    let symlink = dest
-        .symlink_metadata()
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false);
     if !is_checkout(&dest) {
         return RepoStatus {
-            directory: entry.directory.clone(),
             exists: false,
-            current_ref: String::new(),
-            expected_ref: entry.revision.clone(),
-            is_clean: true,
-            is_detached: false,
-            ahead: 0,
-            behind: 0,
-            mode: entry.mode.to_string(),
-            is_stale: false,
-            is_symlink: symlink,
-            symlink_target: String::new(),
-            has_unlinked: false,
-            has_unlinked_modified: false,
-            cache: crate::cache::CacheUse::Unused,
-            at_expected: true,
+            is_symlink: dest.is_symlink(),
+            ..RepoStatus::new(entry)
         };
     }
-    if symlink {
-        let target = fs::read_link(&dest)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let resolved = dest.canonicalize().unwrap_or_default();
-        let ref_str = run_git(&["symbolic-ref", "--short", "HEAD"], Some(&resolved), false)
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| stdout_str(&o))
-            .or_else(|| {
-                run_git(&["rev-parse", "--short", "HEAD"], Some(&resolved), false)
-                    .ok()
-                    .map(|o| stdout_str(&o))
-            })
-            .unwrap_or_default();
+    if dest.is_symlink() {
+        return RepoStatus::symlink(entry, &dest, true);
+    }
+
+    let (current_ref, is_detached) = head_ref(&dest).unwrap_or_default();
+    let base = RepoStatus {
+        current_ref,
+        is_detached,
+        is_clean: is_clean(entry, root),
+        at_expected: is_at_revision(&dest, &entry.revision),
+        ..RepoStatus::new(entry)
+    };
+    // A shallow checkout has no history to count ahead or behind against;
+    // whether it sits on its upstream is all there is to say.
+    if is_shallow(&dest) {
         return RepoStatus {
-            directory: entry.directory.clone(),
-            exists: true,
-            current_ref: ref_str,
-            expected_ref: entry.revision.clone(),
-            is_clean: true,
-            is_detached: false,
-            ahead: 0,
-            behind: 0,
-            mode: entry.mode.to_string(),
-            is_stale: false,
-            is_symlink: true,
-            symlink_target: target,
-            has_unlinked: false,
-            has_unlinked_modified: false,
-            cache: crate::cache::CacheUse::Unused,
-            at_expected: true,
+            is_stale: is_stale(&dest),
+            ..base
         };
     }
-
-    let current = get_current_ref(entry, root).unwrap_or_default();
-    let detached = is_detached(entry, root);
-    let clean = is_clean(entry, root);
-    let shallow = is_shallow(&dest);
-    let at_expected = is_at_revision(&dest, &entry.revision);
-
-    if shallow {
-        let stale = is_stale(&dest);
-        return RepoStatus {
-            directory: entry.directory.clone(),
-            exists: true,
-            current_ref: current,
-            expected_ref: entry.revision.clone(),
-            is_clean: clean,
-            is_detached: detached,
-            ahead: 0,
-            behind: 0,
-            mode: entry.mode.to_string(),
-            is_stale: stale,
-            is_symlink: false,
-            symlink_target: String::new(),
-            has_unlinked: false,
-            has_unlinked_modified: false,
-            cache: crate::cache::CacheUse::Unused,
-            at_expected,
-        };
-    }
-
-    let (ahead, behind) = get_ahead_behind(entry, root);
+    let (ahead, behind) = ahead_behind(&dest);
     RepoStatus {
-        directory: entry.directory.clone(),
-        exists: true,
-        current_ref: current,
-        expected_ref: entry.revision.clone(),
-        is_clean: clean,
-        is_detached: detached,
         ahead,
         behind,
-        mode: entry.mode.to_string(),
-        is_stale: false,
-        is_symlink: false,
-        symlink_target: String::new(),
-        has_unlinked: false,
-        has_unlinked_modified: false,
-        cache: crate::cache::CacheUse::Unused,
-        at_expected,
+        ..base
     }
 }
 
 pub fn get_artefact_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
     let dest = root.join(&entry.directory);
-    let symlink = dest
-        .symlink_metadata()
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false);
-    if symlink {
-        let target = fs::read_link(&dest)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        return RepoStatus {
-            directory: entry.directory.clone(),
-            exists: true,
-            current_ref: String::new(),
-            expected_ref: entry.revision.clone(),
-            is_clean: true,
-            is_detached: false,
-            ahead: 0,
-            behind: 0,
-            mode: entry.mode.to_string(),
-            is_stale: false,
-            is_symlink: true,
-            symlink_target: target,
-            has_unlinked: false,
-            has_unlinked_modified: false,
-            cache: crate::cache::CacheUse::Unused,
-            at_expected: true,
-        };
+    if dest.is_symlink() {
+        return RepoStatus::symlink(entry, &dest, false);
     }
 
     let exists = dest.is_dir() && dest.join(".etag").is_file();
-    let mut behind = 0;
-    let etag_file = dest.join(".etag");
-    let etag_remote_file = dest.join(".etag-remote");
-    if etag_file.is_file() && etag_remote_file.is_file() {
-        let local = fs::read_to_string(&etag_file)
+    let read = |name: &str| {
+        fs::read_to_string(dest.join(name))
             .unwrap_or_default()
             .trim()
-            .to_string();
-        let remote = fs::read_to_string(&etag_remote_file)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        if !local.is_empty() && !remote.is_empty() && local != remote {
-            behind = 1;
-        }
-    }
+            .to_string()
+    };
+    let (local, remote) = (read(".etag"), read(".etag-remote"));
+    let behind = (!local.is_empty() && !remote.is_empty() && local != remote) as i32;
 
     RepoStatus {
-        directory: entry.directory.clone(),
         exists,
         current_ref: if exists {
             "artefact".to_string()
         } else {
             String::new()
         },
-        expected_ref: entry.revision.clone(),
-        is_clean: true,
-        is_detached: false,
-        ahead: 0,
         behind,
-        mode: entry.mode.to_string(),
-        is_stale: false,
-        is_symlink: false,
-        symlink_target: String::new(),
-        has_unlinked: false,
-        has_unlinked_modified: false,
-        cache: crate::cache::CacheUse::Unused,
-        at_expected: true,
+        ..RepoStatus::new(entry)
     }
 }
 

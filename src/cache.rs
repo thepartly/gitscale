@@ -189,17 +189,7 @@ impl Cache {
         ensure_entry(&path, url)?;
 
         let reference = format!("refs/heads/pin/{}", sha);
-        let have = git_in(
-            &path,
-            &[
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                &format!("{}^{{commit}}", reference),
-            ],
-            false,
-        )?;
-        if !have.status.success() {
+        if !crate::git::ref_exists(&path, &format!("{}^{{commit}}", reference)) {
             // One commit, no history: everything this pin shares with a pin
             // already in the entry is already here.
             let fetched = git_in(&path, &["fetch", "--depth", "1", "origin", &sha], false)?;
@@ -274,17 +264,8 @@ impl Cache {
         // unless the entry really holds what the repository is about to stop
         // owning: the repack deletes it.
         for (branch, sha) in &wanted {
-            let held = git_in(
-                &path,
-                &[
-                    "rev-parse",
-                    "--verify",
-                    "--quiet",
-                    &format!("refs/heads/{}", branch),
-                ],
-                false,
-            )?;
-            if String::from_utf8_lossy(&held.stdout).trim() != sha {
+            let held = crate::git::resolve_ref(&path, &format!("refs/heads/{}", branch));
+            if held.as_deref() != Some(sha.as_str()) {
                 bail!(
                     "the cache entry did not take origin/{} from {}; left it as it was",
                     branch,
@@ -724,25 +705,8 @@ fn served_by_snapshot(repo: &Path, url: &str, cache_root: Option<&Path>) -> bool
     if !is_entry(&entry) {
         return false;
     }
-    let Ok(head) = crate::git::run_git(&["rev-parse", "HEAD"], Some(repo), false) else {
-        return false;
-    };
-    if !head.status.success() {
-        return false;
-    }
-    let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
-    git_in(
-        &entry,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/pin/{}", head),
-        ],
-        false,
-    )
-    .map(|o| o.status.success())
-    .unwrap_or(false)
+    crate::git::resolve_ref(repo, "HEAD")
+        .is_some_and(|head| crate::git::ref_exists(&entry, &format!("refs/heads/pin/{}", head)))
 }
 
 /// The object stores `repo` borrows from, whatever they are.
