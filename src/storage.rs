@@ -22,8 +22,9 @@ pub struct HeadResult {
 pub fn object_url(storage_url: &str, repo_url: &str, revision: &str) -> Result<String> {
     let hostname = extract_hostname(repo_url)?;
     let (owner, repo) = extract_owner_repo(repo_url)?;
+    // An entry with no revision reads the archive published as `HEAD`.
     let safe_rev = if revision.is_empty() {
-        "_default".to_string()
+        "HEAD".to_string()
     } else {
         revision.replace('/', "_")
     };
@@ -51,16 +52,6 @@ pub fn get_object(url: &str) -> Result<Option<(Vec<u8>, String)>> {
         gcs_get(url)
     } else {
         s3_get(url)
-    }
-}
-
-pub fn put_object(url: &str, body: &[u8]) -> Result<String> {
-    if is_local(url) {
-        local_put(url, body)
-    } else if is_gcs(url) {
-        gcs_put(url, body)
-    } else {
-        s3_put(url, body)
     }
 }
 
@@ -253,15 +244,6 @@ fn local_get(url: &str) -> Result<Option<(Vec<u8>, String)>> {
     Ok(Some((content, etag)))
 }
 
-fn local_put(url: &str, body: &[u8]) -> Result<String> {
-    let path = local_fs_path(url);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&path, body)?;
-    Ok(local_content_etag(body))
-}
-
 // ---------------------------------------------------------------------------
 // GCS (Bearer token)
 // ---------------------------------------------------------------------------
@@ -324,26 +306,6 @@ fn gcs_get(url: &str) -> Result<Option<(Vec<u8>, String)>> {
         .to_string();
     let body = resp.bytes()?.to_vec();
     Ok(Some((body, etag)))
-}
-
-fn gcs_put(url: &str, body: &[u8]) -> Result<String> {
-    let token = gcs_token()?;
-    let client = reqwest::blocking::Client::new();
-    let resp = client
-        .put(url)
-        .header("Authorization", format!("Bearer {}", token))
-        .header("Content-Type", "application/json")
-        .body(body.to_vec())
-        .timeout(std::time::Duration::from_secs(30))
-        .send()?;
-    check_storage_response(&resp, "PUT")?;
-    let etag = resp
-        .headers()
-        .get("etag")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-    Ok(etag)
 }
 
 // ---------------------------------------------------------------------------
@@ -497,31 +459,6 @@ fn s3_get(url: &str) -> Result<Option<(Vec<u8>, String)>> {
         .to_string();
     let body = resp.bytes()?.to_vec();
     Ok(Some((body, etag)))
-}
-
-fn s3_put(url: &str, body: &[u8]) -> Result<String> {
-    let (access_key, secret_key) = s3_credentials()?;
-    let region = s3_region(url);
-    let headers = s3_sign("PUT", url, body, &access_key, &secret_key, &region);
-
-    let client = reqwest::blocking::Client::new();
-    let mut req = client
-        .put(url)
-        .body(body.to_vec())
-        .header("Content-Type", "application/json")
-        .timeout(std::time::Duration::from_secs(30));
-    for (k, v) in &headers {
-        req = req.header(k.as_str(), v.as_str());
-    }
-    let resp = req.send()?;
-    check_storage_response(&resp, "PUT")?;
-    let etag = resp
-        .headers()
-        .get("etag")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-    Ok(etag)
 }
 
 // ---------------------------------------------------------------------------

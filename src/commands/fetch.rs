@@ -52,12 +52,7 @@ pub fn run(
                     return RepoStatus::Fail(format!("{}: no [storage] configured", name));
                 }
                 let dest = config_root.join(&entry.directory);
-                let revision = if entry.revision.is_empty() {
-                    "HEAD"
-                } else {
-                    &entry.revision
-                };
-                return match fetch_artefact(storage_url, &entry.repo_url, revision, &dest) {
+                return match fetch_artefact(storage_url, &entry.repo_url, &entry.revision, &dest) {
                     Ok(result) => {
                         if result.exists {
                             RepoStatus::Ok(format!("{} (artefact)", name))
@@ -72,6 +67,11 @@ pub fn run(
             let dest = config_root.join(&entry.directory);
             if !crate::git::is_checkout(&dest) {
                 return RepoStatus::Skip(format!("{} (not cloned)", name));
+            }
+            // A symlinked entry is another entry's checkout, handled under
+            // that entry's own name and revision.
+            if dest.is_symlink() {
+                return RepoStatus::Skip(format!("{} (symlink)", name));
             }
 
             // Updates the cache entry as well: a fetch that only advanced

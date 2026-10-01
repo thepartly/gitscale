@@ -47,6 +47,11 @@ pub fn run(
             if !crate::git::is_checkout(&dest) {
                 return RepoStatus::Skip(format!("{} (not cloned)", name));
             }
+            // A symlinked entry is another entry's checkout, handled under
+            // that entry's own name and revision.
+            if dest.is_symlink() {
+                return RepoStatus::Skip(format!("{} (symlink)", name));
+            }
             // A tag or SHA pin checks out detached: there is no branch to
             // push, and `git push` would fail the whole sync over it.
             if is_detached(entry, &config_root) {

@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
@@ -6,7 +6,7 @@ use std::path::Path;
 use crate::cache::{self, Cache};
 use crate::commands::cache as cache_cmd;
 use crate::config::{find_config, load_config, CacheSettings, RepoEntry, CONFIG_FILENAME};
-use crate::git::{clone_repo, is_ci};
+use crate::git::{clone_repo, is_ci, pull_repo};
 use crate::progress::{run_parallel, RepoStatus};
 use crate::share;
 use crate::storage::clone_artefact;
@@ -81,12 +81,7 @@ pub fn run(
                 if storage_url.is_empty() {
                     return RepoStatus::Fail(format!("{}: no [storage] configured", name));
                 }
-                let revision = if entry.revision.is_empty() {
-                    "HEAD"
-                } else {
-                    &entry.revision
-                };
-                return match clone_artefact(storage_url, &entry.repo_url, revision, &dest) {
+                return match clone_artefact(storage_url, &entry.repo_url, &entry.revision, &dest) {
                     Ok(true) => RepoStatus::Ok(format!("{} (artefact)", name)),
                     Ok(false) => RepoStatus::Skip(format!("{} (no artefact data)", name)),
                     Err(e) => RepoStatus::Fail(format!("{}: {}", name, e)),
@@ -120,8 +115,58 @@ pub fn run(
         anyhow::bail!("{} repo(s) failed to clone", failed);
     }
 
-    crate::resolve::resolve_and_link(&config.repos, &config_root, true)?;
+    let adopted = crate::resolve::resolve_and_link(&config.repos, &config_root)?;
+    move_to_adopted(
+        &config.repos,
+        &config_root,
+        adopted,
+        cache.as_ref(),
+        source.as_deref(),
+        dissociate,
+        ci,
+        verbose,
+    )?;
 
+    Ok(())
+}
+
+/// Move each root entry with no revision of its own to the one a child pins,
+/// the way `pull` moves any checkout: readonly files stay readonly, a shallow
+/// clone fetches the ref it was never cloned at, and CI's cache pins that
+/// revision rather than the default branch.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn move_to_adopted(
+    repos: &[RepoEntry],
+    config_root: &Path,
+    adopted: impl IntoIterator<Item = (String, String)>,
+    cache: Option<&Cache>,
+    source: Option<&Path>,
+    dissociate: bool,
+    ci: bool,
+    verbose: bool,
+) -> Result<()> {
+    for (directory, revision) in adopted {
+        let Some(original) = repos.iter().find(|e| e.directory == directory) else {
+            continue;
+        };
+        let dest = config_root.join(&directory);
+        // An artefact has no git checkout to move, and a symlink is someone
+        // else's checkout.
+        if original.is_artefact() || dest.is_symlink() || !crate::git::is_checkout(&dest) {
+            continue;
+        }
+        let entry = RepoEntry {
+            revision,
+            ..original.clone()
+        };
+        let from = cache::source_for(cache, source, &entry, dissociate, ci, verbose);
+        pull_repo(&entry, config_root, verbose, &from).with_context(|| {
+            format!(
+                "{}: moving to adopted revision '{}'",
+                directory, entry.revision
+            )
+        })?;
+    }
     Ok(())
 }
 

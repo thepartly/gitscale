@@ -105,8 +105,10 @@ reported by [`status`](status.md) as `unlinked` and fixed by
 
 A few consequences worth knowing:
 
-- Symlinked entries are skipped by `push`, `commit` and [`clean`](clean.md) —
-  the real checkout is the one that gets committed and cleaned.
+- Symlinked entries are skipped by `fetch`, `push`, `commit` and
+  [`clean`](clean.md) — the real checkout is the one that gets fetched,
+  committed and cleaned. Run inside a child repository, `pull` skips them too:
+  the outer workspace's root decides which revision that checkout is at.
 - `status` shows them as `⤷ symlink`, with the link target in the `PATH` column
   and the ref of the checkout it points at in `REF`.
 - Extracted [artefact](dependencies.md#artefact) directories are scanned for a
@@ -189,7 +191,7 @@ never touched.
 | Command | Reads child configs | Creates symlinks | Checks out adopted revisions | Relinks / removes orphans |
 |---|---|---|---|---|
 | `clone` | yes | yes | yes | no |
-| `pull` | yes | yes | no | no |
+| `pull` | yes | yes | yes | no |
 | `sync` | yes | yes | yes (via its clone step) | yes |
 | `status` | yes | no | no | no |
 | `clean` | yes | no | no | no |

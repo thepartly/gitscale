@@ -319,7 +319,7 @@ export GOOGLE_TOKEN=$(gcloud auth print-access-token)
 ```
 
 Slashes in a revision become `_`, so `release/1.2` is stored as `release_1.2`.
-An empty revision is looked up as `HEAD` by the commands.
+An empty revision is stored, and looked up, as `HEAD`.
 
 With `url = "https://bucket.s3.amazonaws.com/meta"` and an entry at
 `https://github.com/org/app.git` on revision `main`:

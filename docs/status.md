@@ -111,8 +111,8 @@ come from the remote-tracking refs as they stand, which may be old.
 `--fetch` updates them first — through the [object cache](caching.md) like every
 other network operation, so it costs one fetch per repository per *machine*, not
 per workspace. Artefact entries get a HEAD request that refreshes
-`.etag-remote`. Failures during the fetch are ignored: status still reports, on
-whatever it has.
+`.etag-remote`. A fetch that fails is reported on stderr as
+`fetch <directory>: <reason>`, and status still reports, on whatever it has.
 
 Add `-v` to see which repository is being fetched.
 

@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::ci;
@@ -426,7 +426,7 @@ pub fn fetch_repo(entry: &RepoEntry, root: &Path, source: &Source) -> Result<()>
     }
     ensure_ci_remote(entry, &dest)?;
     if is_shallow(&dest) {
-        run_git(&["fetch", "--depth", "1", "--quiet"], Some(&dest), true)?;
+        fetch_shallow(entry, &dest)?;
     } else {
         run_git(&["fetch", "--all", "--quiet"], Some(&dest), true)?;
     }
@@ -485,8 +485,8 @@ pub(crate) fn set_write_bits(
     writable: bool,
     skip: &dyn Fn(&Path) -> bool,
 ) -> Result<()> {
-    for entry in walkdir(dest) {
-        let path = entry.path();
+    for path in walkdir(dest) {
+        let path = path.as_path();
         if path.is_symlink() || skip(path) || !path.is_file() {
             continue;
         }
@@ -507,23 +507,13 @@ fn is_inside_dotgit(root: &Path, path: &Path) -> bool {
     relative.components().any(|c| c.as_os_str() == ".git")
 }
 
-struct WalkEntry {
-    path: std::path::PathBuf,
-}
-
-impl WalkEntry {
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-fn walkdir(root: &Path) -> Vec<WalkEntry> {
+fn walkdir(root: &Path) -> Vec<PathBuf> {
     let mut result = Vec::new();
-    walkdir_recursive(root, root, &mut result);
+    walkdir_recursive(root, &mut result);
     result
 }
 
-fn walkdir_recursive(root: &Path, dir: &Path, result: &mut Vec<WalkEntry>) {
+fn walkdir_recursive(dir: &Path, result: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -533,9 +523,9 @@ fn walkdir_recursive(root: &Path, dir: &Path, result: &mut Vec<WalkEntry>) {
         if path.is_dir() && path.file_name().map(|n| n == ".git").unwrap_or(false) {
             continue;
         }
-        result.push(WalkEntry { path: path.clone() });
+        result.push(path.clone());
         if path.is_dir() && !path.is_symlink() {
-            walkdir_recursive(root, &path, result);
+            walkdir_recursive(&path, result);
         }
     }
 }
@@ -593,24 +583,12 @@ pub fn pull_repo(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source)
         }
         if is_shallow(&dest) {
             if looks_like_sha(&entry.revision) {
-                // Detached at a commit: there is no @{upstream} to reset to,
-                // and an arbitrary commit is not something a mirror serves by
+                // An arbitrary commit is not something a mirror serves by
                 // default, so this one asks the remote even with a cache.
                 if source.local.is_some() {
                     ensure_ci_remote(entry, &dest)?;
                 }
-                run_git(
-                    &[
-                        "fetch",
-                        "--depth",
-                        "1",
-                        "--quiet",
-                        "origin",
-                        &entry.revision,
-                    ],
-                    Some(&dest),
-                    true,
-                )?;
+                fetch_shallow(entry, &dest)?;
                 // Detach rather than reset: a checkout moved here from a
                 // branch pin would otherwise drag that branch to this commit.
                 run_git(
@@ -618,14 +596,12 @@ pub fn pull_repo(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source)
                     Some(&dest),
                     true,
                 )?;
-            } else if source.local.is_some() {
-                fetch_from_cache(&dest, source)?;
-                land_shallow(entry, &dest)?;
-            } else if entry.revision.is_empty() {
-                run_git(&["fetch", "--depth", "1", "--quiet"], Some(&dest), true)?;
-                run_git(&["reset", "--hard", "@{upstream}"], Some(&dest), false)?;
             } else {
-                fetch_shallow_revision(entry, &dest)?;
+                if source.local.is_some() {
+                    fetch_from_cache(&dest, source)?;
+                } else {
+                    fetch_shallow(entry, &dest)?;
+                }
                 land_shallow(entry, &dest)?;
             }
             return Ok(());
@@ -647,6 +623,31 @@ pub fn pull_repo(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source)
         apply_readonly(&dest)?;
     }
     result
+}
+
+/// Bring what `entry.revision` names into a shallow checkout from the remote,
+/// at depth 1 and nothing more: a commit lands in `FETCH_HEAD`, a branch or tag
+/// in its own ref, and no revision means the one branch the clone tracks.
+fn fetch_shallow(entry: &RepoEntry, dest: &Path) -> Result<()> {
+    if entry.revision.is_empty() {
+        run_git(&["fetch", "--depth", "1", "--quiet"], Some(dest), true)?;
+    } else if looks_like_sha(&entry.revision) {
+        run_git(
+            &[
+                "fetch",
+                "--depth",
+                "1",
+                "--quiet",
+                "origin",
+                &entry.revision,
+            ],
+            Some(dest),
+            true,
+        )?;
+    } else {
+        fetch_shallow_revision(entry, dest)?;
+    }
+    Ok(())
 }
 
 /// Fetch the ref `entry.revision` names into a shallow checkout, at depth 1 —
@@ -845,7 +846,7 @@ pub fn is_repo_root(dir: &Path) -> bool {
         .ok()
         .filter(|o| o.status.success())
         .map(|o| {
-            let top = std::path::PathBuf::from(stdout_str(&o));
+            let top = PathBuf::from(stdout_str(&o));
             match (fs::canonicalize(&top), fs::canonicalize(dir)) {
                 (Ok(a), Ok(b)) => a == b,
                 _ => false,
@@ -1103,64 +1104,6 @@ pub fn get_repo_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
         cache: crate::cache::CacheUse::Unused,
         at_expected,
     }
-}
-
-pub fn get_self_status(root: &Path) -> Option<RepoStatus> {
-    let result = run_git(&["rev-parse", "--is-inside-work-tree"], Some(root), false).ok()?;
-    if !result.status.success() {
-        return None;
-    }
-
-    let ref_result = run_git(&["symbolic-ref", "--short", "HEAD"], Some(root), false).ok()?;
-    let (current_ref, detached) = if ref_result.status.success() {
-        (stdout_str(&ref_result), false)
-    } else {
-        let rev = run_git(&["rev-parse", "--short", "HEAD"], Some(root), false).ok()?;
-        (stdout_str(&rev), true)
-    };
-
-    let clean = run_git(&["status", "--porcelain"], Some(root), false)
-        .map(|o| stdout_str(&o).is_empty())
-        .unwrap_or(false);
-
-    let (ahead, behind) = {
-        let ab = run_git(
-            &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
-            Some(root),
-            false,
-        );
-        match ab {
-            Ok(o) if o.status.success() => {
-                let s = stdout_str(&o);
-                let parts: Vec<&str> = s.split_whitespace().collect();
-                if parts.len() == 2 {
-                    (parts[0].parse().unwrap_or(0), parts[1].parse().unwrap_or(0))
-                } else {
-                    (0, 0)
-                }
-            }
-            _ => (0, 0),
-        }
-    };
-
-    Some(RepoStatus {
-        directory: ".".to_string(),
-        exists: true,
-        current_ref,
-        expected_ref: String::new(),
-        is_clean: clean,
-        is_detached: detached,
-        ahead,
-        behind,
-        mode: String::new(),
-        is_stale: false,
-        is_symlink: false,
-        symlink_target: String::new(),
-        has_unlinked: false,
-        has_unlinked_modified: false,
-        cache: crate::cache::CacheUse::Unused,
-        at_expected: true,
-    })
 }
 
 pub fn get_artefact_status(entry: &RepoEntry, root: &Path) -> RepoStatus {

@@ -18,7 +18,7 @@ pub fn run(
     verbose: bool,
     no_cache: bool,
     out: &mut dyn Write,
-    _err: &mut dyn Write,
+    err: &mut dyn Write,
 ) -> Result<()> {
     let config_path = find_config(root)?;
     let config_root = config_path.parent().unwrap().to_path_buf();
@@ -36,21 +36,17 @@ pub fn run(
         let workspace = share::source_workspace(&config_root);
         for entry in &config.repos {
             let dest = config_root.join(&entry.directory);
-            if entry.is_artefact() {
-                if !config.storage_url.is_empty() {
-                    let revision = if entry.revision.is_empty() {
-                        "HEAD"
-                    } else {
-                        &entry.revision
-                    };
+            let fetched = if entry.is_artefact() {
+                if config.storage_url.is_empty() {
+                    Err(anyhow::anyhow!("no [storage] configured"))
+                } else {
                     if verbose {
                         writeln!(out, "Fetching {}...", entry.directory)?;
                     }
-                    let _ = fetch_artefact(&config.storage_url, &entry.repo_url, revision, &dest);
+                    fetch_artefact(&config.storage_url, &entry.repo_url, &entry.revision, &dest)
+                        .map(|_| ())
                 }
-                continue;
-            }
-            if crate::git::is_checkout(&dest) {
+            } else if crate::git::is_checkout(&dest) && !dest.is_symlink() {
                 if verbose {
                     writeln!(out, "Fetching {}...", entry.directory)?;
                 }
@@ -62,7 +58,18 @@ pub fn run(
                     ci,
                     verbose,
                 );
-                let _ = fetch_repo(entry, &config_root, &from);
+                fetch_repo(entry, &config_root, &from)
+            } else {
+                Ok(())
+            };
+            // Status still reports, but must not pass off what the last
+            // successful fetch saw as what `--fetch` just found.
+            if let Err(e) = fetched {
+                writeln!(
+                    err,
+                    "  fetch {}: {} (showing the last fetched state)",
+                    entry.directory, e
+                )?;
             }
         }
     }

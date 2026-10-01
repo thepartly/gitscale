@@ -9,8 +9,7 @@ use crate::git::{clean_repo, is_repo_root};
 use crate::progress::{run_parallel, RepoStatus};
 use crate::resolve::resolve_recursive;
 
-/// The name `status` gives the workspace repo itself, reused here so the same
-/// string addresses it on the command line.
+/// How the workspace repo itself is named on the command line.
 const SELF_NAME: &str = ".";
 
 /// Always kept, in every repo cleaned. A `.gitscale.toml` is usually tracked

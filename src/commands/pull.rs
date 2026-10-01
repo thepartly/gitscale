@@ -5,11 +5,12 @@ use std::path::Path;
 
 use crate::cache;
 use crate::commands::cache as cache_cmd;
-use crate::commands::clone::filter_entries;
-use crate::config::{find_config, load_config};
+use crate::commands::clone::{filter_entries, move_to_adopted};
+use crate::config::{find_config, load_config, RepoEntry};
 use crate::git::{is_ci, pull_repo};
 use crate::hooks;
 use crate::progress::{run_parallel, RepoStatus};
+use crate::resolve::{is_outer_link, resolve_recursive};
 use crate::share;
 use crate::storage::pull_artefact;
 
@@ -65,8 +66,28 @@ fn pull_inner(
         return Ok((config, config_root));
     }
 
-    let entry_map: HashMap<&str, &crate::config::RepoEntry> =
-        selected.iter().map(|e| (e.directory.as_str(), e)).collect();
+    // Pull to where a fresh clone would land, which for an entry with no
+    // revision of its own is the one a child pins. Read from the child
+    // configs as they are now; one this pull changes is caught after it.
+    // Unresolvable here (a stale child, say) means pulling as declared: the
+    // resolution after the pull reports whatever is still wrong.
+    let adopted_before: HashMap<String, String> = resolve_recursive(&config.repos, &config_root)
+        .map(|(_, adopted)| adopted.into_iter().collect())
+        .unwrap_or_default();
+    let effective: Vec<RepoEntry> = selected
+        .iter()
+        .map(|e| match adopted_before.get(&e.directory) {
+            Some(revision) if e.revision.is_empty() => RepoEntry {
+                revision: revision.clone(),
+                ..(*e).clone()
+            },
+            _ => (*e).clone(),
+        })
+        .collect();
+    let entry_map: HashMap<&str, &RepoEntry> = effective
+        .iter()
+        .map(|e| (e.directory.as_str(), e))
+        .collect();
     let dir_names: Vec<String> = selected.iter().map(|e| e.directory.clone()).collect();
     let storage_url = &config.storage_url;
     let ci = is_ci();
@@ -83,18 +104,26 @@ fn pull_inner(
         interactive,
         |name| {
             let entry = &entry_map[name];
+            let dest = config_root.join(&entry.directory);
+
+            if dest.is_symlink() {
+                // An enclosing workspace's dedup link: its root decides that
+                // checkout's revision, and pulling through the link would move
+                // it to this config's instead.
+                if is_outer_link(&dest, &config_root) {
+                    return RepoStatus::Skip(format!("{} (symlink)", name));
+                }
+                // Anything else is replaced by a real clone, as `clone` does.
+                if let Err(e) = std::fs::remove_file(&dest) {
+                    return RepoStatus::Fail(format!("{}: failed to remove symlink: {}", name, e));
+                }
+            }
 
             if entry.is_artefact() {
                 if storage_url.is_empty() {
                     return RepoStatus::Fail(format!("{}: no [storage] configured", name));
                 }
-                let dest = config_root.join(&entry.directory);
-                let revision = if entry.revision.is_empty() {
-                    "HEAD"
-                } else {
-                    &entry.revision
-                };
-                return match pull_artefact(storage_url, &entry.repo_url, revision, &dest) {
+                return match pull_artefact(storage_url, &entry.repo_url, &entry.revision, &dest) {
                     Ok(true) => RepoStatus::Ok(format!("{} (artefact)", name)),
                     Ok(false) => RepoStatus::Skip(format!("{} (no remote artefact)", name)),
                     Err(e) => RepoStatus::Fail(format!("{}: {}", name, e)),
@@ -125,8 +154,23 @@ fn pull_inner(
         anyhow::bail!("{} repo(s) failed to pull", failed);
     }
 
-    // Re-resolve symlinks after pull (child configs may have changed)
-    crate::resolve::resolve_and_link(&config.repos, &config_root, false)?;
+    // Re-resolve symlinks after pull (child configs may have changed), and
+    // move any selected entry whose adopted revision the pull itself changed.
+    let adopted = crate::resolve::resolve_and_link(&config.repos, &config_root)?;
+    let changed = adopted.into_iter().filter(|(directory, revision)| {
+        entry_map.contains_key(directory.as_str())
+            && adopted_before.get(directory) != Some(revision)
+    });
+    move_to_adopted(
+        &config.repos,
+        &config_root,
+        changed,
+        cache.as_ref(),
+        source.as_deref(),
+        dissociate,
+        ci,
+        verbose,
+    )?;
 
     // A pull updates tracked files in place, which is what keeps unchanged
     // files' mtimes — and so a build cache — valid across jobs. The price is

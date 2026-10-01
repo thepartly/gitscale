@@ -340,6 +340,131 @@ fn fetch_git_cloned() {
 // Pull
 // ---------------------------------------------------------------------------
 
+/// Inside a child repository, a dep is the outer workspace's dedup symlink.
+/// The outer root decides that checkout's revision: a pull from the child
+/// leaves the link and the checkout alone, rather than moving it to the
+/// revision the child's own config names.
+#[test]
+fn pull_inside_a_child_leaves_the_outer_workspace_link_alone() {
+    let env = TestEnv::new("pull_child_outer_link");
+    let bare_b = env.create_bare_repo("repoB", "main", &[("b.txt", "B main")]);
+    bare_git_stdout(&bare_b, &["branch", "develop", "main"]);
+    commit_to_bare(&bare_b, "develop", "b.txt", "B develop");
+    let bare_a = env.create_bare_repo(
+        "repoA",
+        "main",
+        &[
+            ("a.txt", "A"),
+            (
+                ".gitscale.toml",
+                &format!(
+                    "[repos]\n\"libs/b\" = {{ url = \"{}\", revision = \"develop\" }}\n",
+                    bare_b.display()
+                ),
+            ),
+        ],
+    );
+    // The root pins B itself, so it wins over the child's "develop".
+    env.write_config(&format!(
+        r#"[repos]
+"repoA" = {{ url = "{}", revision = "main" }}
+"repoB" = {{ url = "{}", revision = "main" }}
+"#,
+        bare_a.display(),
+        bare_b.display(),
+    ));
+    assert!(env.run(&["clone"]).success);
+    let link = env.playground.join("repoA/libs/b");
+    assert!(link.is_symlink(), "clone should dedup repoA/libs/b");
+    let main_tip = bare_git_stdout(&bare_b, &["rev-parse", "main"]);
+
+    let child = env.playground.join("repoA");
+    let out = gitscale::run_cli_with(&["gitscale", "pull", "-C", child.to_str().unwrap()], false);
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    assert!(out.stdout.contains("libs/b (symlink)"), "{}", out.stdout);
+    assert!(link.is_symlink(), "the dedup link must survive");
+    assert_eq!(
+        git_stdout(&env.playground.join("repoB"), &["rev-parse", "HEAD"]),
+        main_tip,
+        "the root's pin must win over the child's"
+    );
+}
+
+/// Any other symlink at an entry path is replaced by a real clone, as `clone`
+/// does: pull lands where a fresh clone would, and the checkout the link
+/// pointed at is left untouched.
+#[test]
+fn pull_replaces_an_in_workspace_symlink_with_a_clone() {
+    let env = TestEnv::new("pull_inner_symlink");
+    let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "v1")]);
+    let other = env.create_bare_repo("other", "main", &[("o.txt", "o")]);
+    env.write_config(&format!(
+        r#"[repos]
+"libs/mylib" = {{ url = "{}", revision = "main" }}
+"libs/alias" = {{ url = "{}", revision = "main" }}
+"#,
+        bare.display(),
+        other.display(),
+    ));
+    let out = env.run(&["clone", "libs/mylib"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    std::os::unix::fs::symlink("mylib", env.playground.join("libs/alias")).unwrap();
+    let before = git_stdout(&env.playground.join("libs/mylib"), &["rev-parse", "HEAD"]);
+
+    let out = env.run(&["pull"]);
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    let alias = env.playground.join("libs/alias");
+    assert!(!alias.is_symlink(), "the symlink should be replaced");
+    assert!(
+        alias.join("o.txt").is_file(),
+        "with a clone of its own repo"
+    );
+    assert_eq!(
+        git_stdout(&env.playground.join("libs/mylib"), &["rev-parse", "HEAD"]),
+        before
+    );
+}
+
+/// A revision a child pins for a root entry that has none is applied by pull
+/// too, as a fresh clone would — including one the pull itself brings in.
+#[test]
+fn pull_moves_to_a_revision_a_child_adopts_later() {
+    let env = TestEnv::new("pull_adopts_later");
+    let bare_b = env.create_bare_repo("repoB", "main", &[("b.txt", "B main")]);
+    bare_git_stdout(&bare_b, &["branch", "develop", "main"]);
+    let develop_tip = commit_to_bare(&bare_b, "develop", "b.txt", "B develop");
+    let bare_a = env.create_bare_repo("repoA", "main", &[("a.txt", "A")]);
+    env.write_config(&format!(
+        r#"[repos]
+"repoA" = {{ url = "{}", revision = "main" }}
+"repoB" = {{ url = "{}" }}
+"#,
+        bare_a.display(),
+        bare_b.display(),
+    ));
+    assert!(env.run(&["clone"]).success);
+    let dest_b = env.playground.join("repoB");
+    assert_eq!(
+        std::fs::read_to_string(dest_b.join("b.txt")).unwrap(),
+        "B main"
+    );
+
+    // repoA starts pinning B at develop; only pulling repoA reveals that.
+    commit_to_bare(
+        &bare_a,
+        "main",
+        ".gitscale.toml",
+        &format!(
+            "[repos]\n\"libs/b\" = {{ url = \"{}\", revision = \"develop\" }}\n",
+            bare_b.display()
+        ),
+    );
+    let out = env.run(&["pull"]);
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    assert_eq!(git_stdout(&dest_b, &["rev-parse", "HEAD"]), develop_tip);
+    assert!(env.playground.join("repoA/libs/b").is_symlink());
+}
+
 #[test]
 fn pull_artefact_local() {
     let env = TestEnv::new("pull_artefact_local");
@@ -768,6 +893,26 @@ fn status_flags_a_pin_the_checkout_has_not_followed() {
         plain.contains("ref-mismatch"),
         "the checkout is not where the revision points: {}",
         plain
+    );
+}
+
+/// `--fetch` asked for fresh state; one it could not get is said so, not
+/// silently replaced by whatever the last fetch saw.
+#[test]
+fn status_fetch_reports_a_fetch_it_could_not_do() {
+    let env = TestEnv::new("status_fetch_failure");
+    env.write_config(
+        r#"[repos]
+"meta/app" = { url = "https://github.com/org/app.git", revision = "main", mode = "artefact" }
+"#,
+    );
+    let out = env.run(&["status", "--fetch"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr
+            .contains("fetch meta/app: no [storage] configured"),
+        "stderr: {}",
+        out.stderr
     );
 }
 
@@ -1391,6 +1536,105 @@ fn recursive_root_revision_wins() {
     // Symlink should still be created
     let link = env.playground.join("repoA/libs/b");
     assert!(link.is_symlink());
+}
+
+/// An adopted revision moves the checkout the way `pull` does: a shallow
+/// readonly clone fetches the tag it was never cloned at, and the files that
+/// move stay readonly.
+#[test]
+fn adopted_tag_lands_in_a_shallow_readonly_clone() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = TestEnv::new("adopt_shallow_readonly");
+    let bare_b = env.create_bare_repo("repoB", "main", &[("b.txt", "B v1")]);
+    let tagged = bare_git_stdout(&bare_b, &["rev-parse", "main"]);
+    helpers::run_git_pub(&bare_b, &["tag", "v1", &tagged]);
+    // The tip moves on, so the shallow clone of the default branch lacks v1.
+    commit_to_bare(&bare_b, "main", "b.txt", "B v2");
+    // file://, not a bare path: git ignores --depth on a local-path clone.
+    let url_b = format!("file://{}", bare_b.display());
+    let bare_a = env.create_bare_repo(
+        "repoA",
+        "main",
+        &[
+            ("a.txt", "A"),
+            (
+                ".gitscale.toml",
+                &format!(
+                    "[repos]\n\"libs/b\" = {{ url = \"{}\", revision = \"v1\" }}\n",
+                    url_b
+                ),
+            ),
+        ],
+    );
+    env.write_config(&format!(
+        r#"[repos]
+"repoA" = {{ url = "{}", revision = "main" }}
+"repoB" = {{ url = "{}", mode = "readonly" }}
+"#,
+        bare_a.display(),
+        url_b,
+    ));
+
+    let out = env.run(&["clone", "--no-cache"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+
+    let dest = env.playground.join("repoB");
+    assert_eq!(
+        git_stdout(&dest, &["rev-parse", "--is-shallow-repository"]),
+        "true",
+        "a readonly --no-cache clone should be shallow"
+    );
+    assert_eq!(git_stdout(&dest, &["rev-parse", "HEAD"]), tagged);
+    let file = dest.join("b.txt");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "B v1");
+    let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+    assert_eq!(mode & 0o222, 0, "b.txt should still be readonly");
+}
+
+/// An artefact has no git checkout to move: a revision a child pins for it
+/// must not send `git checkout` up into the workspace repo.
+#[test]
+fn an_adopted_revision_leaves_an_artefact_alone() {
+    let env = TestEnv::new("adopt_artefact");
+    env.init_playground_git();
+    let root_head = git_stdout(&env.playground, &["rev-parse", "HEAD"]);
+    let art_url = "https://github.com/org/art.git";
+    // No revision: published, and looked up, as HEAD.
+    env.create_artefact(art_url, "", &[("art.bin", "binary")]);
+    let bare_a = env.create_bare_repo(
+        "repoA",
+        "main",
+        &[
+            ("a.txt", "A"),
+            (
+                ".gitscale.toml",
+                &format!(
+                    "[repos]\n\"libs/art\" = {{ url = \"{}\", revision = \"v9\" }}\n",
+                    art_url
+                ),
+            ),
+        ],
+    );
+    env.write_config(&format!(
+        r#"[storage]
+url = "{}"
+
+[repos]
+"repoA" = {{ url = "{}", revision = "main" }}
+"meta/art" = {{ url = "{}", mode = "artefact" }}
+"#,
+        env.storage_url(),
+        bare_a.display(),
+        art_url,
+    ));
+
+    let out = env.run(&["clone"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(env.playground.join("meta/art/art.bin").is_file());
+    assert_eq!(
+        git_stdout(&env.playground, &["rev-parse", "HEAD"]),
+        root_head
+    );
 }
 
 #[test]
@@ -2153,6 +2397,45 @@ fn pull_without_a_revision_fast_forwards() {
             name
         );
     }
+}
+
+/// A plain shallow `fetch` follows the one ref the clone was made at, so it
+/// never brings a tag the config has since moved to; status would then read
+/// a checkout it cannot compare as fine.
+#[test]
+fn shallow_fetch_brings_a_newly_pinned_tag_only() {
+    let env = TestEnv::new("shallow_fetch_tag");
+    let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "v1")]);
+    let url = format!("file://{}", bare.display());
+    let first = bare_git_stdout(&bare, &["rev-parse", "main"]);
+    helpers::run_git_pub(&bare, &["tag", "snapshot-1", &first]);
+    gitscale::git::clone_repo(
+        &shallow_entry(&url, "snapshot-1"),
+        &env.playground,
+        false,
+        &shallow_source(),
+    )
+    .unwrap();
+
+    let second = commit_to_bare(&bare, "main", "a.txt", "v2");
+    let unrelated = tag_with_unrelated_branch(&bare, "snapshot-2", &second);
+
+    gitscale::git::fetch_repo(
+        &shallow_entry(&url, "snapshot-2"),
+        &env.playground,
+        &shallow_source(),
+    )
+    .expect("shallow fetch of a new tag should succeed");
+
+    let dest = env.playground.join("libs/mylib");
+    assert_eq!(
+        git_stdout(&dest, &["rev-parse", "snapshot-2^{commit}"]),
+        second
+    );
+    assert!(
+        !has_commit(&dest, &unrelated),
+        "fetch should not download other branches"
+    );
 }
 
 #[test]

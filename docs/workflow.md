@@ -66,8 +66,10 @@ Per entry:
 | Artefact entry, nothing in storage | `skip (no artefact data)` |
 
 Afterwards GitScale resolves [recursive dependencies](recursive-dependencies.md):
-it reads each checkout's own `.gitscale.toml`, checks out any revision adopted
-from a child, and plants the dedup symlinks.
+it reads each checkout's own `.gitscale.toml`, moves any checkout whose revision
+is adopted from a child to that revision the way [`pull`](#pull) would (a readonly
+checkout stays read-only, a shallow one fetches just that ref; an artefact keeps
+its archive), and plants the dedup symlinks.
 
 Note the symlink rule: a path that is a symlink is replaced by a real clone.
 That is how a deduped [recursive dependency](recursive-dependencies.md) is
@@ -131,8 +133,10 @@ gitscale fetch imports/core        # one entry
 
 - **Git entries**: the cache entry is refreshed from the remote, then the
   workspace's remote-tracking refs are updated from it. A shallow checkout stays
-  shallow. A checkout that does not exist, or a directory holding no repository, is
-  skipped (`not cloned`).
+  shallow and fetches only the revision its entry pins, so a tag or branch the
+  config has moved to arrives too. A checkout that does not exist, or a directory
+  holding no repository, is skipped (`not cloned`); a symlinked (deduped) entry is
+  skipped (`symlink`) — the real checkout is fetched under its own name.
 - **Artefact entries**: a HEAD request against object storage, recording the
   remote ETag in `.etag-remote`. Nothing is downloaded or extracted.
 
@@ -141,7 +145,10 @@ run in a dirty workspace.
 
 ## pull
 
-Bring every checkout up to date, cloning anything that is missing first.
+Bring every checkout to where a fresh `clone` would put it: anything missing is
+cloned first, and an entry with no revision of its own follows the one a child
+config pins, as [`clone`](#clone) does — including a pin the pull itself brings
+in.
 
 ```
 gitscale pull                   # everything
@@ -153,11 +160,14 @@ gitscale pull imports/core         # one entry
 | Missing directory, or an empty one | Cloned, exactly as `clone` would |
 | Directory holding files but no repository | `FAIL`, left as it is, exactly as `clone` would |
 | Full clone, on a branch | Refs refreshed, checked out if it is on the wrong revision, then fast-forwarded (`--ff-only`). A diverged branch is left alone rather than forced |
-| Shallow clone | Refetched at depth 1 and `reset --hard` to the upstream commit |
+| Full clone, no revision | Stays on the branch it is on, which is fast-forwarded |
+| Shallow clone | Only the pinned branch or tag is fetched, at depth 1, and checked out: on the branch, or detached at the tag. With no revision, refetched and reset to the upstream commit |
 | Shallow clone pinned to a SHA | That one commit is fetched and reset to |
 | CI, served by a cache snapshot | The pinned commit is taken from local disk; no network at all |
 | readonly | Made writable, updated, then made read-only again |
 | artefact | ETag compared; re-downloaded and re-extracted only if the remote differs |
+| Symlink planted by an enclosing workspace (running inside a child repository) | `skip (symlink)` — that checkout and its revision belong to the outer workspace's root |
+| Any other symlink | Removed and replaced by a real clone, as `clone` does |
 
 Afterwards the [recursive dependency](recursive-dependencies.md) symlinks are
 re-created — a child config may have changed — and the
@@ -173,8 +183,8 @@ gitscale push                   # everything
 gitscale push imports/core         # one entry
 ```
 
-`git push` in each readwrite checkout. `readonly` entries, `artefact` entries
-and directories that hold no checkout are skipped. Inside CI, the remote is
+`git push` in each readwrite checkout. `readonly` entries, `artefact` entries,
+directories that hold no checkout and symlinked (deduped) entries are skipped. Inside CI, the remote is
 repointed at the job-token HTTPS URL first where that applies — see
 [CI authentication](ci-authentication.md).
 

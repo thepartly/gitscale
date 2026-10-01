@@ -4,7 +4,6 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use crate::config::{load_config, RepoEntry, CONFIG_FILENAME};
-use crate::git::checkout_revision;
 
 /// A symlink to create after cloning.
 #[derive(Debug, Clone)]
@@ -246,6 +245,21 @@ fn classify_orphan(
     })
 }
 
+/// Whether the symlink at `link_abs`, an entry path of the workspace at
+/// `config_root`, is a dedup link an enclosing workspace planted: relative,
+/// as gitscale makes them, and pointing out of this workspace. That checkout,
+/// and the revision it sits at, belong to the outer workspace's root config —
+/// which is how running gitscale inside a child repository finds its deps.
+pub fn is_outer_link(link_abs: &Path, config_root: &Path) -> bool {
+    let Ok(target) = fs::read_link(link_abs) else {
+        return false;
+    };
+    let Some(parent) = link_abs.parent() else {
+        return false;
+    };
+    !target.is_absolute() && !lexical_join(parent, &target).starts_with(config_root)
+}
+
 /// Lexically join `base` with `rel`, resolving `.` and `..` components without
 /// touching the filesystem (so it works for broken symlinks).
 fn lexical_join(base: &Path, rel: &Path) -> PathBuf {
@@ -266,51 +280,21 @@ fn lexical_join(base: &Path, rel: &Path) -> PathBuf {
     result.iter().collect()
 }
 
-/// Checkout resolved revisions for repos that had an empty revision in root
-/// config but got one adopted from a child.
-pub fn apply_resolved_revisions(
-    revisions: &[(String, String)],
-    root_repos: &[RepoEntry],
-    config_root: &Path,
-) -> Result<()> {
-    for (directory, revision) in revisions {
-        let original = root_repos
-            .iter()
-            .find(|e| e.directory == *directory)
-            .unwrap();
-        let resolved_entry = RepoEntry {
-            directory: directory.clone(),
-            repo_url: original.repo_url.clone(),
-            revision: revision.clone(),
-            mode: original.mode,
-            recursive: original.recursive,
-        };
-        let dest = config_root.join(directory);
-        if dest.exists() {
-            checkout_revision(&resolved_entry, config_root)?;
-        }
-    }
-    Ok(())
-}
-
 /// High-level: resolve transitive deps and create symlinks.
-/// When `apply_revisions` is true, also checkout adopted revisions.
+///
+/// Returns the revisions adopted from child configs, as `(directory,
+/// revision)`, for a caller that moves those checkouts to them.
 pub fn resolve_and_link(
     root_repos: &[RepoEntry],
     config_root: &Path,
-    apply_revisions: bool,
-) -> Result<()> {
+) -> Result<Vec<(String, String)>> {
     let (symlinks, resolved_revisions) = resolve_recursive(root_repos, config_root)?;
-
-    if apply_revisions && !resolved_revisions.is_empty() {
-        apply_resolved_revisions(&resolved_revisions, root_repos, config_root)?;
-    }
 
     if !symlinks.is_empty() {
         create_symlinks(&symlinks, config_root)?;
     }
 
-    Ok(())
+    Ok(resolved_revisions)
 }
 
 /// Compute relative path from directory `from` to path `to`.
