@@ -168,8 +168,7 @@ fn local_hooks_dir(repo: &Path) -> Result<(PathBuf, bool)> {
     if let Some(local) = git_config_get(Some(Scope::Local), "core.hooksPath", Some(repo)) {
         return Ok((resolve_hooks_path(repo, &local), true));
     }
-    let git_dir = git_stdout(&["rev-parse", "--absolute-git-dir"], repo)?;
-    Ok((PathBuf::from(git_dir).join("hooks"), false))
+    Ok((default_hooks_dir(repo)?, false))
 }
 
 /// The directory git will actually run this repo's hooks from — asked of git
@@ -180,11 +179,19 @@ fn active_hooks_dir(repo: &Path) -> Result<(PathBuf, bool)> {
     let repo_chose_it = git_config_get(Some(Scope::Local), "core.hooksPath", Some(repo)).is_some();
     match git_config_get(None, "core.hooksPath", Some(repo)) {
         Some(path) => Ok((resolve_hooks_path(repo, &path), repo_chose_it)),
-        None => {
-            let git_dir = git_stdout(&["rev-parse", "--absolute-git-dir"], repo)?;
-            Ok((PathBuf::from(git_dir).join("hooks"), repo_chose_it))
-        }
+        None => Ok((default_hooks_dir(repo)?, repo_chose_it)),
     }
+}
+
+/// Where git looks for hooks when `core.hooksPath` is unset: the common git
+/// directory's `hooks`, shared by every worktree. Not `--absolute-git-dir`,
+/// which in a linked worktree is `.git/worktrees/<name>` — git never runs
+/// hooks from there.
+fn default_hooks_dir(repo: &Path) -> Result<PathBuf> {
+    let common = git_stdout(&["rev-parse", "--git-common-dir"], repo)?;
+    // Relative to `repo` in the main worktree, absolute in a linked one.
+    let common = repo.join(common);
+    Ok(common.canonicalize().unwrap_or(common).join("hooks"))
 }
 
 /// A relative `core.hooksPath` is resolved against the worktree root.

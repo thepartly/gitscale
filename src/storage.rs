@@ -4,7 +4,6 @@ use hmac::{Hmac, Mac};
 use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use url::Url;
 
@@ -169,31 +168,20 @@ fn extract_artefact(body: &[u8], dest: &Path) -> Result<()> {
 }
 
 fn apply_artefact_readonly(dest: &Path) -> Result<()> {
-    for entry in fs::read_dir(dest)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_file() && !entry.file_name().to_string_lossy().starts_with('.') {
-            let meta = fs::metadata(&path)?;
-            let mut perms = meta.permissions();
-            perms.set_mode(perms.mode() & !(0o222));
-            fs::set_permissions(&path, perms)?;
-        }
-    }
-    Ok(())
+    crate::git::set_write_bits(dest, false, &|path| is_marker(dest, path))
 }
 
 fn restore_artefact_writable(dest: &Path) -> Result<()> {
-    for entry in fs::read_dir(dest)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_file() && !entry.file_name().to_string_lossy().starts_with('.') {
-            let meta = fs::metadata(&path)?;
-            let mut perms = meta.permissions();
-            perms.set_mode(perms.mode() | 0o200);
-            fs::set_permissions(&path, perms)?;
-        }
-    }
-    Ok(())
+    crate::git::set_write_bits(dest, true, &|path| is_marker(dest, path))
+}
+
+/// Top-level dot entries are gitscale's own: `.etag` and `.etag-remote` are
+/// rewritten on every fetch, so they must stay writable and survive a clean.
+fn is_marker(dest: &Path, path: &Path) -> bool {
+    path.strip_prefix(dest)
+        .ok()
+        .and_then(|rel| rel.components().next())
+        .is_some_and(|first| first.as_os_str().to_string_lossy().starts_with('.'))
 }
 
 fn clean_artefact_files(dest: &Path) -> Result<()> {

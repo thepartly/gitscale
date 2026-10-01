@@ -104,6 +104,12 @@ impl TestEnv {
             &tmp_clone,
             &["push", "origin", &format!("{}:{}", branch, branch)],
         );
+        // Make `branch` the remote's default, as on a real host: `init --bare`
+        // points HEAD at git's built-in default, which may name no branch here.
+        run_git(
+            &bare_path,
+            &["symbolic-ref", "HEAD", &format!("refs/heads/{}", branch)],
+        );
 
         // Clean up temp clone
         let _ = fs::remove_dir_all(&tmp_clone);

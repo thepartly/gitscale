@@ -166,8 +166,9 @@ Two marker files live in the directory: `.etag` (what is extracted right now)
 and `.etag-remote` (what the last HEAD saw). `gitscale status` reports an
 artefact as behind when they differ.
 
-Top-level files in the extracted directory have their write bits cleared. Files
-inside subdirectories and dot-files are left as the archive made them.
+Every extracted file, at any depth, has its write bits cleared. Top-level
+dot-entries are left alone: they hold GitScale's own markers, which each fetch
+rewrites.
 
 Artefact entries are never put in the object cache — an unpacked archive has no
 object store — and they are skipped by [`clean`](clean.md).

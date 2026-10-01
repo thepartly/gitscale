@@ -93,6 +93,44 @@ fn install_local_writes_both_hooks() {
     }
 }
 
+/// git runs every worktree's hooks from the common `.git/hooks`; a linked
+/// worktree's own git dir (`.git/worktrees/<name>`) is never consulted.
+#[test]
+fn install_local_from_a_linked_worktree_writes_the_shared_hooks() {
+    let env = TestEnv::new("hook_install_worktree");
+    let repo = repo_with(&env, Some("[repos]\n"));
+    let wt = env.repos_remote.join("wt");
+    helpers::run_git_pub(&repo, &["worktree", "add", "-q", wt.to_str().unwrap()]);
+
+    let out = cli(&["hook", "install", "--local", "-C", wt.to_str().unwrap()]);
+    assert!(out.success, "stderr: {}", out.stderr);
+
+    for hook in ["post-checkout", "post-merge"] {
+        assert!(
+            hooks_dir(&repo).join(hook).is_file(),
+            "{} not in the shared hooks dir",
+            hook
+        );
+        assert!(
+            !repo.join(".git/worktrees/wt/hooks").join(hook).exists(),
+            "{} written to the worktree's private git dir",
+            hook
+        );
+    }
+
+    let out = cli_isolated(
+        &isolated_home(&env),
+        &["hook", "status", "-C", wt.to_str().unwrap()],
+    );
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(
+        out.stdout
+            .contains(&*hooks_dir(&repo).canonicalize().unwrap().to_string_lossy()),
+        "status should report the shared hooks dir:\n{}",
+        out.stdout
+    );
+}
+
 #[test]
 fn install_displaces_and_chains_an_existing_hook() {
     let env = TestEnv::new("hook_install_chains");

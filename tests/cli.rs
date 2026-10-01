@@ -374,6 +374,61 @@ url = "{}"
     assert_eq!(content, "v2-content");
 }
 
+/// Read-only applies to the whole archive, not just its top level — and the
+/// marker files stay writable, since every fetch rewrites them.
+#[test]
+fn artefact_is_readonly_at_every_depth() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode();
+
+    let env = TestEnv::new("artefact_readonly_depth");
+    let repo_url = "https://github.com/org/app.git";
+    let files = |v: &'static str| [("app.bin", v), ("bin/tool", v), ("share/doc/readme", v)];
+    env.create_artefact(repo_url, "main", &files("v1"));
+    env.write_config(&format!(
+        r#"[storage]
+url = "{}"
+
+[repos]
+"meta/app" = {{ url = "{}", revision = "main", mode = "artefact" }}
+"#,
+        env.storage_url(),
+        repo_url,
+    ));
+    let dest = env.playground.join("meta/app");
+
+    let out = env.run(&["clone"]);
+    assert!(out.success, "clone stderr: {}", out.stderr);
+    for (name, _) in files("") {
+        assert_eq!(
+            mode(&dest.join(name)) & 0o222,
+            0,
+            "{} should be readonly",
+            name
+        );
+    }
+    assert_ne!(
+        mode(&dest.join(".etag")) & 0o200,
+        0,
+        ".etag should stay writable"
+    );
+
+    // An update has to get past the read-only files it replaces.
+    env.create_artefact(repo_url, "main", &files("v2"));
+    let out = env.run(&["pull"]);
+    assert!(out.success, "pull stderr: {}", out.stderr);
+    for (name, _) in files("") {
+        let path = dest.join(name);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "v2");
+        assert_eq!(
+            mode(&path) & 0o222,
+            0,
+            "{} should be readonly after pull",
+            name
+        );
+    }
+}
+
 #[test]
 fn pull_artefact_up_to_date() {
     let env = TestEnv::new("pull_artefact_up_to_date");
@@ -2062,6 +2117,42 @@ fn shallow_pull_pinned_to_tag_moves_to_new_tag() {
         !has_commit(&dest, &unrelated),
         "pull should not download other branches"
     );
+}
+
+/// No revision means "the branch the clone landed on": pull fast-forwards it
+/// rather than trying to check out an empty name.
+#[test]
+fn pull_without_a_revision_fast_forwards() {
+    for (name, flags) in [
+        ("pull_no_rev_cached", &[][..]),
+        ("pull_no_rev_no_cache", &["--no-cache"][..]),
+    ] {
+        let env = TestEnv::new(name);
+        // Not `main` or `master`: nothing may assume the default's name.
+        let bare = env.create_bare_repo("mylib", "trunk", &[("a.txt", "v1")]);
+        env.write_config(&format!(
+            "[repos]\n\"libs/mylib\" = {{ url = \"{}\" }}\n",
+            bare.display()
+        ));
+        let clone = [&["clone"][..], flags].concat();
+        assert!(env.run(&clone).success, "{}: clone failed", name);
+
+        let second = commit_to_bare(&bare, "trunk", "a.txt", "v2");
+        let pull = [&["pull"][..], flags].concat();
+        let out = env.run(&pull);
+        assert!(
+            out.success,
+            "{}: pull failed: {}{}",
+            name, out.stdout, out.stderr
+        );
+        let dest = env.playground.join("libs/mylib");
+        assert_eq!(
+            git_stdout(&dest, &["rev-parse", "HEAD"]),
+            second,
+            "{}",
+            name
+        );
+    }
 }
 
 #[test]

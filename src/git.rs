@@ -469,41 +469,35 @@ fn fetch_from_cache(dest: &Path, source: &Source) -> Result<()> {
 }
 
 pub fn apply_readonly(dest: &Path) -> Result<()> {
-    for entry in walkdir(dest) {
-        let path = entry.path();
-        if path.is_symlink() {
-            continue;
-        }
-        if is_inside_dotgit(dest, path) {
-            continue;
-        }
-        if path.is_file() {
-            let meta = fs::metadata(path)?;
-            let mut perms = meta.permissions();
-            let mode = perms.mode();
-            perms.set_mode(mode & !(0o222)); // remove S_IWUSR | S_IWGRP | S_IWOTH
-            fs::set_permissions(path, perms)?;
-        }
-    }
-    Ok(())
+    set_write_bits(dest, false, &|path| is_inside_dotgit(dest, path))
 }
 
 pub fn restore_writable(dest: &Path) -> Result<()> {
+    set_write_bits(dest, true, &|path| is_inside_dotgit(dest, path))
+}
+
+/// Clear every write bit (`writable = false`) or restore the owner's
+/// (`writable = true`) on each file under `dest`, at any depth. Symlinks are
+/// left alone, and so is anything `skip` names; a skipped directory is still
+/// walked.
+pub(crate) fn set_write_bits(
+    dest: &Path,
+    writable: bool,
+    skip: &dyn Fn(&Path) -> bool,
+) -> Result<()> {
     for entry in walkdir(dest) {
         let path = entry.path();
-        if path.is_symlink() {
+        if path.is_symlink() || skip(path) || !path.is_file() {
             continue;
         }
-        if is_inside_dotgit(dest, path) {
-            continue;
-        }
-        if path.is_file() {
-            let meta = fs::metadata(path)?;
-            let mut perms = meta.permissions();
-            let mode = perms.mode();
-            perms.set_mode(mode | 0o200); // add S_IWUSR
-            fs::set_permissions(path, perms)?;
-        }
+        let mut perms = fs::metadata(path)?.permissions();
+        let mode = perms.mode();
+        perms.set_mode(if writable {
+            mode | 0o200 // add S_IWUSR
+        } else {
+            mode & !0o222 // remove S_IWUSR | S_IWGRP | S_IWOTH
+        });
+        fs::set_permissions(path, perms)?;
     }
     Ok(())
 }
@@ -640,8 +634,9 @@ pub fn pull_repo(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source)
         // makes the fast-forward below local; without one, nothing is fetched
         // here and the fast-forward is the `git pull` it always was.
         fetch_from_cache(&dest, source)?;
-        let current = get_current_ref(entry, root)?;
-        if current != entry.revision {
+        // No revision means whatever branch the clone landed on, as in
+        // `clone_repo`: there is nothing to switch to, only to fast-forward.
+        if !entry.revision.is_empty() && get_current_ref(entry, root)? != entry.revision {
             checkout_revision(entry, root)?;
         }
         fast_forward(&dest, source)?;
