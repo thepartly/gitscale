@@ -109,8 +109,9 @@ fn pull_inner(
             if dest.is_symlink() {
                 // An enclosing workspace's dedup link: its root decides that
                 // checkout's revision, and pulling through the link would move
-                // it to this config's instead.
-                if is_outer_link(&dest, &config_root) {
+                // it to this config's instead. Named, it is unlinked, as
+                // `clone` would.
+                if names.is_empty() && is_outer_link(&dest, &config_root) {
                     return RepoStatus::Skip(format!("{} (symlink)", name));
                 }
                 // Anything else is replaced by a real clone, as `clone` does.

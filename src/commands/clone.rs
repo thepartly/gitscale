@@ -8,6 +8,7 @@ use crate::commands::cache as cache_cmd;
 use crate::config::{find_config, load_config, CacheSettings, RepoEntry, CONFIG_FILENAME};
 use crate::git::{clone_repo, is_ci, pull_repo};
 use crate::progress::{run_parallel, RepoStatus};
+use crate::resolve::is_outer_link;
 use crate::share;
 use crate::storage::clone_artefact;
 
@@ -63,12 +64,14 @@ pub fn run(
             let entry = &entry_map[name];
             let dest = config_root.join(&entry.directory);
 
-            // Replace symlinks with actual clones
-            if dest
-                .symlink_metadata()
-                .map(|m| m.file_type().is_symlink())
-                .unwrap_or(false)
-            {
+            // Replace symlinks with actual clones — except, unless the entry
+            // was named, an enclosing workspace's dedup link: run inside a
+            // child repository, that is the outer root's checkout, and
+            // unlinking it is a choice to make one dependency at a time.
+            if dest.is_symlink() {
+                if names.is_empty() && is_outer_link(&dest, &config_root) {
+                    return RepoStatus::Skip(format!("{} (symlink)", name));
+                }
                 if let Err(e) = std::fs::remove_file(&dest) {
                     return RepoStatus::Fail(format!("{}: failed to remove symlink: {}", name, e));
                 }

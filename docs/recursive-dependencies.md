@@ -107,8 +107,10 @@ A few consequences worth knowing:
 
 - Symlinked entries are skipped by `fetch`, `push`, `commit` and
   [`clean`](clean.md) — the real checkout is the one that gets fetched,
-  committed and cleaned. Run inside a child repository, `pull` skips them too:
-  the outer workspace's root decides which revision that checkout is at.
+  committed and cleaned. Run inside a child repository, `clone`, `pull` and
+  `sync` leave them in place too, since the outer workspace's root decides which
+  revision that checkout is at. Naming the entry (`gitscale clone imports/shared`)
+  is how one is unlinked into a checkout of its own.
 - `status` shows them as `⤷ symlink`, with the link target in the `PATH` column
   and the ref of the checkout it points at in `REF`.
 - Extracted [artefact](dependencies.md#artefact) directories are scanned for a

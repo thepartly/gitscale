@@ -340,13 +340,10 @@ fn fetch_git_cloned() {
 // Pull
 // ---------------------------------------------------------------------------
 
-/// Inside a child repository, a dep is the outer workspace's dedup symlink.
-/// The outer root decides that checkout's revision: a pull from the child
-/// leaves the link and the checkout alone, rather than moving it to the
-/// revision the child's own config names.
-#[test]
-fn pull_inside_a_child_leaves_the_outer_workspace_link_alone() {
-    let env = TestEnv::new("pull_child_outer_link");
+/// A root workspace whose `repoA` declares `libs/b`, deduped to the root's
+/// `repoB`. The root pins B at `main`; the child asks for `develop`, and the
+/// root wins. Returns the `repoA` path and `main`'s tip.
+fn child_with_outer_link(env: &TestEnv) -> (std::path::PathBuf, String) {
     let bare_b = env.create_bare_repo("repoB", "main", &[("b.txt", "B main")]);
     bare_git_stdout(&bare_b, &["branch", "develop", "main"]);
     commit_to_bare(&bare_b, "develop", "b.txt", "B develop");
@@ -364,7 +361,6 @@ fn pull_inside_a_child_leaves_the_outer_workspace_link_alone() {
             ),
         ],
     );
-    // The root pins B itself, so it wins over the child's "develop".
     env.write_config(&format!(
         r#"[repos]
 "repoA" = {{ url = "{}", revision = "main" }}
@@ -374,12 +370,34 @@ fn pull_inside_a_child_leaves_the_outer_workspace_link_alone() {
         bare_b.display(),
     ));
     assert!(env.run(&["clone"]).success);
-    let link = env.playground.join("repoA/libs/b");
-    assert!(link.is_symlink(), "clone should dedup repoA/libs/b");
-    let main_tip = bare_git_stdout(&bare_b, &["rev-parse", "main"]);
+    assert!(
+        env.playground.join("repoA/libs/b").is_symlink(),
+        "clone should dedup repoA/libs/b"
+    );
+    (
+        env.playground.join("repoA"),
+        bare_git_stdout(&bare_b, &["rev-parse", "main"]),
+    )
+}
 
-    let child = env.playground.join("repoA");
-    let out = gitscale::run_cli_with(&["gitscale", "pull", "-C", child.to_str().unwrap()], false);
+/// Run the CLI with `-C dir` after the subcommand, then `rest`.
+fn run_in(dir: &std::path::Path, subcommand: &str, rest: &[&str]) -> helpers::CliOutput {
+    let mut args = vec!["gitscale", subcommand, "-C", dir.to_str().unwrap()];
+    args.extend_from_slice(rest);
+    gitscale::run_cli_with(&args, false)
+}
+
+/// Inside a child repository, a dep is the outer workspace's dedup symlink.
+/// The outer root decides that checkout's revision: a pull from the child
+/// leaves the link and the checkout alone, rather than moving it to the
+/// revision the child's own config names.
+#[test]
+fn pull_inside_a_child_leaves_the_outer_workspace_link_alone() {
+    let env = TestEnv::new("pull_child_outer_link");
+    let (child, main_tip) = child_with_outer_link(&env);
+    let link = child.join("libs/b");
+
+    let out = run_in(&child, "pull", &[]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert!(out.stdout.contains("libs/b (symlink)"), "{}", out.stdout);
     assert!(link.is_symlink(), "the dedup link must survive");
@@ -387,6 +405,34 @@ fn pull_inside_a_child_leaves_the_outer_workspace_link_alone() {
         git_stdout(&env.playground.join("repoB"), &["rev-parse", "HEAD"]),
         main_tip,
         "the root's pin must win over the child's"
+    );
+}
+
+/// `clone` and `sync` from inside a child keep the outer links too; naming
+/// the entry is how one dependency is unlinked into a checkout of its own.
+#[test]
+fn clone_and_sync_inside_a_child_unlink_only_what_is_named() {
+    let env = TestEnv::new("child_unlink_named");
+    let (child, main_tip) = child_with_outer_link(&env);
+    let link = child.join("libs/b");
+
+    for subcommand in ["clone", "sync"] {
+        let out = run_in(&child, subcommand, &[]);
+        assert!(out.success, "{}: {}{}", subcommand, out.stdout, out.stderr);
+        assert!(link.is_symlink(), "{} must keep the dedup link", subcommand);
+    }
+    assert_eq!(
+        git_stdout(&env.playground.join("repoB"), &["rev-parse", "HEAD"]),
+        main_tip
+    );
+
+    let out = run_in(&child, "clone", &["libs/b"]);
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    assert!(!link.is_symlink(), "a named clone unlinks");
+    assert_eq!(
+        std::fs::read_to_string(link.join("b.txt")).unwrap(),
+        "B develop",
+        "at the child's own revision"
     );
 }
 

@@ -61,7 +61,8 @@ Per entry:
 | Checkout exists | `skip (already exists)` |
 | Directory exists but is empty | Cloned into it |
 | Directory exists, holds files but no repository | `FAIL … exists but holds no git repository`. Left as it is — [`gitscale clean -f`](clean.md#a-directory-holding-no-repository) removes it, or move it aside, and run again |
-| Path is a symlink | The symlink is removed and a real clone is made in its place |
+| Path is a symlink planted by an enclosing workspace (running inside a child repository) | `skip (symlink)`, unless the entry is named — then unlinked as below |
+| Any other symlink | The symlink is removed and a real clone is made in its place |
 | Artefact entry, no `[storage]` url | `FAIL … no [storage] configured` |
 | Artefact entry, nothing in storage | `skip (no artefact data)` |
 
@@ -75,8 +76,10 @@ Note the symlink rule: a path that is a symlink is replaced by a real clone.
 That is how a deduped [recursive dependency](recursive-dependencies.md) is
 turned back into its own checkout — but the symlink sits at a path declared by
 the *child* config, so the command to run is `gitscale clone imports/shared` from
-inside that child repository, not from the workspace root. `sync` at the root
-does the opposite and relinks it.
+inside that child repository, not from the workspace root. It has to be named:
+run inside a child without names, `clone`, `pull` and `sync` leave the enclosing
+workspace's links in place, since that workspace's root decides which revision
+those checkouts are at. `sync` at the root does the opposite and relinks it.
 
 ### Cloning a workspace from a URL
 
@@ -166,7 +169,7 @@ gitscale pull imports/core         # one entry
 | CI, served by a cache snapshot | The pinned commit is taken from local disk; no network at all |
 | readonly | Made writable, updated, then made read-only again |
 | artefact | ETag compared; re-downloaded and re-extracted only if the remote differs |
-| Symlink planted by an enclosing workspace (running inside a child repository) | `skip (symlink)` — that checkout and its revision belong to the outer workspace's root |
+| Symlink planted by an enclosing workspace (running inside a child repository) | `skip (symlink)` — that checkout and its revision belong to the outer workspace's root. Named, it is unlinked as `clone` would |
 | Any other symlink | Removed and replaced by a real clone, as `clone` does |
 
 Afterwards the [recursive dependency](recursive-dependencies.md) symlinks are
