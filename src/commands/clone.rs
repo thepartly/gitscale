@@ -8,7 +8,7 @@ use crate::config::{filter_entries, load_workspace, CacheSettings, RepoEntry, CO
 use crate::git::{clone_repo, pull_repo};
 use crate::progress::{run_entries, RepoStatus};
 use crate::resolve::is_outer_link;
-use crate::storage::clone_artefact;
+use crate::storage::{clone_artefact, holds_only_markers, is_downloaded};
 
 pub fn run(
     root: Option<&Path>,
@@ -66,7 +66,9 @@ pub fn run(
             }
 
             if entry.is_artefact() {
-                if dest.exists() {
+                // A directory holding only the markers a fetch writes is not
+                // a download yet; anything else already there is left alone.
+                if is_downloaded(&dest) || (dest.exists() && !holds_only_markers(&dest)) {
                     return RepoStatus::Skip(format!("{} (already exists)", name));
                 }
                 if storage_url.is_empty() {

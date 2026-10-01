@@ -20,7 +20,8 @@ pub fn run(
 ) -> Result<()> {
     let (config, config_root) = load_workspace(root)?;
 
-    if config.repos.is_empty() {
+    // JSON goes on to print its usual array, so a consumer gets JSON either way.
+    if config.repos.is_empty() && output_format != "json" {
         writeln!(out, "No repos declared in .gitscale.toml")?;
         return Ok(());
     }
@@ -97,14 +98,11 @@ pub fn run(
                     .map(|m| m.file_type().is_symlink())
                     .unwrap_or(false)
             {
-                // Find the parent repo that owns this link
-                let parent_dir = sym
-                    .link_path
-                    .iter()
-                    .next()
-                    .and_then(|c| c.to_str())
-                    .unwrap_or("");
-                if let Some(s) = statuses.iter_mut().find(|s| s.directory == parent_dir) {
+                let Some(owner) = crate::resolve::owning_entry(&sym.link_path, &config.repos)
+                else {
+                    continue;
+                };
+                if let Some(s) = statuses.iter_mut().find(|s| s.directory == owner.directory) {
                     s.has_unlinked = true;
                     if is_tree_modified(&link_abs) {
                         s.has_unlinked_modified = true;

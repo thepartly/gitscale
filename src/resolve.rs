@@ -14,6 +14,16 @@ pub struct SymlinkEntry {
     pub target_path: PathBuf,
 }
 
+/// The declared entry a dependency link sits under: the one whose directory is
+/// the longest whole-component prefix of `link_path`, however many components
+/// that directory spans.
+pub fn owning_entry<'a>(link_path: &Path, entries: &'a [RepoEntry]) -> Option<&'a RepoEntry> {
+    entries
+        .iter()
+        .filter(|e| link_path != Path::new(&e.directory) && link_path.starts_with(&e.directory))
+        .max_by_key(|e| Path::new(&e.directory).components().count())
+}
+
 /// Scan cloned repos for nested `.gitscale.toml` files, validate that all
 /// transitive dependencies are declared at root level, resolve empty revisions,
 /// and return the list of symlinks to create.

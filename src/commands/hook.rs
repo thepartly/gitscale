@@ -63,14 +63,14 @@ fn shim_source(hook: &str, binary: &Path, chain: Option<&Path>, allow: &str) -> 
         r#"#!/bin/sh
 {marker} — regenerate with `gitscale hook install`, do not edit.
 set -u
-GITSCALE_BIN='{binary}'
-CHAIN='{chain}'
-HOOK='{hook}'
+GITSCALE_BIN={binary}
+CHAIN={chain}
+HOOK={hook}
 
 # Which repositories may run the [hooks] commands in their own .gitscale.toml.
 # Comma-separated glob patterns, matched against host/owner/repo. Change it with
 # `gitscale hook install --allow ...`, never by editing this line.
-ALLOW='{allow}'
+ALLOW={allow}
 
 # The repository's own hook runs first and decides the exit status. A global
 # core.hooksPath replaces .git/hooks rather than adding to it, so without this
@@ -110,10 +110,10 @@ GITSCALE_HOOK="$HOOK" {allow_env}="$ALLOW" "$GITSCALE_BIN" hook run "$HOOK" -C "
 exit $RC
 "#,
         marker = SHIM_MARKER,
-        binary = binary.display(),
-        chain = chain.map(|p| p.display().to_string()).unwrap_or_default(),
-        hook = hook,
-        allow = allow,
+        binary = sh_quote(&binary.display().to_string()),
+        chain = sh_quote(&chain.map(|p| p.display().to_string()).unwrap_or_default()),
+        hook = sh_quote(hook),
+        allow = sh_quote(allow),
         allow_env = trust::ALLOW_ENV,
         config = CONFIG_FILENAME,
     )
@@ -407,13 +407,34 @@ fn existing_allow(dir: &Path) -> Option<String> {
 /// Pull a single-quoted assignment back out of a shim.
 fn shim_field(shim: &Path, name: &str) -> Option<String> {
     let text = std::fs::read_to_string(shim).ok()?;
-    let prefix = format!("{}='", name);
+    let prefix = format!("{}=", name);
     let line = text.lines().find(|l| l.starts_with(&prefix))?;
-    Some(
-        line.trim_start_matches(&prefix)
-            .trim_end_matches('\'')
-            .to_string(),
-    )
+    sh_unquote(&line[prefix.len()..])
+}
+
+/// `value` as one single-quoted shell word. A path may hold a `'`, and
+/// pasted into the shim as it is, the rest of it would run as shell code.
+fn sh_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
+/// The value of a shell word `sh_quote` wrote: quoted runs and `\'` escapes.
+fn sh_unquote(word: &str) -> Option<String> {
+    let mut value = String::new();
+    let mut chars = word.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => loop {
+                match chars.next()? {
+                    '\'' => break,
+                    c => value.push(c),
+                }
+            },
+            '\\' => value.push(chars.next()?),
+            _ => return None,
+        }
+    }
+    Some(value)
 }
 
 /// Read the chained hook out of a shim we previously wrote.
@@ -733,4 +754,29 @@ pub fn run(
 
 fn now_stamp() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_quoted_value_reads_back_as_itself() {
+        for value in [
+            "",
+            "/usr/bin/gitscale",
+            "/home/o'brien/it's/hook",
+            "'",
+            "a b",
+        ] {
+            let word = sh_quote(value);
+            assert_eq!(sh_unquote(&word).as_deref(), Some(value), "{}", word);
+        }
+    }
+
+    #[test]
+    fn a_shim_written_before_quoting_still_reads() {
+        assert_eq!(sh_unquote("'/x/y'").as_deref(), Some("/x/y"));
+        assert_eq!(sh_unquote("unquoted"), None);
+    }
 }

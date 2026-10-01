@@ -99,6 +99,31 @@ fn remove_unknown_fails() {
     assert!(out.stderr.contains("not declared"));
 }
 
+/// `add` holds an entry to the rules every later command reads the config
+/// by, rather than writing one that leaves the workspace unloadable.
+#[test]
+fn add_refuses_an_entry_the_config_would_reject() {
+    let env = TestEnv::new("add_refuses_invalid");
+    env.write_config("[repos]\n");
+    let url = "https://github.com/org/core.git";
+
+    for (directory, repo_url) in [
+        ("../escape", url),
+        ("/abs/path", url),
+        ("libs/core", "ext::sh -c touch% /tmp/pwned"),
+    ] {
+        let out = env.run(&["add", directory, repo_url, "main"]);
+        assert!(!out.success, "add accepted {} = {}", directory, repo_url);
+        let config = std::fs::read_to_string(env.playground.join(".gitscale.toml")).unwrap();
+        assert!(
+            !config.contains(directory) && !config.contains("ext::"),
+            "the rejected entry was written:\n{}",
+            config
+        );
+    }
+    assert!(env.run(&["status"]).success, "the config no longer loads");
+}
+
 // ---------------------------------------------------------------------------
 // Clone
 // ---------------------------------------------------------------------------
@@ -299,6 +324,73 @@ url = "{}"
 
     // .etag-remote should be written
     assert!(env.playground.join("meta/app/.etag-remote").is_file());
+}
+
+/// A fetch only looks: an artefact it found in storage is still to be
+/// downloaded by the clone that follows.
+#[test]
+fn clone_after_fetch_still_downloads_the_artefact() {
+    let env = TestEnv::new("clone_after_fetch_artefact");
+    let repo_url = "https://github.com/org/app.git";
+    env.create_artefact(repo_url, "v1.0", &[("app.bin", "v1-content")]);
+    env.write_config(&format!(
+        r#"[storage]
+url = "{}"
+
+[repos]
+"meta/app" = {{ url = "{}", revision = "v1.0", mode = "artefact" }}
+"#,
+        env.storage_url(),
+        repo_url,
+    ));
+
+    assert!(env.run(&["fetch"]).success);
+    let out = env.run(&["clone"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(
+        env.playground.join("meta/app/app.bin").is_file(),
+        "the artefact was never downloaded; clone said:\n{}",
+        out.stdout
+    );
+}
+
+/// An archive that cannot be unpacked leaves nothing that later passes for
+/// the artefact: running clone or pull again tries again, rather than taking
+/// the half-made directory as done.
+#[test]
+fn a_corrupt_artefact_is_not_taken_as_current() {
+    let env = TestEnv::new("corrupt_artefact");
+    let repo_url = "https://github.com/org/app.git";
+    let object =
+        gitscale::storage::object_url(env.artefacts_remote.to_str().unwrap(), repo_url, "v1.0")
+            .unwrap();
+    let object = std::path::PathBuf::from(object);
+    std::fs::create_dir_all(object.parent().unwrap()).unwrap();
+    std::fs::write(&object, "not a gzip archive").unwrap();
+    env.write_config(&format!(
+        r#"[storage]
+url = "{}"
+
+[repos]
+"meta/app" = {{ url = "{}", revision = "v1.0", mode = "artefact" }}
+"#,
+        env.storage_url(),
+        repo_url,
+    ));
+
+    assert!(!env.run(&["clone"]).success, "the archive is corrupt");
+    let again = env.run(&["clone"]);
+    assert!(
+        !again.success,
+        "a second clone passed over the failed one:\n{}",
+        again.stdout
+    );
+    let pull = env.run(&["pull"]);
+    assert!(
+        !pull.success,
+        "pull took the failed clone as up to date:\n{}",
+        pull.stdout
+    );
 }
 
 #[test]
@@ -1731,6 +1823,12 @@ url = "{}"
 /// clone it (creating a symlink), then replace the symlink with a real clone.
 /// Returns (env, path_to_link).
 fn setup_unlinked_env(name: &str) -> (TestEnv, std::path::PathBuf) {
+    setup_unlinked_env_at(name, "repoA")
+}
+
+/// The same, with repoA declared at `parent` — which may be more than one
+/// path component deep.
+fn setup_unlinked_env_at(name: &str, parent: &str) -> (TestEnv, std::path::PathBuf) {
     let env = TestEnv::new(name);
 
     let bare_b = env.create_bare_repo("repoB", "main", &[("b.txt", "hello from B")]);
@@ -1751,9 +1849,10 @@ fn setup_unlinked_env(name: &str) -> (TestEnv, std::path::PathBuf) {
 
     env.write_config(&format!(
         r#"[repos]
-"repoA" = {{ url = "{}", revision = "main", recursive = true }}
+"{}" = {{ url = "{}", revision = "main", recursive = true }}
 "repoB" = {{ url = "{}", revision = "main" }}
 "#,
+        parent,
         bare_a.display(),
         bare_b.display(),
     ));
@@ -1762,7 +1861,7 @@ fn setup_unlinked_env(name: &str) -> (TestEnv, std::path::PathBuf) {
     let out = env.run(&["clone"]);
     assert!(out.success, "clone failed: {}", out.stderr);
 
-    let link = env.playground.join("repoA/libs/b");
+    let link = env.playground.join(parent).join("libs/b");
     assert!(link.is_symlink(), "expected symlink after clone");
 
     // Replace symlink with a real clone (simulating `gitscale sync` from inside repoA)
@@ -1902,6 +2001,126 @@ fn sync_force_relinks_clone_with_unpushed_commits() {
     assert!(out.success, "stderr: {}", out.stderr);
 
     assert!(link.is_symlink(), "expected symlink restored with --force");
+}
+
+/// A commit on a branch the remote has never seen is as much local work as an
+/// unpushed commit on a tracked one. With no upstream there is nothing to be
+/// ahead of, so it has to be found some other way — or `sync` deletes it.
+#[test]
+fn sync_skips_clone_with_commits_on_a_local_only_branch() {
+    let (env, link) = setup_unlinked_env("sync_skips_local_branch");
+
+    helpers::run_git_pub(&link, &["config", "user.email", "t@t.com"]);
+    helpers::run_git_pub(&link, &["config", "user.name", "T"]);
+    helpers::run_git_pub(&link, &["checkout", "-q", "-b", "wip"]);
+    std::fs::write(link.join("new.txt"), "new file").unwrap();
+    helpers::run_git_pub(&link, &["add", "."]);
+    helpers::run_git_pub(&link, &["commit", "-q", "-m", "local only"]);
+
+    let out = env.run(&["sync"]);
+    assert!(
+        !out.success,
+        "expected sync to refuse a clone with commits on a local-only branch"
+    );
+    assert!(!link.is_symlink(), "the clone was replaced by a link");
+    assert!(link.join("new.txt").is_file(), "the local commit was lost");
+}
+
+/// A stash is work set aside, not thrown away: it lives in the clone's own
+/// refs, so replacing the clone would delete it.
+#[test]
+fn sync_skips_clone_with_a_stash() {
+    let (env, link) = setup_unlinked_env("sync_skips_stash");
+
+    helpers::run_git_pub(&link, &["config", "user.email", "t@t.com"]);
+    helpers::run_git_pub(&link, &["config", "user.name", "T"]);
+    std::fs::write(link.join("b.txt"), "changed").unwrap();
+    helpers::run_git_pub(&link, &["stash", "-q"]);
+
+    let out = env.run(&["sync"]);
+    assert!(
+        !out.success,
+        "expected sync to refuse a clone holding a stash"
+    );
+    assert!(!link.is_symlink(), "the clone was replaced by a link");
+}
+
+/// Ignored files are what a build leaves behind, not work: they do not hold
+/// a relink back.
+#[test]
+fn sync_relinks_clone_holding_only_ignored_files() {
+    let (env, link) = setup_unlinked_env("sync_relinks_ignored");
+
+    std::fs::write(link.join(".git/info/exclude"), "target/\n").unwrap();
+    std::fs::create_dir_all(link.join("target")).unwrap();
+    std::fs::write(link.join("target/out.o"), "build output").unwrap();
+
+    let out = env.run(&["sync"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(link.is_symlink(), "expected the clone to be relinked");
+}
+
+/// Names narrow a sync to the repos named. A modified clone inside repoA is
+/// repoA's business: syncing an unrelated repo, even with `--force`, must not
+/// replace it.
+#[test]
+fn sync_with_names_leaves_other_repos_links_alone() {
+    let (env, link) = setup_unlinked_env("sync_names_relink");
+    let bare_c = env.create_bare_repo("repoC", "main", &[("c.txt", "c")]);
+    let config_path = env.playground.join(".gitscale.toml");
+    let mut config = std::fs::read_to_string(&config_path).unwrap();
+    config.push_str(&format!(
+        "\"repoC\" = {{ url = \"{}\", revision = \"main\" }}\n",
+        bare_c.display()
+    ));
+    std::fs::write(&config_path, config).unwrap();
+    assert!(env.run(&["clone", "repoC"]).success);
+
+    std::fs::write(link.join("dirty.txt"), "local change").unwrap();
+    helpers::run_git_pub(&link, &["add", "."]);
+
+    let out = env.run(&["sync", "--force", "repoC"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(
+        !link.is_symlink(),
+        "a clone in a repo that was not named was relinked"
+    );
+    assert!(
+        link.join("dirty.txt").is_file(),
+        "its local change was lost"
+    );
+}
+
+/// The repo that owns a replaced link is the declared entry it sits under,
+/// however many path components that entry spans.
+#[test]
+fn status_shows_unlinked_under_a_nested_entry() {
+    let (env, _link) = setup_unlinked_env_at("status_unlinked_nested", "apps/a");
+
+    let out = env.run(&["status"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+
+    let plain = strip_ansi(&out.stdout);
+    let row = plain
+        .lines()
+        .find(|l| l.contains("apps/a"))
+        .unwrap_or_else(|| panic!("no row for apps/a:\n{}", plain));
+    assert!(row.contains("unlinked"), "expected 'unlinked': {}", row);
+}
+
+/// A consumer of `--format json` must get JSON whatever the workspace holds.
+#[test]
+fn status_json_with_no_repos_is_json() {
+    let env = TestEnv::new("status_json_empty");
+    env.write_config("[repos]\n");
+
+    let out = env.run(&["status", "--format", "json"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&out.stdout).is_ok(),
+        "not JSON: {}",
+        out.stdout
+    );
 }
 
 #[test]

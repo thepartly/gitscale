@@ -230,6 +230,25 @@ fn shim_runs_the_chained_hook_and_honours_the_recursion_guard() {
     );
 }
 
+/// The shim names the chained hook by path, and a path may hold a quote.
+#[test]
+fn shim_chains_a_hook_whose_path_holds_a_quote() {
+    let env = TestEnv::new("hook_shim_it's");
+    let repo = repo_with(&env, Some("[repos]\n"));
+    let own = hooks_dir(&repo).join("post-checkout");
+    std::fs::write(&own, "#!/bin/sh\necho CHAINED\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    assert!(cli(&["hook", "install", "--local", "-C", repo.to_str().unwrap()]).success);
+
+    let (code, output) = run_hook(&hooks_dir(&repo).join("post-checkout"), &repo, Some("1"));
+    assert_eq!(code, 0, "the shim failed: {}", output);
+    assert_eq!(output.trim(), "CHAINED");
+}
+
 /// `git checkout -- <path>` fires post-checkout too, with a third argument of
 /// 0. It moves no revision, and a build restoring a file must not have its
 /// sub-repositories reset and cleaned underneath it.

@@ -3,7 +3,8 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::config::{
-    find_config, load_config, write_config, GitScaleConfig, RepoEntry, RepoMode, CONFIG_FILENAME,
+    check_entry, find_config, load_config, write_config, GitScaleConfig, RepoEntry, RepoMode,
+    CONFIG_FILENAME,
 };
 
 pub fn run(
@@ -29,6 +30,10 @@ pub fn run(
             (dir.join(CONFIG_FILENAME), GitScaleConfig::default())
         }
     };
+
+    // Held to the same rules as a loaded config, so that `add` cannot write a
+    // config every later command refuses to read.
+    check_entry(directory, repo_url, revision, &config_path)?;
 
     // Check for duplicate
     if config.repos.iter().any(|e| e.directory == directory) {

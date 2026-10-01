@@ -631,6 +631,39 @@ fn an_unknown_period_is_refused_before_anything_is_deleted() {
     }
 }
 
+/// Compact works without a config, but a config it cannot read is not the
+/// same as none: it may name a different cache, and falling back to the
+/// default would compact one the user never pointed it at.
+#[test]
+fn compact_refuses_a_config_it_cannot_read() {
+    let env = TestEnv::new("cache_compact_bad_config");
+    let bare = env.create_bare_repo("core", "main", &[("a.txt", "a")]);
+    env.write_config(&config_for(&bare.display().to_string()));
+    assert!(env.run(&["clone"]).success);
+    let entry = env.cache_entry("mirror", &bare.display().to_string());
+    age(&entry.join("gitscale-last-used"), "2 hours ago");
+
+    let config_path = env.playground.join(".gitscale.toml");
+    let mut config = std::fs::read_to_string(&config_path).unwrap();
+    config.push_str("this is = = not toml\n");
+    std::fs::write(&config_path, config).unwrap();
+
+    // A subprocess, so the default cache — the one a fallback would reach —
+    // can be pointed at this test's own instead of the suite's shared one.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_gitscale"))
+        .args(["cache", "compact", "--keep-recent", "1h", "-C"])
+        .arg(&env.playground)
+        .env("GITSCALE_CACHE_DIR", &env.cache)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "compact ran past an unreadable config:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(env.cache_entries("mirror").len(), 1, "an entry was evicted");
+}
+
 // ---------------------------------------------------------------------------
 // Bootstrapping and adoption
 // ---------------------------------------------------------------------------

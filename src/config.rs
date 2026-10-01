@@ -386,6 +386,25 @@ fn check_directory(directory: &str, config_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Everything a `[repos]` entry is held to, whether it is read from the
+/// config or about to be written into it by `gitscale add`.
+pub fn check_entry(directory: &str, url: &str, revision: &str, config_path: &Path) -> Result<()> {
+    check_directory(directory, config_path)?;
+    if url.is_empty() {
+        bail!(
+            "{}: repos.{}.url is required",
+            config_path.display(),
+            directory
+        );
+    }
+    check_url(url, &format!("repos.{}.url", directory), config_path)?;
+    check_not_option_like(
+        revision,
+        &format!("repos.{}.revision", directory),
+        config_path,
+    )
+}
+
 fn parse_storage(raw: Option<&RawStorage>, config_path: &Path) -> Result<String> {
     let Some(storage) = raw else {
         return Ok(String::new());
@@ -446,27 +465,9 @@ fn parse_repos(
     };
     let mut entries = Vec::new();
     for (directory, spec) in repos {
-        check_directory(directory, config_path)?;
-        let url = spec
-            .url
-            .as_deref()
-            .filter(|u| !u.is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "{}: repos.{}.url is required",
-                    config_path.display(),
-                    directory
-                )
-            })?;
-
-        check_url(url, &format!("repos.{}.url", directory), config_path)?;
-
+        let url = spec.url.as_deref().unwrap_or_default();
         let revision = spec.revision.clone().unwrap_or_default();
-        check_not_option_like(
-            &revision,
-            &format!("repos.{}.revision", directory),
-            config_path,
-        )?;
+        check_entry(directory, url, &revision, config_path)?;
 
         let mode = match &spec.mode {
             Some(m) => RepoMode::from_str_checked(m)

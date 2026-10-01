@@ -992,14 +992,47 @@ pub(crate) fn ahead_behind(dir: &Path) -> (i32, i32) {
     }
 }
 
+/// Whether any commit reachable from HEAD or a local branch is missing from
+/// every remote-tracking ref. Unlike `ahead_behind`, this needs no upstream: a
+/// branch that was never pushed is all unpushed. A git failure counts as yes,
+/// since the answer decides whether a directory is deleted.
+fn has_unpushed_commits(path: &Path) -> bool {
+    run_git(
+        &[
+            "rev-list",
+            "-n",
+            "1",
+            "HEAD",
+            "--branches",
+            "--not",
+            "--remotes",
+        ],
+        Some(path),
+        false,
+    )
+    .map(|o| !o.status.success() || !stdout_str(&o).is_empty())
+    .unwrap_or(true)
+}
+
+fn has_stash(path: &Path) -> bool {
+    run_git(
+        &["rev-parse", "--verify", "--quiet", "refs/stash"],
+        Some(path),
+        false,
+    )
+    .map(|o| o.status.success())
+    .unwrap_or(false)
+}
+
 /// Whether the checkout at `path`, or any gitscale checkout nested in it,
-/// holds work that replacing it would lose: uncommitted changes, or commits
-/// its upstream does not have.
+/// holds work that replacing it would lose: uncommitted changes, commits no
+/// remote has (on HEAD or any local branch, tracking or not), or a stash.
+/// Ignored files are not work: they are what a build leaves behind.
 pub fn is_tree_modified(path: &Path) -> bool {
     let dirty = run_git(&["status", "--porcelain"], Some(path), false)
         .map(|o| !stdout_str(&o).is_empty())
         .unwrap_or(false);
-    if dirty || ahead_behind(path).0 > 0 {
+    if dirty || has_unpushed_commits(path) || has_stash(path) {
         return true;
     }
     let Some(config) =
@@ -1104,7 +1137,7 @@ pub fn get_artefact_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
         return RepoStatus::symlink(entry, &dest, false);
     }
 
-    let exists = dest.is_dir() && dest.join(".etag").is_file();
+    let exists = crate::storage::is_downloaded(&dest);
     let read = |name: &str| {
         fs::read_to_string(dest.join(name))
             .unwrap_or_default()

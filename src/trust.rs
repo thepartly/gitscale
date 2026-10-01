@@ -177,6 +177,15 @@ pub struct Workspace {
     pub origin: Option<String>,
 }
 
+/// Whether a remote's path climbs with `..` (or holds a `.`). Spelled that
+/// way, `acme/../evil/x` names evil's repository while reading, to a glob, as
+/// one under acme — so such a remote answers to no pattern by its URL at all.
+fn has_dot_segments(origin: &str) -> bool {
+    origin
+        .split(['/', ':'])
+        .any(|seg| seg == "." || seg == "..")
+}
+
 impl Workspace {
     pub fn probe(dir: &Path) -> Self {
         Self {
@@ -195,11 +204,11 @@ impl Workspace {
     /// named by a path pattern.
     pub fn subjects(&self) -> Vec<String> {
         let mut subjects = Vec::new();
-        if let Some(origin) = &self.origin {
+        if let Some(origin) = self.origin.as_deref().filter(|o| !has_dot_segments(o)) {
             if let Some(slug) = self.slug() {
                 subjects.push(slug);
             }
-            subjects.push(origin.clone());
+            subjects.push(origin.to_string());
         }
         subjects.push(self.dir.display().to_string());
         if let Ok(canonical) = self.dir.canonicalize() {
@@ -214,7 +223,7 @@ impl Workspace {
     /// `host/owner/repo`, when the remote is a URL we can decompose. Keeps the
     /// full path, so a nested GitLab subgroup stays addressable.
     pub fn slug(&self) -> Option<String> {
-        let origin = self.origin.as_deref()?;
+        let origin = self.origin.as_deref().filter(|o| !has_dot_segments(o))?;
         let host = urls::extract_hostname(origin).ok()?;
         let path = urls::extract_path(origin).ok()?;
         let path = path.strip_suffix(".git").unwrap_or(&path);
@@ -291,6 +300,26 @@ mod tests {
         assert!(allows("*/thepartly/*", &ws));
         assert!(!allows("gitlab.com/*", &ws));
         assert!(!allows("github.com/other/*", &ws));
+    }
+
+    /// `..` in an scp-style path names another owner's repository; it must not
+    /// pass for one under the owner it climbs out of.
+    #[test]
+    fn a_dot_dot_path_does_not_escape_its_owner() {
+        for origin in [
+            "git@github.com:acme/../evil/x.git",
+            "ssh://git@github.com/acme/../evil/x.git",
+            "https://github.com/acme/../evil/x.git",
+        ] {
+            assert!(
+                !allows("github.com/acme/*", &workspace(origin)),
+                "{} passed for github.com/acme/*",
+                origin
+            );
+        }
+        // Nor by a pattern written against the raw remote.
+        let ws = workspace("git@github.com:acme/../evil/x.git");
+        assert!(!allows("git@github.com:acme/*", &ws));
     }
 
     #[test]

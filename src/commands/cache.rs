@@ -12,7 +12,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::cache::{self, Adoption, Cache};
-use crate::config::{filter_entries, load_workspace, GitScaleConfig, RepoEntry};
+use crate::config::{
+    filter_entries, find_config, load_config, load_workspace, GitScaleConfig, RepoEntry,
+};
 use crate::git::is_ci;
 use crate::progress::{run_parallel, RepoStatus};
 use crate::share::Source;
@@ -282,6 +284,17 @@ pub fn update(
     Ok(())
 }
 
+/// The config `status` and `compact` honour when there is one. Neither needs
+/// a workspace, so finding no config is fine; finding one that does not parse
+/// is not, since it may name a cache other than the default these would
+/// otherwise act on.
+fn optional_workspace_config(root: Option<&Path>) -> Result<GitScaleConfig> {
+    match find_config(root) {
+        Ok(path) => load_config(&path),
+        Err(_) => Ok(GitScaleConfig::default()),
+    }
+}
+
 /// `gitscale cache status` — what the cache holds, entry by entry.
 ///
 /// The summary line under `gitscale status` answers "where is it and what is
@@ -297,7 +310,7 @@ pub fn status(
     // As with `compact`: the cache belongs to the user, so this works from
     // anywhere. A config is used when there is one, to name the entries this
     // workspace declares and to honour `[cache] dir`.
-    let (config, _) = load_workspace(root).unwrap_or_default();
+    let config = optional_workspace_config(root)?;
     let Some(cache) = open(&config, no_cache) else {
         writeln!(out, "The object cache is off.")?;
         return Ok(());
@@ -510,7 +523,7 @@ pub fn compact(
     // A config is not required here: the cache belongs to the user, not to any
     // one workspace, so this works from anywhere. One is used when there is
     // one, so that `[cache] dir` is honoured.
-    let (config, _) = load_workspace(root).unwrap_or_default();
+    let config = optional_workspace_config(root)?;
     let Some(cache) = open(&config, no_cache) else {
         writeln!(out, "The object cache is off.")?;
         return Ok(());

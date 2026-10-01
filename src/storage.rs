@@ -70,11 +70,23 @@ pub fn clone_artefact(
         return Ok(false);
     };
     fs::create_dir_all(dest)?;
-    fs::write(dest.join(".etag"), &etag)?;
     fs::write(dest.join(".etag-remote"), &etag)?;
-    extract_artefact(&body, dest)?;
+    if let Err(e) = extract_artefact(&body, dest) {
+        // Take back what was unpacked, so the next clone starts over.
+        let _ = restore_artefact_writable(dest).and_then(|()| clean_artefact_files(dest));
+        return Err(e);
+    }
     apply_artefact_readonly(dest)?;
+    // Last: it is what says the artefact is here (`is_downloaded`).
+    fs::write(dest.join(".etag"), &etag)?;
     Ok(true)
+}
+
+/// Whether an artefact has been downloaded into `dest`, as against `dest`
+/// merely existing — a fetch creates it to record the remote etag, and a
+/// failed download leaves it behind.
+pub fn is_downloaded(dest: &Path) -> bool {
+    dest.is_dir() && dest.join(".etag").is_file()
 }
 
 pub fn fetch_artefact(
@@ -118,6 +130,9 @@ pub fn pull_artefact(
     let Some((body, etag)) = get_object(&url)? else {
         return Ok(false);
     };
+    // Gone until the new files are all in, so a failure part-way is not
+    // taken for an up-to-date download next time.
+    let _ = fs::remove_file(&local_etag_file);
     restore_artefact_writable(dest)?;
     clean_artefact_files(dest)?;
     extract_artefact(&body, dest)?;
@@ -173,6 +188,16 @@ fn is_marker(dest: &Path, path: &Path) -> bool {
         .ok()
         .and_then(|rel| rel.components().next())
         .is_some_and(|first| first.as_os_str().to_string_lossy().starts_with('.'))
+}
+
+/// Whether `dest` holds nothing but gitscale's own top-level dot entries — what
+/// a fetch, or a download that failed and was taken back, leaves.
+pub fn holds_only_markers(dest: &Path) -> bool {
+    fs::read_dir(dest).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .all(|e| e.file_name().to_string_lossy().starts_with('.'))
+    })
 }
 
 fn clean_artefact_files(dest: &Path) -> Result<()> {
