@@ -308,7 +308,8 @@ a real file or directory sitting at a link path — that is reported by
 - An artefact's dependencies come from the `.gitscale.toml` its image carries,
   and are linked inside the extracted artefact — see
   [artefacts](artefacts.md#what-gets-published).
-- Symlink dedup is a Unix mechanism; GitScale runs on Linux and macOS.
+- Symlink dedup is a Unix mechanism; GitScale runs on Linux and macOS. Windows
+  is [planned](plans/windows-support.md).
 
 ## Turning it off: `recursive = false`
 
