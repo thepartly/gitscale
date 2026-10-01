@@ -1,4 +1,5 @@
 pub mod add;
+pub mod artefact;
 pub mod cache;
 pub mod clean;
 pub mod clone;

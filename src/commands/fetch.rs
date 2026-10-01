@@ -2,11 +2,11 @@ use anyhow::Result;
 use std::io::Write;
 use std::path::Path;
 
+use crate::artefact::Artefacts;
 use crate::commands::cache::Sources;
 use crate::config::{filter_entries, load_workspace};
 use crate::git::fetch_repo;
 use crate::progress::{run_entries, RepoStatus};
-use crate::storage::fetch_artefact;
 
 pub fn run(
     root: Option<&Path>,
@@ -25,8 +25,8 @@ pub fn run(
         return Ok(());
     }
 
-    let storage_url = &config.storage_url;
     let sources = Sources::adopting(&config, &config_root, no_cache, verbose, out)?;
+    let artefacts = Artefacts::new(&config, &config_root, sources.cache.clone());
 
     run_entries(
         "Fetching...",
@@ -37,18 +37,16 @@ pub fn run(
             let name = entry.directory.as_str();
 
             if entry.is_artefact() {
-                if storage_url.is_empty() {
-                    return RepoStatus::Fail(format!("{}: no [storage] configured", name));
-                }
                 let dest = config_root.join(&entry.directory);
-                return match fetch_artefact(storage_url, &entry.repo_url, &entry.revision, &dest) {
-                    Ok(result) => {
-                        if result.exists {
-                            RepoStatus::Ok(format!("{} (artefact)", name))
-                        } else {
-                            RepoStatus::Skip(format!("{} (no remote artefact)", name))
-                        }
-                    }
+                if dest.is_symlink() {
+                    return RepoStatus::Skip(format!("{} (symlink)", name));
+                }
+                return match artefacts.fetch(entry) {
+                    Ok(commit) => RepoStatus::Ok(format!(
+                        "{} (artefact {})",
+                        name,
+                        crate::git::short_sha(&commit)
+                    )),
                     Err(e) => RepoStatus::Fail(format!("{}: {}", name, e)),
                 };
             }

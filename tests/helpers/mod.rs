@@ -1,9 +1,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use gitscale::run_cli_with;
 pub use gitscale::CliOutput;
+
+pub mod registry;
+pub use registry::FakeRegistry;
 
 /// Root dir for all test runtime artefacts, relative to workspace root.
 fn workspace_root() -> PathBuf {
@@ -14,13 +18,16 @@ fn tests_base() -> PathBuf {
     workspace_root().join("tests")
 }
 
-/// A self-contained test environment with its own playground, remote repos, and artefact storage.
+/// A self-contained test environment with its own playground, remote repos,
+/// cache and — started on first use — OCI registry.
 pub struct TestEnv {
     pub playground: PathBuf,
     pub repos_remote: PathBuf,
-    pub artefacts_remote: PathBuf,
     pub cache: PathBuf,
     name: String,
+    registry: OnceLock<FakeRegistry>,
+    /// A real registry to use instead of the fake one.
+    registry_override: OnceLock<String>,
 }
 
 impl TestEnv {
@@ -35,25 +42,23 @@ impl TestEnv {
         let name = name.as_str();
         let playground = base.join("playground").join(name);
         let repos_remote = base.join("repos-remote").join(name);
-        let artefacts_remote = base.join("artefacts-remote").join(name);
         let cache = base.join("cache").join(name);
 
         // Clean slate
         let _ = fs::remove_dir_all(&playground);
         let _ = fs::remove_dir_all(&repos_remote);
-        let _ = fs::remove_dir_all(&artefacts_remote);
         let _ = fs::remove_dir_all(&cache);
 
         fs::create_dir_all(&playground).unwrap();
         fs::create_dir_all(&repos_remote).unwrap();
-        fs::create_dir_all(&artefacts_remote).unwrap();
 
         Self {
             playground,
             repos_remote,
-            artefacts_remote,
             cache,
             name: name.to_string(),
+            registry: OnceLock::new(),
+            registry_override: OnceLock::new(),
         }
     }
 
@@ -117,40 +122,156 @@ impl TestEnv {
         bare_path
     }
 
-    /// Create an artefact .tar.gz in local storage for the given repo URL and revision.
-    pub fn create_artefact(&self, repo_url: &str, revision: &str, files: &[(&str, &str)]) {
-        use flate2::write::GzEncoder;
-        use flate2::Compression;
-        use tar::Builder;
+    /// This environment's registry, started on first use.
+    pub fn registry(&self) -> &FakeRegistry {
+        self.registry.get_or_init(FakeRegistry::start)
+    }
 
-        // Build the object path the same way storage.rs does
-        let obj_url = gitscale::storage::object_url(
-            self.artefacts_remote.to_str().unwrap(),
-            repo_url,
-            revision,
+    /// Publish to and pull from the registry at `addr` (`host:port`) rather
+    /// than the fake one — for the conformance tests.
+    pub fn use_registry(&self, addr: &str) {
+        let _ = self.registry_override.set(addr.to_string());
+    }
+
+    fn registry_addr(&self) -> String {
+        match self.registry_override.get() {
+            Some(addr) => addr.clone(),
+            None => self.registry().addr.clone(),
+        }
+    }
+
+    /// The `[registries]` table that maps every repository under
+    /// `repos_remote` to this environment's registry: `<name>.git` publishes
+    /// as `<addr>/<name>/gitscale`.
+    pub fn registries(&self) -> String {
+        format!(
+            "[registries]\n\"{}/\" = \"{}\"\n\n",
+            self.repos_remote.display(),
+            self.registry_addr()
+        )
+    }
+
+    /// The image repository `bare` publishes to, as the registry names it.
+    pub fn image(&self, bare: &Path) -> String {
+        let name = bare.file_stem().unwrap().to_string_lossy().to_lowercase();
+        format!("{}/gitscale", name)
+    }
+
+    /// A repository with an artefact published for the head of `main`:
+    /// `files` as the build output, one layer. Returns the bare repo, which
+    /// is what an artefact entry's `url` names.
+    pub fn artefact_repo(&self, name: &str, files: &[(&str, &str)]) -> PathBuf {
+        let bare = self.create_bare_repo(name, "main", &[("README.md", name)]);
+        self.publish(&bare, "main", files);
+        bare
+    }
+
+    /// Publish `files` as the artefact of the commit `revision` names in
+    /// `bare`, with gitscale's own `artefact publish`. Returns the commit.
+    pub fn publish(&self, bare: &Path, revision: &str, files: &[(&str, &str)]) -> String {
+        let artefact = "[artefact]\nroot = \"dist\"\ninclude = [\"**\"]\n";
+        let (out, commit) = self.publish_with(bare, revision, artefact, files, &[]);
+        assert!(out.success, "publish failed:\n{}{}", out.stdout, out.stderr);
+        commit
+    }
+
+    /// Publish from a fresh checkout of `revision` with the given `[artefact]`
+    /// table, build output and extra arguments. Returns the command's output
+    /// and the commit published for.
+    pub fn publish_with(
+        &self,
+        bare: &Path,
+        revision: &str,
+        artefact_toml: &str,
+        files: &[(&str, &str)],
+        args: &[&str],
+    ) -> (CliOutput, String) {
+        let producer = self.producer(bare, revision);
+        for (name, content) in files {
+            let path = producer.join("dist").join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+        }
+        fs::write(
+            producer.join(".gitscale.toml"),
+            format!("{}{}", self.registries(), artefact_toml),
         )
         .unwrap();
+        let mut full = vec!["artefact", "publish"];
+        full.extend_from_slice(args);
+        let out = self.run_in(&producer, &full);
+        let commit = git_stdout(&producer, &["rev-parse", "HEAD"]);
+        (out, commit)
+    }
 
-        let obj_path = PathBuf::from(&obj_url);
-        if let Some(parent) = obj_path.parent() {
-            fs::create_dir_all(parent).unwrap();
+    /// A fresh checkout of `bare` at `revision`, where a producer's build
+    /// would run.
+    pub fn producer(&self, bare: &Path, revision: &str) -> PathBuf {
+        let name = bare.file_stem().unwrap().to_string_lossy().into_owned();
+        let producer = self.repos_remote.join(format!("{}-producer", name));
+        let _ = fs::remove_dir_all(&producer);
+        run_git(
+            &self.repos_remote,
+            &[
+                "clone",
+                "--quiet",
+                bare.to_str().unwrap(),
+                producer.to_str().unwrap(),
+            ],
+        );
+        run_git(&producer, &["checkout", "--quiet", revision]);
+        producer
+    }
+
+    /// Add a commit to `branch` of `bare`. Returns the new commit.
+    pub fn push_commit(&self, bare: &Path, branch: &str, file: &str, content: &str) -> String {
+        let work = self.repos_remote.join("push-tmp");
+        let _ = fs::remove_dir_all(&work);
+        run_git(
+            &self.repos_remote,
+            &[
+                "clone",
+                "--quiet",
+                "--branch",
+                branch,
+                bare.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ],
+        );
+        run_git(&work, &["config", "user.email", "test@test.com"]);
+        run_git(&work, &["config", "user.name", "Test"]);
+        fs::write(work.join(file), content).unwrap();
+        run_git(&work, &["add", "."]);
+        run_git(&work, &["commit", "--quiet", "-m", "change"]);
+        run_git(&work, &["push", "--quiet", "origin", branch]);
+        let commit = git_stdout(&work, &["rev-parse", "HEAD"]);
+        let _ = fs::remove_dir_all(&work);
+        commit
+    }
+
+    /// Run gitscale with `-C dir`, for a command aimed somewhere other than
+    /// the playground. Rendering is forced plain and sequential: the harness
+    /// may run under a TTY, and interactive mode would emit parallel progress
+    /// bars to stderr instead of the deterministic stdout the snapshots
+    /// capture.
+    pub fn run_in(&self, dir: &Path, args: &[&str]) -> CliOutput {
+        let mut full_args = vec!["gitscale"];
+        if let Some((subcmd, rest)) = args.split_first() {
+            full_args.push(subcmd);
+            // `artefact publish` and `cache …` take -C after their own
+            // subcommand.
+            if (*subcmd == "artefact" || *subcmd == "cache") && !rest.is_empty() {
+                full_args.push(rest[0]);
+                full_args.push("-C");
+                full_args.push(dir.to_str().unwrap());
+                full_args.extend_from_slice(&rest[1..]);
+            } else {
+                full_args.push("-C");
+                full_args.push(dir.to_str().unwrap());
+                full_args.extend_from_slice(rest);
+            }
         }
-
-        let file = fs::File::create(&obj_path).unwrap();
-        let enc = GzEncoder::new(file, Compression::default());
-        let mut builder = Builder::new(enc);
-
-        for (name, content) in files {
-            let mut header = tar::Header::new_gnu();
-            header.set_size(content.len() as u64);
-            header.set_mode(0o644);
-            header.set_cksum();
-            builder
-                .append_data(&mut header, name, content.as_bytes())
-                .unwrap();
-        }
-
-        builder.finish().unwrap();
+        run_cli_with(&full_args, false)
     }
 
     /// Write a .gitscale.toml config in the playground directory.
@@ -206,25 +327,9 @@ impl TestEnv {
         self.run_binary_with(None, vars, args)
     }
 
-    /// Storage URL pointing to local artefact dir.
-    pub fn storage_url(&self) -> String {
-        self.artefacts_remote.to_str().unwrap().to_string()
-    }
-
     /// Run gitscale CLI with extra args, using this env's playground as root.
     pub fn run(&self, args: &[&str]) -> CliOutput {
-        let mut full_args = vec!["gitscale"];
-        // Insert subcommand first, then -C root, then remaining args
-        if let Some((subcmd, rest)) = args.split_first() {
-            full_args.push(subcmd);
-            full_args.push("-C");
-            full_args.push(self.playground.to_str().unwrap());
-            full_args.extend_from_slice(rest);
-        }
-        // Force plain, sequential rendering: the harness may run under a TTY,
-        // and interactive mode would emit parallel progress bars to stderr
-        // instead of the deterministic stdout the snapshots capture.
-        run_cli_with(&full_args, false)
+        self.run_in(&self.playground, args)
     }
 
     /// Run the real gitscale binary as a subprocess with the allowlist the
@@ -322,13 +427,36 @@ impl Drop for TestEnv {
         let base = tests_base();
         let _ = fs::remove_dir_all(base.join("playground").join(&self.name));
         let _ = fs::remove_dir_all(base.join("repos-remote").join(&self.name));
-        let _ = fs::remove_dir_all(base.join("artefacts-remote").join(&self.name));
         let _ = fs::remove_dir_all(base.join("cache").join(&self.name));
     }
 }
 
 fn run_git(cwd: &Path, args: &[&str]) {
     run_git_pub(cwd, args);
+}
+
+/// A git command's trimmed stdout, which must succeed.
+pub fn git_stdout(cwd: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("failed to run git");
+    assert!(
+        output.status.success(),
+        "git {:?} in {} failed: {}",
+        args,
+        cwd.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// Replace every 7- or 40-digit hex commit with `[sha]`, for snapshots of
+/// output that names commits made at test time.
+pub fn redact_shas(text: &str) -> String {
+    let re = regex::Regex::new(r"\b[0-9a-f]{40}\b|\b[0-9a-f]{7}\b").unwrap();
+    re.replace_all(text, "[sha]").to_string()
 }
 
 pub fn run_git_pub(cwd: &Path, args: &[&str]) {

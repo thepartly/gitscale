@@ -13,6 +13,7 @@
 - [`gitscale status`](#gitscale-status)
 - [`gitscale add`](#gitscale-add)
 - [`gitscale remove`](#gitscale-remove)
+- [`gitscale artefact`](#gitscale-artefact)
 - [`gitscale cache`](#gitscale-cache)
 - [`gitscale hook`](#gitscale-hook)
 
@@ -38,6 +39,7 @@ command.
 | [`clean`](#gitscale-clean) | Remove untracked files, safely |
 | [`status`](#gitscale-status) | Report the state of every declared repository |
 | [`add`](#gitscale-add) / [`remove`](#gitscale-remove) | Edit `.gitscale.toml` |
+| [`artefact`](#gitscale-artefact) | Publish this repository's build output as an artefact, and see what the registry holds |
 | [`cache`](#gitscale-cache) | Inspect and maintain the object cache |
 | [`hook`](#gitscale-hook) | Install or inspect GitScale's git hooks |
 
@@ -66,7 +68,8 @@ The multi-repository commands print one line per repository:
 
 ```
   ok    imports/core
-  skip  meta/art (artefact)
+  ok    meta/art (artefact 3f2a9c1)
+  skip  libs/shared (symlink)
   FAIL  imports/utils: fatal: Could not read from remote repository.
 ```
 
@@ -113,8 +116,9 @@ gitscale fetch [OPTIONS] [NAMES...]
 ```
 
 Update remote state without modifying working trees: `git fetch` for git
-entries (through the cache), a HEAD request for artefact entries. Entries with
-no checkout are skipped. See [workflow → fetch](workflow.md#fetch).
+entries (through the cache); for artefact entries, the commit the revision
+names and whether it has an image, recorded without downloading anything — a
+commit with no image fails. Git entries with no checkout are skipped. See [workflow → fetch](workflow.md#fetch).
 
 ## `gitscale pull`
 
@@ -231,6 +235,37 @@ gitscale remove [OPTIONS] <DIRECTORY>
 Removes the entry from `.gitscale.toml`. Fails if it is not declared. The
 directory on disk is left alone — delete it yourself.
 
+## `gitscale artefact`
+
+```
+gitscale artefact <publish|show|list> [OPTIONS]
+```
+
+| Subcommand | Purpose |
+|---|---|
+| [`publish`](artefacts.md#artefact-publish) | Pack the files this repository's [`[artefact]`](configuration.md#artefact) table selects — one layer per group — and push them to its registry as the image for one commit. Run in the pipeline, after the build |
+| [`show`](artefacts.md#artefact-show) | For each artefact entry: the image, the commit its revision names now, whether that commit is published and with what layers, what is installed, and how the two compare. Takes optional `NAMES...` |
+| [`list`](artefacts.md#artefact-list) | The commits each artefact entry has images for, labelled with the branches and tags that name them now, and which one is installed. Takes optional `NAMES...` |
+
+| Option | Subcommand | Meaning |
+|---|---|---|
+| `-C, --root <PATH>` | all | Where to look for `.gitscale.toml`: the producing repository's for `publish`, the workspace's for `show` and `list` |
+| `--commit <SHA>` | `publish` | The commit to publish for, as a full SHA. Default: the CI job's commit (`CI_COMMIT_SHA`, `GITHUB_SHA`), else `HEAD` |
+| `--force` | `publish` | Replace an image already published for this commit with different files. Without it that is an error; publishing the same files again is always a no-op |
+| `--dry-run` | `publish` | List every file of every layer and the layer digests, and send nothing. Needs no registry and no commit — the way to check what the patterns select |
+
+`show` and `list` change nothing: they ask the remote and the registry, and
+read what is installed. Naming an entry that is not an artefact entry is an
+error.
+
+```
+gitscale artefact publish
+gitscale artefact publish --dry-run
+gitscale artefact show
+gitscale artefact show meta/app
+gitscale artefact list meta/app
+```
+
 ## `gitscale cache`
 
 ```
@@ -239,11 +274,11 @@ gitscale cache <status|update|adopt|repair|compact> [OPTIONS]
 
 | Subcommand | Purpose |
 |---|---|
-| [`status`](caching.md#cache-status) | What the cache holds, one row per repository. `-v` also lists every ref a mirror holds |
-| [`update`](caching.md#cache-update) | Refresh entries without touching any checkout. Takes optional `NAMES...` |
+| [`status`](caching.md#cache-status) | What the cache holds, one row per repository: mirrors, snapshots and artefact images. `-v` also lists every ref a mirror holds |
+| [`update`](caching.md#cache-update) | Refresh entries without touching any checkout; an artefact entry downloads the image its revision names. Takes optional `NAMES...` |
 | [`adopt`](caching.md#cache-adopt) | Relink the workspace root to the cache now, whatever `adopt_root` says, and say why when it will not |
-| [`repair`](caching.md#cache-repair) | Re-create entries this workspace borrows from but that are gone. Takes optional `NAMES...` |
-| [`compact`](caching.md#cache-compact) | Repack entries and evict the ones nothing used lately |
+| [`repair`](caching.md#cache-repair) | Re-create entries this workspace borrows from but that are gone, and check every cached artefact blob against its digest. Takes optional `NAMES...` |
+| [`compact`](caching.md#cache-compact) | Repack entries and evict the ones nothing used lately, artefact images included |
 
 | Option | Subcommand | Meaning |
 |---|---|---|

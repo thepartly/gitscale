@@ -2,13 +2,13 @@ use anyhow::{bail, Context, Result};
 use std::io::Write;
 use std::path::Path;
 
+use crate::artefact::{is_empty_dir, Artefacts};
 use crate::cache::Cache;
 use crate::commands::cache::Sources;
 use crate::config::{filter_entries, load_workspace, CacheSettings, RepoEntry, CONFIG_FILENAME};
 use crate::git::{clone_repo, pull_repo};
 use crate::progress::{run_entries, RepoStatus};
 use crate::resolve::is_outer_link;
-use crate::storage::{clone_artefact, holds_only_markers, is_downloaded};
 
 pub fn run(
     root: Option<&Path>,
@@ -40,8 +40,8 @@ pub fn run(
         return Ok(());
     }
 
-    let storage_url = &config.storage_url;
     let sources = Sources::adopting(&config, &config_root, no_cache, verbose, out)?;
+    let artefacts = Artefacts::new(&config, &config_root, sources.cache.clone());
 
     run_entries(
         "Cloning missing repos...",
@@ -66,17 +66,18 @@ pub fn run(
             }
 
             if entry.is_artefact() {
-                // A directory holding only the markers a fetch writes is not
-                // a download yet; anything else already there is left alone.
-                if is_downloaded(&dest) || (dest.exists() && !holds_only_markers(&dest)) {
+                // An installed artefact, or anything else already there, is
+                // left alone — `pull` is what replaces one. An empty
+                // directory is filled.
+                if !is_empty_dir(&dest) {
                     return RepoStatus::Skip(format!("{} (already exists)", name));
                 }
-                if storage_url.is_empty() {
-                    return RepoStatus::Fail(format!("{}: no [storage] configured", name));
-                }
-                return match clone_artefact(storage_url, &entry.repo_url, &entry.revision, &dest) {
-                    Ok(true) => RepoStatus::Ok(format!("{} (artefact)", name)),
-                    Ok(false) => RepoStatus::Skip(format!("{} (no artefact data)", name)),
+                return match artefacts.clone(entry, &dest) {
+                    Ok(commit) => RepoStatus::Ok(format!(
+                        "{} (artefact {})",
+                        name,
+                        crate::git::short_sha(&commit)
+                    )),
                     Err(e) => RepoStatus::Fail(format!("{}: {}", name, e)),
                 };
             }

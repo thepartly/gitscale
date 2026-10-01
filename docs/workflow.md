@@ -39,7 +39,7 @@
 Cloning missing repos...
   ok    imports/rw-lib
   skip  imports/ro-lib (already exists)
-  ok    meta/art (artefact)
+  ok    meta/art (artefact 3f2a9c1)
 ```
 
 ## clone
@@ -57,20 +57,20 @@ Per entry:
 | Situation | What happens |
 |---|---|
 | Directory missing, git entry | Cloned, through the cache when it can serve it |
-| Directory missing, artefact entry | Archive downloaded and extracted |
+| Directory missing, artefact entry | The image of the commit the revision names is downloaded, checked and unpacked read-only — see [artefacts](artefacts.md#the-checkout) |
 | Checkout exists | `skip (already exists)` |
 | Directory exists but is empty | Cloned into it |
 | Directory exists, holds files but no repository | `FAIL … exists but holds no git repository`. Left as it is — [`gitscale clean -f`](clean.md#a-directory-holding-no-repository) removes it, or move it aside, and run again |
 | Path is a symlink planted by an enclosing workspace (running inside a child repository) | `skip (symlink)`, unless the entry is named — then unlinked as below |
 | Any other symlink | The symlink is removed and a real clone is made in its place |
-| Artefact entry, no `[storage]` url | `FAIL … no [storage] configured` |
-| Artefact entry, nothing in storage | `skip (no artefact data)` |
+| Artefact entry, no registry known for its host | `FAIL … no registry is known for …`, naming the [`[registries]`](configuration.md#registries) entry to add |
+| Artefact entry, the commit has no image | `FAIL … no artefact for <image>:<commit> (<revision>); its pipeline may not have published yet` |
 
 Afterwards GitScale resolves [recursive dependencies](recursive-dependencies.md):
 it reads each checkout's own `.gitscale.toml`, moves any checkout whose revision
 is adopted from a child to that revision the way [`pull`](#pull) would (a readonly
 checkout stays read-only, a shallow one fetches just that ref; an artefact keeps
-its archive), and plants the dedup symlinks.
+what it installed), and plants the dedup symlinks.
 
 Note the symlink rule: a path that is a symlink is replaced by a real clone.
 That is how a deduped [recursive dependency](recursive-dependencies.md) is
@@ -140,8 +140,10 @@ gitscale fetch imports/core        # one entry
   config has moved to arrives too. A checkout that does not exist, or a directory
   holding no repository, is skipped (`not cloned`); a symlinked (deduped) entry is
   skipped (`symlink`) — the real checkout is fetched under its own name.
-- **Artefact entries**: a HEAD request against object storage, recording the
-  remote ETag in `.etag-remote`. Nothing is downloaded or extracted.
+- **Artefact entries**: the revision is resolved to a commit with `git
+  ls-remote` and the registry is asked whether that commit has an image; both
+  are recorded, outside the checkout, for [`status`](artefacts.md#status).
+  Nothing is downloaded or extracted. A commit with no image fails the entry.
 
 Nothing that `fetch` does can change which commit is checked out — it is safe to
 run in a dirty workspace.
@@ -168,7 +170,7 @@ gitscale pull imports/core         # one entry
 | Shallow clone pinned to a SHA | That one commit is fetched and reset to |
 | CI, served by a cache snapshot | The pinned commit is taken from local disk; no network at all |
 | readonly | Made writable, updated, then made read-only again |
-| artefact | ETag compared; re-downloaded and re-extracted only if the remote differs |
+| artefact | Nothing to do, and nothing asked of the registry, when the revision still names the installed commit. Otherwise the new image is downloaded — only the layers the cache does not hold — then the files are replaced. A commit with no image fails and leaves the installed files alone |
 | Symlink planted by an enclosing workspace (running inside a child repository) | `skip (symlink)` — that checkout and its revision belong to the outer workspace's root. Named, it is unlinked as `clone` would |
 | Any other symlink | Removed and replaced by a real clone, as `clone` does |
 

@@ -14,11 +14,6 @@
   - [No revision](#no-revision)
 - [Shallow clones](#shallow-clones)
 - [Recursive dependencies](#recursive-dependencies)
-- [Artefact storage](#artefact-storage)
-  - [Supported backends](#supported-backends)
-  - [Credentials](#credentials)
-  - [Object layout](#object-layout)
-  - [Publishing artefacts](#publishing-artefacts)
 
 ## The config file
 
@@ -125,7 +120,7 @@ remove the directory by hand after `gitscale remove`, since
 |---|---|---|---|---|
 | `readwrite` | full git clone | writable | pushed | git |
 | `readonly` | git clone, write bits stripped | read-only | skipped | git |
-| `artefact` | no clone at all | read-only | skipped | `tar.gz` from object storage |
+| `artefact` | no clone at all | read-only | skipped | an OCI image from a registry |
 
 ### readwrite (default)
 
@@ -150,28 +145,25 @@ pointless. See [shallow clones](#shallow-clones).
 
 ### artefact
 
-No git clone happens. GitScale downloads `<revision>.tar.gz` from the configured
-[artefact storage](#artefact-storage) and extracts it into the entry's
-directory. The archive's content is opaque to GitScale — it can hold anything.
+No git clone happens. The source repository's pipeline publishes its build
+output to an OCI registry — GitLab's, GHCR, or any other — as one image per
+commit, and the entry installs the image of the commit its revision names,
+read-only. The revision is resolved with `git ls-remote` exactly as for a git
+entry, so the files always match the commit a checkout would get; a commit with
+no image is an error.
 
-- `clone` downloads and extracts.
-- `fetch` issues a HEAD request and records the remote ETag in `.etag-remote`.
-- `pull` compares ETags, and re-downloads only when the remote one differs. On
-  re-download the directory's contents are removed and replaced (files whose
-  name starts with `.`, such as the ETag markers, are kept).
-- `push` and `commit` skip artefact entries: artefacts are published by whatever
-  builds them, not by GitScale.
+```toml
+"meta/frontend" = { url = "https://github.com/org/frontend.git", revision = "main", mode = "artefact" }
+```
 
-Two marker files live in the directory: `.etag` (what is extracted right now)
-and `.etag-remote` (what the last HEAD saw). `gitscale status` reports an
-artefact as behind when they differ.
+The image's location follows from `url` (`ghcr.io/org/frontend/gitscale`
+here). A commit has to be spelled out in full, as for
+[any entry](#commit-sha). `push` and `commit` skip
+artefact entries, [`clean`](clean.md) keeps them whole, and their images are
+kept in the [object cache](caching.md).
 
-Every extracted file, at any depth, has its write bits cleared. Top-level
-dot-entries are left alone: they hold GitScale's own markers, which each fetch
-rewrites.
-
-Artefact entries are never put in the object cache — an unpacked archive has no
-object store — and they are skipped by [`clean`](clean.md).
+Publishing, registries, logging in, pipelines and status flags are all on
+[their own page](artefacts.md).
 
 ## Pinning a revision
 
@@ -220,11 +212,13 @@ Some git servers refuse to serve an arbitrary commit. If the fetch is rejected,
 GitScale falls back to a full clone and checks the revision out normally. GitHub
 and GitLab both permit it.
 
-> **A revision of 7–64 hexadecimal characters is treated as a SHA.** A branch or
-> tag whose name happens to be entirely hexadecimal (`abcdef1`) therefore takes
-> the SHA path too. It still resolves to the right commit, but the checkout ends
-> up detached rather than on the branch. Rename the ref if you need to stay on
-> it.
+> **A commit is always its full SHA**: 40 hex digits, or 64 in a repository
+> using SHA-256 (`git init --object-format=sha256`). Anything else is a branch
+> or tag name — so a tag called `20241001` is checked out as the tag it is.
+> An abbreviated SHA is refused, on a developer machine as in CI: a full clone
+> could expand it, a shallow one cannot, and an entry must not work in one place
+> and fail in the other. The error says to run `git rev-parse <short>` in a
+> checkout to get the full one.
 
 ### No revision
 
@@ -232,8 +226,8 @@ Omitting `revision` leaves the choice to the remote's default branch — except
 where a [recursive dependency](recursive-dependencies.md) supplies one, which is
 how a root config can defer the decision to the repositories that actually care.
 
-For an artefact entry, an omitted revision means the archive is looked up under
-the name `HEAD`.
+For an artefact entry, an omitted revision means the commit the remote's
+default branch is on.
 
 ## Shallow clones
 
@@ -260,80 +254,6 @@ requires everything it declares to also be declared at the root, and creates a
 symlink instead of a second checkout. Turn it off per entry with
 `recursive = false`. The whole mechanism — hoisting, dedup, and the
 version-mismatch check — is [its own page](recursive-dependencies.md).
-
-## Artefact storage
-
-`mode = "artefact"` entries need a `[storage]` table saying where archives live:
-
-```toml
-[storage]
-url = "https://my-bucket.s3.us-east-1.amazonaws.com/gitscale"
-```
-
-If the table is present, `url` is required and must be non-empty. Without a
-`[storage]` url, artefact entries fail with `no [storage] configured`; git
-entries are unaffected.
-
-### Supported backends
-
-Any S3-compatible service works with the same URL shape. Requests are signed
-with AWS Signature V4 built into GitScale — no `aws` CLI or SDK involved.
-
-| Service | Example URL |
-|---|---|
-| AWS S3 | `https://my-bucket.s3.us-east-1.amazonaws.com/prefix` |
-| MinIO | `https://minio.corp.com:9000/my-bucket/prefix` |
-| Cloudflare R2 | `https://<account>.r2.cloudflarestorage.com/my-bucket/prefix` |
-| Backblaze B2 | `https://s3.us-west-004.backblazeb2.com/my-bucket/prefix` |
-| DigitalOcean Spaces | `https://nyc3.digitaloceanspaces.com/my-bucket/prefix` |
-| Google Cloud Storage | `https://storage.googleapis.com/my-bucket/prefix` |
-| Local directory | `/srv/artefacts` or `file:///srv/artefacts` |
-
-A URL on `storage.googleapis.com` is detected as GCS and uses bearer-token auth;
-one starting with `/`, `./` or `file://` is read straight off the filesystem;
-everything else is treated as S3.
-
-### Credentials
-
-Set through the environment. Local-directory storage needs none.
-
-S3-compatible (AWS, MinIO, R2, B2, Spaces):
-
-```
-export AWS_ACCESS_KEY_ID=your-key
-export AWS_SECRET_ACCESS_KEY=your-secret
-export AWS_DEFAULT_REGION=us-east-1   # optional; otherwise derived from the URL, else us-east-1
-```
-
-Google Cloud Storage:
-
-```
-export GOOGLE_TOKEN=$(gcloud auth print-access-token)
-# GCLOUD_ACCESS_TOKEN is accepted as well
-```
-
-### Object layout
-
-```
-{storage_url}/{host}/{owner}/{repo}/{revision}.tar.gz
-```
-
-Slashes in a revision become `_`, so `release/1.2` is stored as `release_1.2`.
-An empty revision is stored, and looked up, as `HEAD`.
-
-With `url = "https://bucket.s3.amazonaws.com/meta"` and an entry at
-`https://github.com/org/app.git` on revision `main`:
-
-```
-https://bucket.s3.amazonaws.com/meta/github.com/org/app/main.tar.gz
-```
-
-### Publishing artefacts
-
-GitScale consumes artefacts; it has no publish command. Whatever builds the
-archive — normally a CI job in the source repository — writes it to that path
-itself. Extraction refuses any archive entry whose path escapes the destination
-directory.
 
 ---
 

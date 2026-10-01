@@ -51,7 +51,7 @@ Baseline for every candidate: *should rely and work with git repositories.*
 
 | Tool | Config | Approach | R1 any content | R2 large prebuilt | R3 partial share | R4 versions | R5 deps: transitive, dedup, mismatch | R6 SDK ↔ full stack | R7 auto + DX | R8 worktrees + local reuse |
 |------|--------|----------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| **GitScale** | single `.gitscale.toml` | separate clones + symlinks | ✔ | ✔ S3 artefacts | ✔ artefact mode | ✔ one pinned config | ✔ recursive, symlink dedup, errors on conflicting revisions | ✔ readonly/artefact ↔ readwrite | ✔ git hooks, shallow, one status | ✔ auto-populated by hook, `--reference` reuse, opt-in `dissociate` |
+| **GitScale** | single `.gitscale.toml` | separate clones + symlinks | ✔ | ✔ OCI artefacts | ✔ artefact mode | ✔ one pinned config | ✔ recursive, symlink dedup, errors on conflicting revisions | ✔ readonly/artefact ↔ readwrite | ✔ git hooks, shallow, one status | ✔ auto-populated by hook, `--reference` reuse, opt-in `dissociate` |
 | git submodules | `.gitmodules` + gitlink | separate clones | ✔ | ✘ | ✘ whole repo only | ✔ pinned SHA | `~` recursive, but nested copies and silent divergence | ✘ | ✘ needs `--recursive` | `~` `--reference` propagates, but `worktree add` leaves empty dirs |
 | git subtree | none (in-tree) | merged into main tree | ✔ | ✘ | `~` per-prefix | `~` SHA buried in merges | ✘ | ✘ | `~` in-tree, awkward updates | ✔ in-tree — nothing extra to clone |
 | [git-subrepo](https://github.com/ingydotnet/git-subrepo) | `.gitrepo` per subdir | merged into main tree | ✔ | ✘ | `~` per-subdir | ✔ `.gitrepo` records commit | ✘ | ✘ | `~` in-tree, extra binary | ✔ in-tree — nothing extra to clone |

@@ -5,6 +5,7 @@
   - [Where objects come from](#where-objects-come-from)
   - [Where the cache lives](#where-the-cache-lives)
   - [Mirrors and snapshots](#mirrors-and-snapshots)
+  - [Artefact entries](#artefact-entries)
   - [What changes in CI](#what-changes-in-ci)
   - [Guarantees and limits](#guarantees-and-limits)
   - [Turning it off](#turning-it-off)
@@ -86,15 +87,23 @@ Resolved in this order:
 Inside it:
 
 ```
-mirror/<name>.git       full mirrors
-snapshots/<name>.git    shallow pin holders
-locks/<name>.lock       one advisory lock per entry
+mirror/<name>.git              full mirrors (git entries, developer machines)
+snapshots/<name>.git           shallow pin holders (git entries, CI)
+artefacts/<name>/              one OCI image layout per artefact repository
+  oci-layout
+  index.json                   the images held, each annotated with its commit
+  blobs/sha256/<digest>        manifests and layers
+  gitscale-last-used           touched on every hit
+  gitscale-pins/<commit>       touched whenever that commit's image is used
+locks/<name>.lock              one advisory lock per entry
 ```
 
 `<name>` is a readable slug of `host/owner/repo` plus a short digest of the
 canonical URL, so two repositories that differ only where the slug flattens them
 still get separate entries, and nothing can escape the cache directory.
-Different transports of one repository — SSH and HTTPS — share an entry.
+Different transports of one repository — SSH and HTTPS — share an entry. An
+artefact entry has the same name without the `.git`, so a repository's entries
+line up across kinds.
 
 **Per-user, and only per-user.** There is no system-wide scope and no shared
 directory GitScale will create: a mirror several users write through would give
@@ -126,6 +135,27 @@ repointed at the real URL and the temporary `pin/<sha>` branch is dropped.
 Resolving a pin costs at most one ref advertisement: a SHA needs no network at
 all, and a branch or tag costs one `git ls-remote` — no objects. If the head has
 not moved, the commit is already in the entry and nothing further transfers.
+
+## Artefact entries
+
+[Artefact](artefacts.md) images are cached too, one OCI image layout per
+repository, the same on developer machines and in CI. The rule holds: **refs
+come from the remote, bytes come from the cache.** A `clone` or `pull` still
+resolves the revision with `ls-remote` and asks the registry for the image's
+digest; only the blobs are served locally.
+
+1. The manifest is taken from the entry if its digest is there, otherwise
+   downloaded into it.
+2. Each layer is taken from the entry if it is there, otherwise downloaded into
+   it — under the entry's lock, so N cold jobs at once download each blob once.
+3. Every blob is checked against its digest when it is read from the entry; one
+   that fails is deleted and downloaded again.
+4. The checkout gets **copies**: the layers are unpacked into it, never linked.
+5. `gitscale-last-used` and the commit's pin marker are touched.
+
+A layer several commits share — a `vendor` group that rarely changes — is stored
+once. Nothing borrows from an artefact entry, so deleting one under a running
+command, or all of them, never breaks a workspace: it costs a download.
 
 ## What changes in CI
 
@@ -172,8 +202,9 @@ costs nothing and saves nothing.
 - **Entries never garbage-collect themselves.** `gc.auto = 0` is set on every
   entry at creation, because `repack -d` can delete objects a live borrower
   still needs. Only [`cache compact`](#cache-compact) repacks.
-- **Artefact entries are never cached.** An unpacked archive has no object
-  store.
+- **A damaged artefact blob is never used.** Every blob is named by its digest
+  and checked against it on each read; a mismatch is deleted and downloaded
+  again.
 
 ## Turning it off
 
@@ -298,13 +329,16 @@ gitscale cache status -v        # also list every ref a mirror holds
 ```
 
 ```
-cache  /home/dev/.local/share/gitscale  (4 entries, 104.8 KiB)
+cache  /home/dev/.local/share/gitscale  (5 entries, 3.2 MiB)
 
-  REPO             MIRROR  SNAPSHOTS     TOTAL  REVS  LAST USED
-  imports/core   26.2 KiB          -  26.2 KiB     9  2 hours ago
-  imports/utils         -   26.2 KiB  26.2 KiB     2  just now
+  REPO             MIRROR  SNAPSHOTS  ARTEFACTS     TOTAL  REVS  LAST USED
+  imports/core   26.2 KiB          -          -  26.2 KiB     9  2 hours ago
+  imports/utils         -   26.2 KiB          -  26.2 KiB     2  just now
       c6e8981  just now
       7373937  6 days ago
+  meta/app              -          -    3.1 MiB   3.1 MiB     2  just now
+      3f2a9c1  just now
+      9fceb02  3 weeks ago
 ```
 
 One line per **repository**, not per entry — a machine that both develops and
@@ -316,12 +350,13 @@ the cache's own entry name when this workspace does not declare them.
 |---|---|
 | `MIRROR` | The mirror entry's size, or `-` if there is none |
 | `SNAPSHOTS` | The snapshot entry's size, holding every pinned commit |
-| `TOTAL` | Both together — what this repository costs the cache |
-| `REVS` | Revisions held: a mirror's branches and tags, a snapshot's pins |
-| `LAST USED` | When anything last read either entry |
+| `ARTEFACTS` | The artefact entry's size, holding every cached image |
+| `TOTAL` | All together — what this repository costs the cache |
+| `REVS` | Revisions held: a mirror's branches and tags, a snapshot's pins, the commits an artefact entry has images for |
+| `LAST USED` | When anything last read any of its entries |
 
-Pins are listed under their row with their own age, because that is what
-`compact` drops one at a time. A mirror's refs are counted in `REVS` but listed
+Pins and artefact commits are listed under their row with their own age,
+because that is what `compact` drops one at a time. A mirror's refs are counted in `REVS` but listed
 only under `-v`: a busy repository has hundreds, and that is not a summary.
 
 Like `compact`, this works from anywhere — the cache belongs to the user, not to
@@ -338,7 +373,9 @@ Refresh entries without touching any checkout — the one command that warms a
 repository nobody has pulled yet. On a developer machine it updates mirrors; in
 CI it adds a pin for each entry's revision, reporting
 `imports/core (pinned at 9fceb02)`, and skips anything it cannot pin
-(`nothing to pin`). `-v` prints the cache's total size afterwards.
+(`nothing to pin`). An artefact entry downloads the image its revision names
+now, on either, reporting `meta/app (artefact 3f2a9c1)`. `-v` prints the
+cache's total size afterwards.
 
 ### cache adopt
 
@@ -378,6 +415,11 @@ deleted cannot read its own history, and git reports nothing until something
 tries to read an object. The workspace's own root repository is checked too,
 once it has been [adopted](#adopting-a-root-repository).
 
+An artefact entry has no borrowers to mend. Instead every blob it holds is
+checked against its digest, and the damaged ones deleted —
+`repair meta/app (1 damaged blob removed)` — to be downloaded again the next
+time they are wanted.
+
 ### cache compact
 
 ```
@@ -388,7 +430,9 @@ gitscale cache compact --keep-recent 2weeks
 Repack every entry and evict the ones nothing has used within `--keep-recent`
 (default `12months`). Each entry carries a last-used marker touched on every hit,
 and each pinned commit carries its own — so a snapshot entry in daily use can
-still shed the pins that have gone cold.
+still shed the pins that have gone cold. An artefact entry drops the images of
+the commits whose markers have gone cold, then deletes every blob no remaining
+image needs — which also clears what a forced re-publish left behind.
 
 A hit is any `clone`, `fetch`, `pull`, `sync` or `cache update` that goes
 through the entry, a CI job taking a pin, adoption, and — for the entry a
@@ -402,8 +446,8 @@ number is a count of days.
 
 **Mirrors are repacked but never pruned.** `repack -d` is the one operation that
 can delete objects a live borrower still needs, and nothing warns when it does.
-Snapshots have no borrowers — a job copies what it takes — so those are pruned
-properly.
+Snapshots and artefact entries have no borrowers — a job copies what it takes —
+so those are pruned properly.
 
 Works from anywhere, with or without a config.
 

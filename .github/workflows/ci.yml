@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      # The reference OCI registry, for tests/registry_conformance.rs. Without
+      # GITSCALE_TEST_REGISTRY those tests skip themselves; here they run, and
+      # the interop ones use the runner's own skopeo.
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+    env:
+      CARGO_TERM_COLOR: always
+      GITSCALE_TEST_REGISTRY: localhost:5000
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      # .cargo/config.toml blanks the runner's CI, GITHUB_ACTIONS and token
+      # variables for every process cargo starts, so the suite tests the
+      # developer-machine behaviour it asserts; the CI tests set their own.
+      - name: Test
+        run: cargo test --locked

@@ -28,13 +28,16 @@ pub fn owning_entry<'a>(link_path: &Path, entries: &'a [RepoEntry]) -> Option<&'
 /// transitive dependencies are declared at root level, resolve empty revisions,
 /// and return the list of symlinks to create.
 ///
-/// Returns `(symlinks, resolved_revisions)` where `resolved_revisions` is a
-/// list of `(directory, revision)` pairs for root repos whose revision was
-/// empty and got adopted from a child config.
+/// `(directory, revision)` for each root repo whose revision was empty and got
+/// adopted from a child config.
+pub type Adopted = Vec<(String, String)>;
+
+/// Returns `(symlinks, resolved_revisions)`: the links to plant, and the
+/// revisions root repos adopted — see [`Adopted`].
 pub fn resolve_recursive(
     root_repos: &[RepoEntry],
     config_root: &Path,
-) -> Result<(Vec<SymlinkEntry>, Vec<(String, String)>)> {
+) -> Result<(Vec<SymlinkEntry>, Adopted)> {
     let mut symlinks = Vec::new();
     // Track revision adoption: normalized_url -> (revision, source_child_directory)
     let mut adopted: HashMap<String, (String, String)> = HashMap::new();

@@ -11,7 +11,7 @@ GitScale manages several git repositories as one workspace, from a single
 
 | | |
 |---|---|
-| 2.1 | [Declaring dependencies](dependencies.md) — adding and removing entries, the three checkout modes, pinning to a branch, tag or SHA, and artefact storage |
+| 2.1 | [Declaring dependencies](dependencies.md) — adding and removing entries, the three checkout modes, and pinning to a branch, tag or SHA |
 | 2.2 | [Status](status.md) — reading `gitscale status`, every flag it prints, and its JSON output |
 | 2.3 | [Recursive dependencies](recursive-dependencies.md) — transitive deps, hoisting to the root, symlink dedup, and the version-mismatch check |
 | 2.4 | [Everyday workflow](workflow.md) — `clone`, `fetch`, `pull`, `push`, `sync`, `commit` |
@@ -19,6 +19,7 @@ GitScale manages several git repositories as one workspace, from a single
 | 2.6 | [Hooks](hooks.md) — `[hooks]` config commands, and installing GitScale as a git hook |
 | 2.7 | [CI authentication](ci-authentication.md) — using the runner's own job token, with no pipeline setup |
 | 2.8 | [Cleaning](clean.md) — `gitscale clean`, and what it always keeps |
+| 2.9 | [Artefacts](artefacts.md) — publishing build output to an OCI registry, one image per commit, and installing it in place of a checkout |
 
 **3. [Configuration file reference](configuration.md)** — every table, key and
 environment variable.

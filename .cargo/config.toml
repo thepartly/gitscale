@@ -22,6 +22,14 @@ GIT_CONFIG_NOSYSTEM = "1"
 # itself set `[cache] dir` and get a directory of their own on top of this.
 GITSCALE_CACHE_DIR = { value = "target/gitscale-test-cache", relative = true }
 
+# Registry logins: an artefact command that meets a 401 looks for what
+# `docker login` or `podman login` stored, which on a developer's machine may
+# run a credential helper (a keychain prompt, say) and would hand the tests
+# whatever that user happens to be logged in to. Pointed at paths that do not
+# exist; tests about stored logins set their own on the subprocess.
+DOCKER_CONFIG = { value = "target/gitscale-test-docker", relative = true }
+REGISTRY_AUTH_FILE = { value = "target/gitscale-test-docker/auth.json", relative = true }
+
 # Run under a CI job, the suite would otherwise inherit the job's own markers,
 # and every in-process test would switch to CI behaviour — shallow checkouts,
 # snapshot entries, failing hooks, checkouts scrubbed after each pull — while

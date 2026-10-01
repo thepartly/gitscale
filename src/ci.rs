@@ -44,6 +44,11 @@ pub struct CiAuth {
     pub username: String,
     /// Name of the environment variable holding the token — never its value.
     pub token_env: String,
+    /// The container registry this CI server owns, as `host[:port]`: the one
+    /// registry the job token may be sent to. GitLab names it in
+    /// `CI_REGISTRY`; GitHub's is `ghcr.io`, or `containers.<host>` on
+    /// GitHub Enterprise Server.
+    pub registry: Option<String>,
 }
 
 /// The CI credentials for this process, detected once.
@@ -126,6 +131,35 @@ impl CiAuth {
         )
     }
 
+    /// The token itself, read from the environment at the moment a request
+    /// needs it. Never stored, logged or put in argv.
+    pub fn token(&self) -> Option<String> {
+        std::env::var(&self.token_env)
+            .ok()
+            .filter(|t| !t.is_empty())
+    }
+
+    /// Whether the job token may be sent to `registry` (`host[:port]`), and to
+    /// the token service at `realm_host` it names. Only the registry this CI
+    /// server owns qualifies, and its token service must live on the CI
+    /// server itself — GitLab's `/jwt/auth` — or on the registry host —
+    /// GHCR's `/token`. Anything else a registry names gets no credentials.
+    pub fn trusts_registry(&self, registry: &str, realm_host: Option<&str>) -> bool {
+        let Some(owned) = &self.registry else {
+            return false;
+        };
+        if !owned.eq_ignore_ascii_case(registry) {
+            return false;
+        }
+        let registry_host = registry.split(':').next().unwrap_or(registry);
+        match realm_host {
+            None => true,
+            Some(realm) => {
+                realm.eq_ignore_ascii_case(&self.host) || realm.eq_ignore_ascii_case(registry_host)
+            }
+        }
+    }
+
     /// What to tell the user when the forge answers 403: the token was
     /// accepted as a token but is not allowed to read that project.
     pub fn forbidden_hint(&self) -> String {
@@ -168,6 +202,7 @@ fn gitlab(var: &dyn Fn(&str) -> Option<String>) -> Option<CiAuth> {
         host,
         username: "gitlab-ci-token".to_string(),
         token_env: token_env.to_string(),
+        registry: var("CI_REGISTRY").map(|r| r.to_lowercase()),
     })
 }
 
@@ -181,12 +216,18 @@ fn github(var: &dyn Fn(&str) -> Option<String>) -> Option<CiAuth> {
         .find(|name| var(name).is_some())?;
     let server = var("GITHUB_SERVER_URL").unwrap_or_else(|| "https://github.com".to_string());
     let (base_url, host) = normalize_server(&server)?;
+    let registry = if host == "github.com" {
+        "ghcr.io".to_string()
+    } else {
+        format!("containers.{}", host)
+    };
     Some(CiAuth {
         forge: Forge::GitHub,
         base_url,
         host,
         username: "x-access-token".to_string(),
         token_env: token_env.to_string(),
+        registry: Some(registry),
     })
 }
 
@@ -355,6 +396,46 @@ mod tests {
             assert!(!arg.contains(TOKEN), "token value leaked into argv: {arg}");
         }
         assert!(args.contains(&"credential.https://gitlab.example.com.helper=".to_string()));
+    }
+
+    #[test]
+    fn the_job_token_goes_only_to_the_ci_servers_own_registry() {
+        let auth = CiAuth::from_map(&HashMap::from([
+            ("CI_JOB_TOKEN", TOKEN),
+            ("CI_SERVER_URL", "https://gitlab.example.com"),
+            ("CI_REGISTRY", "registry.example.com:5050"),
+        ]))
+        .unwrap();
+        // GitLab's token service is on the CI server itself.
+        assert!(auth.trusts_registry("registry.example.com:5050", Some("gitlab.example.com")));
+        assert!(auth.trusts_registry("registry.example.com:5050", None));
+        // A token service anywhere else is refused, and so is any other registry.
+        assert!(!auth.trusts_registry("registry.example.com:5050", Some("evil.example")));
+        assert!(!auth.trusts_registry("registry.example.com", Some("gitlab.example.com")));
+        assert!(!auth.trusts_registry("ghcr.io", Some("ghcr.io")));
+        // No CI_REGISTRY: the job has no registry to send the token to.
+        assert!(!gitlab_auth().trusts_registry("registry.example.com", None));
+    }
+
+    #[test]
+    fn github_owns_ghcr_and_enterprise_owns_its_containers_host() {
+        let auth = CiAuth::from_map(&HashMap::from([
+            ("GITHUB_ACTIONS", "true"),
+            ("GITHUB_TOKEN", TOKEN),
+        ]))
+        .unwrap();
+        assert!(auth.trusts_registry("ghcr.io", Some("ghcr.io")));
+        assert!(!auth.trusts_registry("ghcr.io", Some("evil.example")));
+        let ghes = CiAuth::from_map(&HashMap::from([
+            ("GITHUB_ACTIONS", "true"),
+            ("GITHUB_TOKEN", TOKEN),
+            ("GITHUB_SERVER_URL", "https://git.corp.example"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            ghes.registry.as_deref(),
+            Some("containers.git.corp.example")
+        );
     }
 
     #[test]

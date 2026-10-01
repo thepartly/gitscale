@@ -27,6 +27,10 @@
 //!   repository as a `--reference`, which is why this one is copied rather
 //!   than borrowed — and why deleting the entry under a running job is
 //!   harmless.
+//! * **artefact** — an OCI image layout holding the images of one artefact
+//!   repository, blob by blob. Checkouts get copies of what they extract, so
+//!   like a snapshot it has no borrowers, and it is the same on developer
+//!   machines and in CI.
 
 use anyhow::{bail, Context, Result};
 use std::fs;
@@ -41,12 +45,14 @@ use crate::share::{Pinned, Reference, Source};
 const MIRRORS: &str = "mirror";
 /// Snapshot entries: `<cache>/snapshots/<entry>.git`.
 const SNAPSHOTS: &str = "snapshots";
+/// Artefact entries: `<cache>/artefacts/<entry>/`, an OCI image layout.
+const ARTEFACTS: &str = "artefacts";
 /// Advisory locks, one file per entry name.
 const LOCKS: &str = "locks";
 /// Touched on every hit, so `cache compact` can tell live entries from dead.
-const LAST_USED: &str = "gitscale-last-used";
+pub(crate) const LAST_USED: &str = "gitscale-last-used";
 /// One marker per pinned commit, touched on every hit.
-const PINS: &str = "gitscale-pins";
+pub(crate) const PINS: &str = "gitscale-pins";
 
 /// Where the cache lives, given the configured `dir` (empty for the default).
 ///
@@ -116,6 +122,13 @@ pub fn entry_name(url: &str) -> String {
     }
 }
 
+/// [`entry_name`] without the `.git` suffix, for an entry that is an image
+/// layout rather than a repository.
+pub fn artefact_entry_name(url: &str) -> String {
+    let name = entry_name(url);
+    name.strip_suffix(".git").unwrap_or(&name).to_string()
+}
+
 fn digest12(value: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -154,6 +167,18 @@ impl Cache {
 
     pub fn snapshot_path(&self, url: &str) -> PathBuf {
         self.root.join(SNAPSHOTS).join(entry_name(url))
+    }
+
+    /// The artefact entry for `url`: the same name as its git entries, less
+    /// the `.git` an image layout is not.
+    pub fn artefact_path(&self, url: &str) -> PathBuf {
+        self.root.join(ARTEFACTS).join(artefact_entry_name(url))
+    }
+
+    /// Mark an artefact entry, and the commit just served from it, as wanted.
+    pub(crate) fn touch_artefact(&self, entry: &Path, commit: &str) {
+        touch(&entry.join(LAST_USED));
+        touch(&entry.join(PINS).join(commit));
     }
 
     /// The mirror entry for `url`, brought up to date from the remote.
@@ -322,16 +347,24 @@ impl Cache {
         Ok(Some(true))
     }
 
-    /// Every entry in the cache, mirrors and snapshots alike.
+    /// Every entry in the cache, of every kind.
     pub fn entries(&self) -> Vec<Entry> {
         let mut entries = Vec::new();
-        for (kind, dir) in [(Kind::Mirror, MIRRORS), (Kind::Snapshot, SNAPSHOTS)] {
+        for (kind, dir) in [
+            (Kind::Mirror, MIRRORS),
+            (Kind::Snapshot, SNAPSHOTS),
+            (Kind::Artefact, ARTEFACTS),
+        ] {
             let Ok(listing) = fs::read_dir(self.root.join(dir)) else {
                 continue;
             };
             for found in listing.flatten() {
                 let path = found.path();
-                if is_entry(&path) {
+                let built = match kind {
+                    Kind::Artefact => crate::oci_layout::Layout::exists(&path),
+                    _ => is_entry(&path),
+                };
+                if built {
                     entries.push(Entry { kind, path });
                 }
             }
@@ -376,6 +409,16 @@ impl Cache {
     /// The revisions an entry holds: a snapshot's pins, or every ref of a
     /// mirror — which is every branch and tag the remote has.
     fn held_by(&self, entry: &Entry) -> Vec<Revision> {
+        if entry.kind == Kind::Artefact {
+            return crate::oci_layout::Layout::new(entry.path.clone())
+                .held()
+                .into_iter()
+                .map(|held| Revision {
+                    last_used: modified(&entry.path.join(PINS).join(&held.commit)),
+                    name: held.commit,
+                })
+                .collect();
+        }
         let mut args = vec!["for-each-ref", "--format=%(refname:short)"];
         if entry.kind == Kind::Snapshot {
             args.push("refs/heads/pin/");
@@ -413,7 +456,12 @@ impl Cache {
                 continue;
             }
             let before = dir_size(&entry.path);
-            if entry.kind == Kind::Snapshot {
+            if entry.kind == Kind::Artefact {
+                report.pins += self.evict_artefact_commits(&entry.path, cutoff)?;
+                // Nothing borrows from an artefact entry either: a checkout
+                // holds copies of what it extracted.
+                crate::oci_layout::Layout::new(entry.path.clone()).gc()?;
+            } else if entry.kind == Kind::Snapshot {
                 report.pins += self.evict_pins(&entry.path, cutoff)?;
                 // Nothing borrows from a snapshot — a job copies what it takes
                 // — so pruning here cannot leave anyone unable to read.
@@ -459,9 +507,25 @@ impl Cache {
         Ok(dropped)
     }
 
+    /// Forget the images of commits nothing has taken since `cutoff`.
+    fn evict_artefact_commits(&self, entry: &Path, cutoff: SystemTime) -> Result<usize> {
+        let layout = crate::oci_layout::Layout::new(entry.to_path_buf());
+        let cold: Vec<String> = layout
+            .held()
+            .into_iter()
+            .map(|held| held.commit)
+            .filter(|commit| older_than(&entry.join(PINS).join(commit), cutoff))
+            .collect();
+        layout.forget(&cold)?;
+        for commit in &cold {
+            let _ = fs::remove_file(entry.join(PINS).join(commit));
+        }
+        Ok(cold.len())
+    }
+
     /// Take the entry's lock. Held for as long as the returned guard lives, so
     /// N cold starts at once cost one download rather than N.
-    fn lock(&self, entry: &Path) -> Result<Lock> {
+    pub(crate) fn lock(&self, entry: &Path) -> Result<Lock> {
         let name = entry
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -476,6 +540,7 @@ impl Cache {
 pub enum Kind {
     Mirror,
     Snapshot,
+    Artefact,
 }
 
 #[derive(Debug, Clone)]
@@ -491,7 +556,8 @@ pub struct EntryStats {
     pub path: PathBuf,
     pub bytes: u64,
     pub last_used: Option<SystemTime>,
-    /// Every revision the entry holds: a snapshot's pins, a mirror's refs.
+    /// Every revision the entry holds: a snapshot's pins, a mirror's refs, the
+    /// commits an artefact entry has images for.
     pub revisions: Vec<Revision>,
 }
 
@@ -527,7 +593,7 @@ pub enum Adoption {
 pub struct Compacted {
     /// Entries removed whole.
     pub entries: usize,
-    /// Pin refs dropped from entries that stayed.
+    /// Pin refs, and artefact commits, dropped from entries that stayed.
     pub pins: usize,
     pub freed: u64,
 }
@@ -811,34 +877,12 @@ fn resolve_pin(url: &str, revision: &str) -> Result<Option<(String, bool)>> {
     if revision.is_empty() {
         return Ok(None);
     }
-    if crate::git::looks_like_sha(revision) {
+    if crate::git::is_full_sha(revision) {
         return Ok(Some((revision.to_string(), true)));
-    }
-    let listed = crate::git::run_git(&["ls-remote", url, revision], None, false)?;
-    if !listed.status.success() {
-        return Ok(None);
-    }
-    let text = String::from_utf8_lossy(&listed.stdout);
-    let (mut branch, mut peeled, mut tag) = (None, None, None);
-    for line in text.lines() {
-        let Some((sha, name)) = line.split_once('\t') else {
-            continue;
-        };
-        if name.ends_with("^{}") {
-            peeled = Some(sha);
-        } else if name.starts_with("refs/heads/") {
-            branch = Some(sha);
-        } else if name.starts_with("refs/tags/") {
-            tag = Some(sha);
-        }
     }
     // A branch keeps its name through the checkout; a tag peels to the commit
     // it points at and leaves HEAD detached, exactly as `clone --branch` does.
-    Ok(match (branch, peeled.or(tag)) {
-        (Some(sha), _) => Some((sha.to_string(), false)),
-        (None, Some(sha)) => Some((sha.to_string(), true)),
-        (None, None) => None,
-    })
+    crate::git::ls_remote_revision(url, revision, false)
 }
 
 /// Run git inside a bare cache entry.
@@ -948,7 +992,7 @@ pub fn parse_period(text: &str) -> Result<Duration> {
 /// An exclusive lock on one cache entry, released when the guard is dropped —
 /// including when the process dies, which a lock file of our own making would
 /// not be.
-struct Lock {
+pub(crate) struct Lock {
     _file: fs::File,
 }
 

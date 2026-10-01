@@ -44,7 +44,7 @@ One row per declared entry, in config order, followed by a row for each
 | `REPO` | The directory the entry declares. For an orphan row, the path of the leftover symlink |
 | `PATH` | Where a symlinked entry points; `-` for an ordinary checkout. Only [recursive dependencies](recursive-dependencies.md) deduped into one checkout are symlinks |
 | `MODE` | `readwrite`, `readonly` or `artefact` |
-| `REF` | The ref currently checked out: a branch name, or an abbreviated commit when HEAD is detached. `artefact` for an extracted artefact, `—` when there is no checkout. For a symlink row, the ref of the checkout it points at |
+| `REF` | The ref currently checked out: a branch name, or an abbreviated commit when HEAD is detached. For an artefact, the abbreviated commit it was installed from. `—` when there is no checkout. For a symlink row, the ref of the checkout it points at |
 | `EXPECTED` | The `revision` from `.gitscale.toml`. A SHA is abbreviated to 7 characters so it lines up with `REF` |
 | `STATUS` | The flags below, comma-separated, or `ok` |
 
@@ -66,8 +66,11 @@ order.
 | `stale` | Shallow clone whose commit differs from upstream. A shallow repo cannot produce an exact behind count, so this stands in for it |
 | `detached` | HEAD is detached. Normal for a tag- or SHA-pinned entry |
 | `+N` | N commits ahead of upstream |
-| `-N` | N commits behind upstream. For an artefact entry, `-1` means the remote archive's ETag differs from the extracted one |
-| `ref-mismatch` | The checkout is not on the declared revision |
+| `-N` | N commits behind upstream |
+| `ref-mismatch` | The checkout is not on the declared revision. For an artefact: installed for another revision than the config names now, or not at the commit a SHA revision pins |
+| `behind` | Artefact only: the revision has moved to another commit since this was installed, as the last fetch saw |
+| `missing` | Artefact only: that commit has no image in the registry (yet) |
+| `changed` | Artefact only: the installed commit's image was re-published with different files; [`pull`](workflow.md#pull) installs it |
 | `orphan` | A leftover GitScale symlink whose dependency is no longer declared; its target still resolves |
 | `orphan, broken` | …and its target no longer exists |
 
@@ -81,6 +84,12 @@ A tag or SHA leaves HEAD detached, so `REF` reads as a commit and can never
 equal a tag name — that alone is not a mismatch. Detached *at the wrong commit*
 is.
 
+An artefact entry has no working tree to be dirty and no history to count, so
+its row only ever carries `ok`, `missed`, `symlink`, `unlinked`, or the
+artefact flags. They compare what is installed with what the last
+[`fetch`](workflow.md#fetch) — or `status --fetch` — saw; see
+[artefacts → status](artefacts.md#status).
+
 ## Icons and colour
 
 The first matching rule wins, so a row with several flags takes the icon of the
@@ -93,11 +102,11 @@ most serious one.
 | `✘` | red | `missed` |
 | `⊘` | yellow / bright red | `orphan` / `orphan, broken` |
 | `~` | yellow / bright red | `unlinked` / `unlinked` with anything else |
-| `!` | bright red | `dirty`, `cache-broken` |
+| `!` | bright red | `dirty`, `cache-broken`, `missing`, `changed` |
 | `≠` | bright red | `stale`, `ref-mismatch` |
 | `⇅` | yellow | ahead and behind |
 | `⇑` | yellow | ahead only |
-| `⇓` | yellow | behind only |
+| `⇓` | yellow | behind only, or an artefact's `behind` |
 | `◆` | cyan | `detached` on its own |
 
 The `REF` cell is also painted yellow on a `ref-mismatch`, so the wrong ref is
@@ -110,8 +119,9 @@ come from the remote-tracking refs as they stand, which may be old.
 
 `--fetch` updates them first — through the [object cache](caching.md) like every
 other network operation, so it costs one fetch per repository per *machine*, not
-per workspace. Artefact entries get a HEAD request that refreshes
-`.etag-remote`. A fetch that fails is reported on stderr as
+per workspace. Artefact entries resolve their revision with `ls-remote` and ask
+the registry whether that commit has an image, and record both. A fetch that
+fails is reported on stderr as
 `fetch <directory>: <reason>`, and status still reports, on whatever it has.
 
 Add `-v` to see which repository is being fetched.
@@ -148,6 +158,20 @@ Add `-v` to see which repository is being fetched.
 | `workspace` | Borrowing from a [source workspace](caching.md#where-objects-come-from) instead |
 | `copy` | The checkout owns its objects, but an entry exists for the repository anyway |
 | `broken` | Borrowing from something that is no longer there |
+
+An artefact entry's object also carries what is installed and what the last
+fetch saw, with the flags those produce:
+
+```json
+"artefact": {
+  "installed": { "commit": "9fceb02d0ae598e95dc970b74767f19372d61af8", "digest": "sha256:77d0…" },
+  "remote":    { "commit": "3f2a9c1e5b7d4e8a9c217d4e5f6a8b90c1d2e3f4", "digest": null },
+  "flags": ["behind", "missing"]
+}
+```
+
+`remote` is `null` until a fetch has run for the configured revision, and its
+`digest` is `null` when that commit has no image.
 
 Orphaned symlinks appear as their own objects:
 

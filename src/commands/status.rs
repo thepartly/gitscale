@@ -7,7 +7,6 @@ use crate::commands::cache::Sources;
 use crate::config::load_workspace;
 use crate::git::{fetch_repo, get_artefact_status, get_repo_status, is_tree_modified, RepoStatus};
 use crate::resolve::resolve_recursive;
-use crate::storage::fetch_artefact;
 
 pub fn run(
     root: Option<&Path>,
@@ -28,19 +27,30 @@ pub fn run(
 
     // Never `Sources::adopting`: status changes nothing, even with --fetch.
     let sources = Sources::new(&config, &config_root, no_cache, verbose);
+    let artefacts = if do_fetch && config.repos.iter().any(|e| e.is_artefact()) {
+        Some(crate::artefact::Artefacts::new(
+            &config,
+            &config_root,
+            sources.cache.clone(),
+        ))
+    } else {
+        None
+    };
 
     if do_fetch {
         for entry in &config.repos {
             let dest = config_root.join(&entry.directory);
             let fetched = if entry.is_artefact() {
-                if config.storage_url.is_empty() {
-                    Err(anyhow::anyhow!("no [storage] configured"))
+                if dest.is_symlink() {
+                    Ok(())
                 } else {
                     if verbose {
                         writeln!(out, "Fetching {}...", entry.directory)?;
                     }
-                    fetch_artefact(&config.storage_url, &entry.repo_url, &entry.revision, &dest)
-                        .map(|_| ())
+                    match &artefacts {
+                        Some(artefacts) => artefacts.fetch(entry).map(|_| ()),
+                        None => Ok(()),
+                    }
                 }
             } else if crate::git::is_checkout(&dest) && !dest.is_symlink() {
                 if verbose {
@@ -137,6 +147,17 @@ fn get_status_flags(s: &RepoStatus) -> String {
     } else if s.has_unlinked {
         flags.push("unlinked".to_string());
     }
+    // An artefact has no working tree to be dirty and no history to count:
+    // what there is to say is how the installed commit compares with the
+    // configured revision and with what the last fetch saw.
+    if let Some(artefact) = &s.artefact {
+        flags.extend(artefact.flags.iter().cloned());
+        return if flags.is_empty() {
+            "ok".to_string()
+        } else {
+            flags.join(", ")
+        };
+    }
     if !s.is_clean {
         flags.push("dirty".to_string());
     }
@@ -165,7 +186,6 @@ fn get_status_flags(s: &RepoStatus) -> String {
     if !s.expected_ref.is_empty()
         && s.current_ref != s.expected_ref
         && !(s.is_detached && s.at_expected)
-        && s.current_ref != "artefact"
     {
         flags.push("ref-mismatch".to_string());
     }
@@ -192,11 +212,18 @@ fn status_icon(flags: &str) -> &str {
     if flags.contains("unlinked") {
         return "~";
     }
-    if flags.contains("dirty") || flags.contains("cache-broken") {
+    if flags.contains("dirty")
+        || flags.contains("cache-broken")
+        || flags.contains("missing")
+        || flags.contains("changed")
+    {
         return "!";
     }
     if flags.contains("stale") || flags.contains("ref-mismatch") {
         return "≠";
+    }
+    if flags.contains("behind") {
+        return "⇓";
     }
     let has_ahead = flags.contains('+');
     let has_behind = flags.contains('-');
@@ -236,10 +263,12 @@ fn status_color(flags: &str) -> &str {
         || flags.contains("stale")
         || flags.contains("unlinked")
         || flags.contains("cache-broken")
+        || flags.contains("missing")
+        || flags.contains("changed")
     {
         return "91"; // bright red
     }
-    if flags.contains('+') || flags.contains('-') {
+    if flags.contains('+') || flags.contains('-') || flags.contains("behind") {
         return "33"; // yellow
     }
     "36" // cyan
@@ -256,7 +285,7 @@ fn colorize(text: &str, ansi_code: &str, bold: bool) -> String {
 /// A SHA-pinned revision abbreviated the way the REF column spells a detached
 /// HEAD, so the two line up. Branch and tag names pass through.
 fn abbreviate_revision(revision: &str) -> String {
-    if crate::git::looks_like_sha(revision) {
+    if crate::git::is_full_sha(revision) {
         crate::git::short_sha(revision).to_string()
     } else {
         revision.to_string()
@@ -383,7 +412,7 @@ fn print_json(
     let mut data: Vec<serde_json::Value> = statuses
         .iter()
         .map(|s| {
-            serde_json::json!({
+            let mut row = serde_json::json!({
                 "directory": s.directory,
                 "exists": s.exists,
                 "current_ref": s.current_ref,
@@ -397,7 +426,21 @@ fn print_json(
                 "symlink": s.is_symlink,
                 "symlink_target": s.symlink_target,
                 "cache": s.cache.label(),
-            })
+            });
+            // What an artefact has installed, and what the last fetch saw for
+            // its revision — the commit and image digest of each.
+            if let Some(artefact) = &s.artefact {
+                let side = |m: &Option<crate::artefact::Marker>| match m {
+                    Some(m) => serde_json::json!({"commit": m.commit, "digest": m.digest}),
+                    None => serde_json::Value::Null,
+                };
+                row["artefact"] = serde_json::json!({
+                    "installed": side(&artefact.installed),
+                    "remote": side(&artefact.remote),
+                    "flags": artefact.flags,
+                });
+            }
+            row
         })
         .collect();
     for o in orphans {

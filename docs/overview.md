@@ -38,10 +38,11 @@ The problems GitScale is built for:
   strips the write bit off every checked-out file, so an accidental edit fails
   loudly instead of drifting silently. See
   [checkout modes](dependencies.md#checkout-modes).
-- **Large prebuilt payloads.** `mode = "artefact"` pulls a `tar.gz` from any
-  S3-compatible bucket instead of cloning — datasets, generated clients, closed
-  blobs. Signing and transfer are built in; no `aws` CLI or SDK is needed. See
-  [artefact storage](dependencies.md#artefact-storage).
+- **Large prebuilt payloads.** `mode = "artefact"` installs a repository's
+  build output instead of cloning it — datasets, generated clients, compiled
+  assets — published by its own pipeline to an OCI registry (GitLab's, GHCR, or
+  any other) as one image per commit, and fetched with the CI job token. No
+  `docker`, `oras` or cloud CLI is needed. See [artefacts](artefacts.md).
 - **Shared transitive dependencies checked out once.** When two repositories in
   the workspace both depend on a third, it is checked out once at the root and
   symlinked into each dependant, and conflicting revision claims are an error

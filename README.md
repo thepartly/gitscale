@@ -1,8 +1,8 @@
 # GitScale
 
 Manage multiple sub-repositories from a single config file. An alternative to
-git submodules — simpler, with readonly enforcement, artefact mode, and cloud
-storage for pre-built archives.
+git submodules — simpler, with readonly enforcement, and artefact mode for
+prebuilt output published to an OCI registry.
 
 📖 **[Full documentation](docs/README.md)**
 
@@ -94,8 +94,9 @@ gitscale clone https://github.com/org/root.git
 - **One human-readable config** for every dependency, instead of `.gitmodules`
   plus gitlink entries.
 - **Three checkout modes** — `readwrite`, `readonly` (write bits stripped on
-  disk), and `artefact` (a prebuilt `tar.gz` pulled from any S3-compatible
-  bucket).
+  disk), and `artefact`: the build output the repository's own pipeline
+  published with `gitscale artefact publish`, one OCI image per commit, pulled
+  from GitLab's registry, GHCR or any other.
 - **Transitive dependencies deduped by symlink**, hoisted to the root, with
   conflicting revision claims reported as an error rather than silently
   divergent copies.
@@ -114,7 +115,7 @@ gitscale clone https://github.com/org/root.git
 | | |
 |---|---|
 | [Overview](docs/overview.md) | What GitScale is, and why |
-| [Declaring dependencies](docs/dependencies.md) | Entries, checkout modes, pinning, artefact storage |
+| [Declaring dependencies](docs/dependencies.md) | Entries, checkout modes, pinning |
 | [Status](docs/status.md) | Every flag `gitscale status` prints |
 | [Recursive dependencies](docs/recursive-dependencies.md) | Hoisting, symlink dedup, version mismatches |
 | [Everyday workflow](docs/workflow.md) | `clone`, `fetch`, `pull`, `push`, `sync`, `commit` |
@@ -122,6 +123,7 @@ gitscale clone https://github.com/org/root.git
 | [Hooks](docs/hooks.md) | `[hooks]` commands, and GitScale as a git hook |
 | [CI authentication](docs/ci-authentication.md) | Job tokens on GitLab and GitHub |
 | [Cleaning](docs/clean.md) | `gitscale clean` and what it always keeps |
+| [Artefacts](docs/artefacts.md) | Publishing build output to an OCI registry, and installing it |
 | [Configuration reference](docs/configuration.md) | Every table, key and environment variable |
 | [Command line reference](docs/cli.md) | Every command, argument and flag |
 | [Related tools](docs/related-tools.md) | Comparison with submodules, repo, west, vcstool and others |

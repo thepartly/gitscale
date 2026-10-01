@@ -74,7 +74,7 @@ Beyond whatever you exclude, clean never removes:
   unguarded `git clean -xdf` at the root would delete the whole workspace — and
   one declared inside another repository (`core` and `core/vendor`) would go the
   same way when that repository is cleaned. Clean excludes them wherever they
-  sit. This matters most for [artefact](dependencies.md#artefact) entries, which
+  sit. This matters most for [artefact](artefacts.md) entries, which
   have no `.git` directory for git to recognise them by.
 - **Managed symlinks.** The links GitScale plants for
   [recursive dependencies](recursive-dependencies.md) are untracked files to
@@ -178,4 +178,4 @@ clone somebody forgot about is recoverable only while it still exists.
 
 ---
 
-[← 2.7 CI authentication](ci-authentication.md) · [Contents](README.md) · [Next → 3. Configuration file reference](configuration.md)
+[← 2.7 CI authentication](ci-authentication.md) · [Contents](README.md) · [Next → 2.9 Artefacts](artefacts.md)

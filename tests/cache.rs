@@ -298,21 +298,26 @@ fn the_config_can_turn_it_off_too() {
 }
 
 #[test]
-fn an_artefact_never_gets_an_entry() {
+fn an_artefact_gets_an_image_layout_not_a_git_entry() {
     let env = TestEnv::new("cache_artefact");
-    let repo_url = "https://github.com/org/app.git";
-    env.create_artefact(repo_url, "main", &[("app.bin", "binary")]);
+    let bare = env.artefact_repo("app", &[("app.bin", "binary")]);
     env.write_config(&format!(
-        "[storage]\nurl = \"{}\"\n\n[repos]\n\"meta/app\" = {{ url = \"{}\", revision = \"main\", mode = \"artefact\" }}\n",
-        env.storage_url(),
-        repo_url
+        "{}[repos]\n\"meta/app\" = {{ url = \"{}\", revision = \"main\", mode = \"artefact\" }}\n",
+        env.registries(),
+        bare.display()
     ));
 
     assert!(env.run(&["clone"]).success);
     assert!(
         env.cache_entries("mirror").is_empty() && env.cache_entries("snapshots").is_empty(),
-        "an unpacked archive has no object store to cache"
+        "an unpacked archive has no object store to mirror"
     );
+    let entries = env.cache_entries("artefacts");
+    assert_eq!(entries.len(), 1, "{:?}", entries);
+    let entry = env.cache.join("artefacts").join(&entries[0]);
+    assert!(entry.join("oci-layout").is_file());
+    assert!(entry.join("index.json").is_file());
+    assert!(entry.join("gitscale-last-used").is_file());
 }
 
 #[test]
@@ -408,6 +413,77 @@ fn ci_takes_a_pinned_commit_out_of_a_snapshot_entry() {
         alternates_of(&checkout),
         None,
         "a job copies what it takes, so nothing it produces depends on the entry"
+    );
+}
+
+/// An annotated tag is an object of its own: what CI pins, and checks out,
+/// must be the commit it points at, not the tag object.
+#[test]
+fn ci_pins_an_annotated_tag_at_its_commit() {
+    let env = TestEnv::new("cache_ci_annotated");
+    let bare = env.create_bare_repo("core", "main", &[("a.txt", "tagged")]);
+    git(
+        &bare,
+        &[
+            "-c",
+            "user.name=T",
+            "-c",
+            "user.email=t@t",
+            "tag",
+            "-a",
+            "-m",
+            "release",
+            "v1",
+            "main",
+        ],
+    );
+    let tagged = git(&bare, &["rev-parse", "v1^{commit}"]);
+    // Main moves on, so the tag and the branch head differ.
+    commit_to_bare(&bare, "main", "a.txt", "later");
+    let url = format!("file://{}", bare.display());
+    env.write_config(&format!(
+        "[repos]\n\"libs/core\" = {{ url = \"{}\", revision = \"v1\" }}\n",
+        url
+    ));
+
+    let out = env.run_with_env(&[("CI", "1")], &["clone"]);
+    assert!(out.success, "{:?}", out.stderr);
+    let checkout = env.playground.join("libs/core");
+    assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), tagged);
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("a.txt")).unwrap(),
+        "tagged"
+    );
+    let entry = env.cache_entry("snapshots", &url);
+    assert_eq!(
+        git(
+            &entry,
+            &["for-each-ref", "--format=%(refname)", "refs/heads/pin/"]
+        ),
+        format!("refs/heads/pin/{}", tagged),
+        "the pin should name the commit, not the tag object"
+    );
+}
+
+/// `git ls-remote <url> main` lists every ref whose name ends in `main`. The
+/// branch CI pins is the one called exactly that.
+#[test]
+fn ci_pins_the_branch_named_and_not_one_ending_in_the_name() {
+    let env = TestEnv::new("cache_ci_exact_branch");
+    let bare = env.create_bare_repo("core", "main", &[("a.txt", "main")]);
+    let main = git(&bare, &["rev-parse", "main"]);
+    git(&bare, &["branch", "zzz/main", "main"]);
+    commit_to_bare(&bare, "zzz/main", "a.txt", "not main");
+    let url = format!("file://{}", bare.display());
+    env.write_config(&config_for(&url));
+
+    let out = env.run_with_env(&[("CI", "1")], &["clone"]);
+    assert!(out.success, "{:?}", out.stderr);
+    let checkout = env.playground.join("libs/core");
+    assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), main);
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("a.txt")).unwrap(),
+        "main"
     );
 }
 
@@ -1321,16 +1397,17 @@ fn cache_status_counts_every_revision_and_totals_the_entries() {
         .find(|l| l.contains("libs/core"))
         .expect("a row for the repo");
     let fields: Vec<&str> = row.split_whitespace().collect();
-    // REPO, MIRROR (two words), SNAPSHOTS, TOTAL (two words), REVS…
+    // REPO, MIRROR (two words), SNAPSHOTS, ARTEFACTS, TOTAL (two words), REVS…
     assert_eq!(fields[3], "-", "no snapshot entry on a developer machine");
+    assert_eq!(fields[4], "-", "no artefact entry for a git repository");
     assert_eq!(
         format!("{} {}", fields[1], fields[2]),
-        format!("{} {}", fields[4], fields[5]),
+        format!("{} {}", fields[5], fields[6]),
         "with only one kind of entry, the total is that entry: {}",
         row
     );
     assert_eq!(
-        fields[6], "2",
+        fields[7], "2",
         "a branch and a tag are two cached revisions: {}",
         row
     );

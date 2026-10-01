@@ -1,6 +1,0 @@
----
-source: tests/cli.rs
-expression: out.stdout
----
-Cloning missing repos...
-  skip  meta/app (no artefact data)

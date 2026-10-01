@@ -1,7 +1,7 @@
 #[allow(dead_code)]
 mod helpers;
 
-use helpers::{strip_ansi, TestEnv};
+use helpers::{redact_shas, run_git_pub, strip_ansi, TestEnv};
 
 // ---------------------------------------------------------------------------
 // Add / Remove
@@ -176,29 +176,66 @@ fn clone_readonly() {
 #[test]
 fn clone_artefact_local() {
     let env = TestEnv::new("clone_artefact_local");
-    let repo_url = "https://github.com/org/app.git";
-
-    // Pre-create artefact in local storage
-    env.create_artefact(repo_url, "main", &[("app.bin", "binary-content")]);
+    let bare = env.artefact_repo("app", &[("app.bin", "binary-content")]);
 
     env.write_config(&format!(
-        r#"[storage]
-url = "{}"
-
-[repos]
+        r#"{}[repos]
 "meta/app" = {{ url = "{}", revision = "main", mode = "artefact" }}
 "#,
-        env.storage_url(),
-        repo_url,
+        env.registries(),
+        bare.display(),
     ));
 
     let out = env.run(&["clone"]);
     assert!(out.success, "stderr: {}", out.stderr);
-    insta::assert_snapshot!("clone_artefact_local_stdout", out.stdout);
+    insta::assert_snapshot!("clone_artefact_local_stdout", redact_shas(&out.stdout));
 
     assert!(env.playground.join("meta/app/app.bin").is_file());
     let content = std::fs::read_to_string(env.playground.join("meta/app/app.bin")).unwrap();
     assert_eq!(content, "binary-content");
+}
+
+/// A commit is only ever a full SHA. An abbreviated one is taken for a branch
+/// or tag name, which the remote does not have — and the failure says why.
+#[test]
+fn an_abbreviated_sha_fails_with_a_hint() {
+    let env = TestEnv::new("short_sha_git");
+    let bare = env.create_bare_repo("lib", "main", &[("a.txt", "a")]);
+    let short = git_stdout(&bare, &["rev-parse", "--short=9", "main"]);
+    env.write_config(&format!(
+        "[repos]\n\"libs/lib\" = {{ url = \"{}\", revision = \"{}\" }}\n",
+        bare.display(),
+        short
+    ));
+    let out = env.run(&["clone"]);
+    assert!(!out.success);
+    assert!(out.stderr.contains("full SHA"), "{}", out.stderr);
+    assert!(
+        out.stderr.contains(&format!("git rev-parse {}", short)),
+        "{}",
+        out.stderr
+    );
+}
+
+/// A tag whose name is all hex digits is a tag, not a commit.
+#[test]
+fn an_all_hex_tag_name_is_a_tag() {
+    let env = TestEnv::new("hex_tag_git");
+    let bare = env.create_bare_repo("lib", "main", &[("a.txt", "release")]);
+    let tagged = git_stdout(&bare, &["rev-parse", "main"]);
+    run_git_pub(&bare, &["tag", "20241001", "main"]);
+    env.write_config(&format!(
+        "[repos]\n\"libs/lib\" = {{ url = \"{}\", revision = \"20241001\" }}\n",
+        bare.display()
+    ));
+    let out = env.run(&["clone"]);
+    assert!(out.success, "{}", out.stderr);
+    let checkout = env.playground.join("libs/lib");
+    assert_eq!(git_stdout(&checkout, &["rev-parse", "HEAD"]), tagged);
+    assert_eq!(
+        git_stdout(&checkout, &["describe", "--tags", "--exact-match"]),
+        "20241001"
+    );
 }
 
 #[test]
@@ -226,35 +263,46 @@ fn clone_skip_existing() {
 #[test]
 fn clone_no_storage() {
     let env = TestEnv::new("clone_no_storage");
+    let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
 
-    env.write_config(
+    env.write_config(&format!(
         r#"[repos]
-"meta/app" = { url = "https://github.com/org/app.git", revision = "main", mode = "artefact" }
+"meta/app" = {{ url = "{}", revision = "main", mode = "artefact" }}
 "#,
-    );
+        bare.display()
+    ));
 
     let out = env.run(&["clone"]);
     assert!(!out.success);
-    assert!(out.stderr.contains("no [storage] configured"));
+    assert!(
+        out.stderr.contains("no registry is known") && out.stderr.contains("[registries]"),
+        "stderr: {}",
+        out.stderr
+    );
 }
 
 #[test]
 fn clone_artefact_no_data() {
     let env = TestEnv::new("clone_artefact_no_data");
+    // A repository whose pipeline has published nothing.
+    let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
 
     env.write_config(&format!(
-        r#"[storage]
-url = "{}"
-
-[repos]
-"meta/app" = {{ url = "https://github.com/org/app.git", revision = "main", mode = "artefact" }}
+        r#"{}[repos]
+"meta/app" = {{ url = "{}", revision = "main", mode = "artefact" }}
 "#,
-        env.storage_url(),
+        env.registries(),
+        bare.display(),
     ));
 
     let out = env.run(&["clone"]);
-    assert!(out.success);
-    insta::assert_snapshot!("clone_artefact_no_data_stdout", out.stdout);
+    assert!(!out.success, "a missing artefact is an error, not a skip");
+    assert!(
+        out.stderr.contains("no artefact for") && out.stderr.contains("(main)"),
+        "stderr: {}",
+        out.stderr
+    );
+    assert!(!env.playground.join("meta/app").exists());
 }
 
 #[test]
@@ -303,27 +351,25 @@ fn clone_unknown_name() {
 #[test]
 fn fetch_artefact_local() {
     let env = TestEnv::new("fetch_artefact_local");
-    let repo_url = "https://github.com/org/app.git";
-
-    env.create_artefact(repo_url, "v1.0", &[("app.bin", "v1-content")]);
+    let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
+    run_git_pub(&bare, &["tag", "v1.0", "main"]);
+    env.publish(&bare, "v1.0", &[("app.bin", "v1-content")]);
 
     env.write_config(&format!(
-        r#"[storage]
-url = "{}"
-
-[repos]
+        r#"{}[repos]
 "meta/app" = {{ url = "{}", revision = "v1.0", mode = "artefact" }}
 "#,
-        env.storage_url(),
-        repo_url,
+        env.registries(),
+        bare.display(),
     ));
 
     let out = env.run(&["fetch"]);
     assert!(out.success, "stderr: {}", out.stderr);
-    insta::assert_snapshot!("fetch_artefact_local_stdout", out.stdout);
+    insta::assert_snapshot!("fetch_artefact_local_stdout", redact_shas(&out.stdout));
 
-    // .etag-remote should be written
-    assert!(env.playground.join("meta/app/.etag-remote").is_file());
+    // What the fetch saw is recorded outside the checkout; nothing is
+    // downloaded, and no directory is made for it.
+    assert!(!env.playground.join("meta/app").exists());
 }
 
 /// A fetch only looks: an artefact it found in storage is still to be
@@ -331,17 +377,15 @@ url = "{}"
 #[test]
 fn clone_after_fetch_still_downloads_the_artefact() {
     let env = TestEnv::new("clone_after_fetch_artefact");
-    let repo_url = "https://github.com/org/app.git";
-    env.create_artefact(repo_url, "v1.0", &[("app.bin", "v1-content")]);
+    let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
+    run_git_pub(&bare, &["tag", "v1.0", "main"]);
+    env.publish(&bare, "v1.0", &[("app.bin", "v1-content")]);
     env.write_config(&format!(
-        r#"[storage]
-url = "{}"
-
-[repos]
+        r#"{}[repos]
 "meta/app" = {{ url = "{}", revision = "v1.0", mode = "artefact" }}
 "#,
-        env.storage_url(),
-        repo_url,
+        env.registries(),
+        bare.display(),
     ));
 
     assert!(env.run(&["fetch"]).success);
@@ -360,25 +404,23 @@ url = "{}"
 #[test]
 fn a_corrupt_artefact_is_not_taken_as_current() {
     let env = TestEnv::new("corrupt_artefact");
-    let repo_url = "https://github.com/org/app.git";
-    let object =
-        gitscale::storage::object_url(env.artefacts_remote.to_str().unwrap(), repo_url, "v1.0")
-            .unwrap();
-    let object = std::path::PathBuf::from(object);
-    std::fs::create_dir_all(object.parent().unwrap()).unwrap();
-    std::fs::write(&object, "not a gzip archive").unwrap();
+    let bare = env.artefact_repo("app", &[("app.bin", "v1-content")]);
+    env.registry().corrupt_blobs();
     env.write_config(&format!(
-        r#"[storage]
-url = "{}"
-
-[repos]
-"meta/app" = {{ url = "{}", revision = "v1.0", mode = "artefact" }}
+        r#"{}[repos]
+"meta/app" = {{ url = "{}", revision = "main", mode = "artefact" }}
 "#,
-        env.storage_url(),
-        repo_url,
+        env.registries(),
+        bare.display(),
     ));
 
-    assert!(!env.run(&["clone"]).success, "the archive is corrupt");
+    let first = env.run(&["clone"]);
+    assert!(!first.success, "the blob does not match its digest");
+    assert!(
+        first.stderr.contains("does not match its digest"),
+        "{}",
+        first.stderr
+    );
     let again = env.run(&["clone"]);
     assert!(
         !again.success,
@@ -391,6 +433,7 @@ url = "{}"
         "pull took the failed clone as up to date:\n{}",
         pull.stdout
     );
+    assert!(!env.playground.join("meta/app/app.bin").exists());
 }
 
 #[test]
@@ -606,32 +649,28 @@ fn pull_moves_to_a_revision_a_child_adopts_later() {
 #[test]
 fn pull_artefact_local() {
     let env = TestEnv::new("pull_artefact_local");
-    let repo_url = "https://github.com/org/app.git";
-
-    env.create_artefact(repo_url, "main", &[("app.bin", "v1-content")]);
+    let bare = env.artefact_repo("app", &[("app.bin", "v1-content")]);
 
     env.write_config(&format!(
-        r#"[storage]
-url = "{}"
-
-[repos]
+        r#"{}[repos]
 "meta/app" = {{ url = "{}", revision = "main", mode = "artefact" }}
 "#,
-        env.storage_url(),
-        repo_url,
+        env.registries(),
+        bare.display(),
     ));
 
     // Clone first
     let out1 = env.run(&["clone"]);
     assert!(out1.success, "clone stderr: {}", out1.stderr);
 
-    // Update artefact
-    env.create_artefact(repo_url, "main", &[("app.bin", "v2-content")]);
+    // A new commit on main, and its pipeline's artefact.
+    env.push_commit(&bare, "main", "README.md", "v2");
+    env.publish(&bare, "main", &[("app.bin", "v2-content")]);
 
     // Pull should download newer version
     let out2 = env.run(&["pull"]);
     assert!(out2.success, "pull stderr: {}", out2.stderr);
-    insta::assert_snapshot!("pull_artefact_local_stdout", out2.stdout);
+    insta::assert_snapshot!("pull_artefact_local_stdout", redact_shas(&out2.stdout));
 
     let content = std::fs::read_to_string(env.playground.join("meta/app/app.bin")).unwrap();
     assert_eq!(content, "v2-content");
@@ -645,18 +684,22 @@ fn artefact_is_readonly_at_every_depth() {
     let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode();
 
     let env = TestEnv::new("artefact_readonly_depth");
-    let repo_url = "https://github.com/org/app.git";
-    let files = |v: &'static str| [("app.bin", v), ("bin/tool", v), ("share/doc/readme", v)];
-    env.create_artefact(repo_url, "main", &files("v1"));
+    let files = |v: &'static str| {
+        [
+            ("app.bin", v),
+            ("bin/tool", v),
+            ("share/doc/readme", v),
+            (".env", v),
+            (".config/settings", v),
+        ]
+    };
+    let bare = env.artefact_repo("app", &files("v1"));
     env.write_config(&format!(
-        r#"[storage]
-url = "{}"
-
-[repos]
+        r#"{}[repos]
 "meta/app" = {{ url = "{}", revision = "main", mode = "artefact" }}
 "#,
-        env.storage_url(),
-        repo_url,
+        env.registries(),
+        bare.display(),
     ));
     let dest = env.playground.join("meta/app");
 
@@ -670,14 +713,18 @@ url = "{}"
             name
         );
     }
-    assert_ne!(
-        mode(&dest.join(".etag")) & 0o200,
-        0,
-        ".etag should stay writable"
-    );
+    // Dot files are the artefact's like any other: nothing of gitscale's is
+    // kept in the checkout.
+    let mut names: Vec<String> = std::fs::read_dir(&dest)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec![".config", ".env", "app.bin", "bin", "share"]);
 
     // An update has to get past the read-only files it replaces.
-    env.create_artefact(repo_url, "main", &files("v2"));
+    env.push_commit(&bare, "main", "README.md", "v2");
+    env.publish(&bare, "main", &files("v2"));
     let out = env.run(&["pull"]);
     assert!(out.success, "pull stderr: {}", out.stderr);
     for (name, _) in files("") {
@@ -695,27 +742,29 @@ url = "{}"
 #[test]
 fn pull_artefact_up_to_date() {
     let env = TestEnv::new("pull_artefact_up_to_date");
-    let repo_url = "https://github.com/org/app.git";
-
-    env.create_artefact(repo_url, "main", &[("app.bin", "content")]);
+    let bare = env.artefact_repo("app", &[("app.bin", "content")]);
 
     env.write_config(&format!(
-        r#"[storage]
-url = "{}"
-
-[repos]
+        r#"{}[repos]
 "meta/app" = {{ url = "{}", revision = "main", mode = "artefact" }}
 "#,
-        env.storage_url(),
-        repo_url,
+        env.registries(),
+        bare.display(),
     ));
 
-    env.run(&["clone"]);
+    assert!(env.run(&["clone"]).success);
+    env.registry().clear_log();
 
-    // Pull again — should be up to date (same etag)
+    // Pull again: the revision still names the installed commit, so the
+    // registry is not asked anything.
     let out = env.run(&["pull"]);
     assert!(out.success, "stderr: {}", out.stderr);
-    insta::assert_snapshot!("pull_artefact_up_to_date_stdout", out.stdout);
+    insta::assert_snapshot!("pull_artefact_up_to_date_stdout", redact_shas(&out.stdout));
+    assert!(
+        env.registry().log().is_empty(),
+        "{:?}",
+        env.registry().log()
+    );
 }
 
 #[test]
@@ -761,21 +810,17 @@ fn push_skip_readonly() {
 #[test]
 fn push_skip_artefact() {
     let env = TestEnv::new("push_skip_artefact");
-    let repo_url = "https://github.com/org/app.git";
-    env.create_artefact(repo_url, "main", &[("app.bin", "content")]);
+    let bare = env.artefact_repo("app", &[("app.bin", "content")]);
 
     env.write_config(&format!(
-        r#"[storage]
-url = "{}"
-
-[repos]
+        r#"{}[repos]
 "meta/app" = {{ url = "{}", revision = "main", mode = "artefact" }}
 "#,
-        env.storage_url(),
-        repo_url,
+        env.registries(),
+        bare.display(),
     ));
 
-    env.run(&["clone"]);
+    assert!(env.run(&["clone"]).success);
     let out = env.run(&["push"]);
     assert!(out.success);
     insta::assert_snapshot!("push_skip_artefact_stdout", out.stdout);
@@ -1039,16 +1084,17 @@ fn status_flags_a_pin_the_checkout_has_not_followed() {
 #[test]
 fn status_fetch_reports_a_fetch_it_could_not_do() {
     let env = TestEnv::new("status_fetch_failure");
-    env.write_config(
+    let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
+    env.write_config(&format!(
         r#"[repos]
-"meta/app" = { url = "https://github.com/org/app.git", revision = "main", mode = "artefact" }
+"meta/app" = {{ url = "{}", revision = "main", mode = "artefact" }}
 "#,
-    );
+        bare.display()
+    ));
     let out = env.run(&["status", "--fetch"]);
     assert!(out.success, "stderr: {}", out.stderr);
     assert!(
-        out.stderr
-            .contains("fetch meta/app: no [storage] configured"),
+        out.stderr.contains("fetch meta/app: no registry is known"),
         "stderr: {}",
         out.stderr
     );
@@ -1085,17 +1131,14 @@ fn status_json() {
 fn status_artefact_missed() {
     let env = TestEnv::new("status_artefact_missed");
     env.init_playground_git();
-    let repo_url = "https://github.com/org/app.git";
+    let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
 
     env.write_config(&format!(
-        r#"[storage]
-url = "{}"
-
-[repos]
+        r#"{}[repos]
 "meta/app" = {{ url = "{}", revision = "main", mode = "artefact" }}
 "#,
-        env.storage_url(),
-        repo_url,
+        env.registries(),
+        bare.display(),
     ));
 
     let out = env.run(&["status"]);
@@ -1108,24 +1151,20 @@ url = "{}"
 fn status_artefact_ok() {
     let env = TestEnv::new("status_artefact_ok");
     env.init_playground_git();
-    let repo_url = "https://github.com/org/app.git";
-    env.create_artefact(repo_url, "main", &[("app.bin", "content")]);
+    let bare = env.artefact_repo("app", &[("app.bin", "content")]);
 
     env.write_config(&format!(
-        r#"[storage]
-url = "{}"
-
-[repos]
+        r#"{}[repos]
 "meta/app" = {{ url = "{}", revision = "main", mode = "artefact" }}
 "#,
-        env.storage_url(),
-        repo_url,
+        env.registries(),
+        bare.display(),
     ));
 
-    env.run(&["clone"]);
+    assert!(env.run(&["clone"]).success);
     let out = env.run(&["status"]);
     assert!(out.success, "stderr: {}", out.stderr);
-    let plain = strip_ansi(&out.stdout);
+    let plain = redact_shas(&strip_ansi(&out.stdout));
     insta::assert_snapshot!("status_artefact_ok_stdout", plain);
 }
 
@@ -1344,27 +1383,25 @@ fn multiple_repos_mixed() {
     let env = TestEnv::new("multiple_repos_mixed");
     let bare_rw = env.create_bare_repo("rw-lib", "main", &[("rw.txt", "readwrite")]);
     let bare_ro = env.create_bare_repo("ro-lib", "main", &[("ro.txt", "readonly")]);
-    let art_url = "https://github.com/org/art.git";
-    env.create_artefact(art_url, "v1", &[("art.bin", "artefact-data")]);
+    let bare_art = env.create_bare_repo("art", "main", &[("README.md", "art")]);
+    run_git_pub(&bare_art, &["tag", "v1", "main"]);
+    env.publish(&bare_art, "v1", &[("art.bin", "artefact-data")]);
 
     env.write_config(&format!(
-        r#"[storage]
-url = "{}"
-
-[repos]
+        r#"{}[repos]
 "libs/ro-lib" = {{ url = "{}", revision = "main", mode = "readonly" }}
 "libs/rw-lib" = {{ url = "{}", revision = "main" }}
 "meta/art" = {{ url = "{}", revision = "v1", mode = "artefact" }}
 "#,
-        env.storage_url(),
+        env.registries(),
         bare_ro.display(),
         bare_rw.display(),
-        art_url,
+        bare_art.display(),
     ));
 
     let out = env.run(&["clone"]);
     assert!(out.success, "stderr: {}", out.stderr);
-    insta::assert_snapshot!("multiple_repos_mixed_stdout", out.stdout);
+    insta::assert_snapshot!("multiple_repos_mixed_stdout", redact_shas(&out.stdout));
 
     assert!(env.playground.join("libs/rw-lib/rw.txt").is_file());
     assert!(env.playground.join("libs/ro-lib/ro.txt").is_file());
@@ -1736,9 +1773,8 @@ fn an_adopted_revision_leaves_an_artefact_alone() {
     let env = TestEnv::new("adopt_artefact");
     env.init_playground_git();
     let root_head = git_stdout(&env.playground, &["rev-parse", "HEAD"]);
-    let art_url = "https://github.com/org/art.git";
-    // No revision: published, and looked up, as HEAD.
-    env.create_artefact(art_url, "", &[("art.bin", "binary")]);
+    // No revision: the default branch's commit, whatever the branch is called.
+    let bare_art = env.artefact_repo("art", &[("art.bin", "binary")]);
     let bare_a = env.create_bare_repo(
         "repoA",
         "main",
@@ -1748,22 +1784,19 @@ fn an_adopted_revision_leaves_an_artefact_alone() {
                 ".gitscale.toml",
                 &format!(
                     "[repos]\n\"libs/art\" = {{ url = \"{}\", revision = \"v9\" }}\n",
-                    art_url
+                    bare_art.display()
                 ),
             ),
         ],
     );
     env.write_config(&format!(
-        r#"[storage]
-url = "{}"
-
-[repos]
+        r#"{}[repos]
 "repoA" = {{ url = "{}", revision = "main" }}
 "meta/art" = {{ url = "{}", mode = "artefact" }}
 "#,
-        env.storage_url(),
+        env.registries(),
         bare_a.display(),
-        art_url,
+        bare_art.display(),
     ));
 
     let out = env.run(&["clone"]);
@@ -1778,31 +1811,29 @@ url = "{}"
 #[test]
 fn recursive_artefact_with_config() {
     let env = TestEnv::new("recursive_artefact_config");
-    let repo_url_art = "https://github.com/org/art.git";
     let bare_dep = env.create_bare_repo("dep", "main", &[("dep.txt", "dep content")]);
+    let bare_art = env.create_bare_repo("art", "main", &[("README.md", "art")]);
+    run_git_pub(&bare_art, &["tag", "v1", "main"]);
 
-    // Create artefact that contains a .gitscale.toml
+    // An artefact that contains a .gitscale.toml
     let child_config = format!(
         "[repos]\n\"vendor/dep\" = {{ url = \"{}\", revision = \"main\" }}\n",
         bare_dep.display()
     );
-    env.create_artefact(
-        repo_url_art,
+    env.publish(
+        &bare_art,
         "v1",
         &[("art.bin", "binary"), (".gitscale.toml", &child_config)],
     );
 
     // Root declares both artefact and the dep
     env.write_config(&format!(
-        r#"[storage]
-url = "{}"
-
-[repos]
+        r#"{}[repos]
 "meta/art" = {{ url = "{}", revision = "v1", mode = "artefact" }}
 "dep" = {{ url = "{}", revision = "main" }}
 "#,
-        env.storage_url(),
-        repo_url_art,
+        env.registries(),
+        bare_art.display(),
         bare_dep.display(),
     ));
 
@@ -3114,11 +3145,12 @@ fn clean_works_in_a_readonly_repo() {
 #[test]
 fn clean_skips_artefact_repos() {
     let env = TestEnv::new("clean_skips_artefact_repos");
-    env.create_artefact("https://github.com/org/svc.git", "main", &[("a.txt", "x")]);
+    let bare = env.artefact_repo("svc", &[("a.txt", "x")]);
     env.write_config(&format!(
-        "[storage]\nurl = \"{}\"\n\n[repos]\n\
-         \"meta/svc\" = {{ url = \"https://github.com/org/svc.git\", revision = \"main\", mode = \"artefact\" }}\n",
-        env.storage_url()
+        "{}[repos]\n\
+         \"meta/svc\" = {{ url = \"{}\", revision = \"main\", mode = \"artefact\" }}\n",
+        env.registries(),
+        bare.display()
     ));
     env.init_playground_git();
     assert!(env.run(&["clone"]).success);
@@ -3171,17 +3203,14 @@ fn clean_keeps_a_checkout_nested_inside_another_repo() {
     let core = env.create_bare_repo("core", "main", &[("README.md", "core")]);
     // An artefact checkout has no `.git`, so git's own refusal to delete a
     // nested repository would not save it.
-    env.create_artefact(
-        "https://github.com/org/vendor.git",
-        "main",
-        &[("v.txt", "x")],
-    );
+    let vendor = env.artefact_repo("vendor", &[("v.txt", "x")]);
     env.write_config(&format!(
-        "[storage]\nurl = \"{}\"\n\n[repos]\n\
+        "{}[repos]\n\
          \"core\" = {{ url = \"{}\", revision = \"main\" }}\n\
-         \"core/vendor\" = {{ url = \"https://github.com/org/vendor.git\", revision = \"main\", mode = \"artefact\" }}\n",
-        env.storage_url(),
-        core.to_str().unwrap()
+         \"core/vendor\" = {{ url = \"{}\", revision = \"main\", mode = \"artefact\" }}\n",
+        env.registries(),
+        core.to_str().unwrap(),
+        vendor.display()
     ));
     env.init_playground_git();
     assert!(env.run(&["clone"]).success);

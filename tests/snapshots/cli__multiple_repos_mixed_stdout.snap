@@ -1,8 +1,8 @@
 ---
 source: tests/cli.rs
-expression: out.stdout
+expression: redact_shas(&out.stdout)
 ---
 Cloning missing repos...
   ok    libs/ro-lib
   ok    libs/rw-lib
-  ok    meta/art (artefact)
+  ok    meta/art (artefact [sha])

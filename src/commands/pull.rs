@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 
+use crate::artefact::{Artefacts, Pulled};
 use crate::commands::cache::Sources;
 use crate::commands::clone::move_to_adopted;
 use crate::config::{filter_entries, load_workspace, RepoEntry};
@@ -10,7 +11,6 @@ use crate::git::pull_repo;
 use crate::hooks;
 use crate::progress::{run_entries, RepoStatus};
 use crate::resolve::{is_outer_link, resolve_recursive};
-use crate::storage::pull_artefact;
 
 pub fn run(
     root: Option<&Path>,
@@ -80,10 +80,10 @@ fn pull_inner(
             _ => (*e).clone(),
         })
         .collect();
-    let storage_url = &config.storage_url;
     // A hook-triggered pull is the first thing to run in a new worktree, so
     // this is the path that populates it — and the one that benefits most.
     let sources = Sources::adopting(&config, &config_root, no_cache, verbose, out)?;
+    let artefacts = Artefacts::new(&config, &config_root, sources.cache.clone());
 
     run_entries(
         "Pulling latest changes...",
@@ -109,12 +109,17 @@ fn pull_inner(
             }
 
             if entry.is_artefact() {
-                if storage_url.is_empty() {
-                    return RepoStatus::Fail(format!("{}: no [storage] configured", name));
-                }
-                return match pull_artefact(storage_url, &entry.repo_url, &entry.revision, &dest) {
-                    Ok(true) => RepoStatus::Ok(format!("{} (artefact)", name)),
-                    Ok(false) => RepoStatus::Skip(format!("{} (no remote artefact)", name)),
+                return match artefacts.pull(entry, &dest) {
+                    Ok(Pulled::Updated(commit)) => RepoStatus::Ok(format!(
+                        "{} (artefact {})",
+                        name,
+                        crate::git::short_sha(&commit)
+                    )),
+                    Ok(Pulled::Current(commit)) => RepoStatus::Ok(format!(
+                        "{} (artefact {}, up to date)",
+                        name,
+                        crate::git::short_sha(&commit)
+                    )),
                     Err(e) => RepoStatus::Fail(format!("{}: {}", name, e)),
                 };
             }

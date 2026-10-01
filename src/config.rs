@@ -155,10 +155,42 @@ pub struct Clean {
     pub exclude: Vec<String>,
 }
 
+/// What `gitscale artefact publish` ships from the repository this config
+/// belongs to: the files under `root` that each group's globs select, one
+/// image layer per group.
+///
+/// The producer's half of artefact mode. A consumer declares an entry with
+/// `mode = "artefact"` and never reads this table; it lives in the source
+/// repository, next to the build that makes the files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtefactSpec {
+    /// Relative to the config's directory; patterns and the paths inside the
+    /// archive are relative to it. `"."` when not set.
+    pub root: String,
+    /// In the order layers are written. A file goes to the first group that
+    /// matches it.
+    pub layers: Vec<LayerSpec>,
+}
+
+/// The name a single group gets when `[artefact]` lists `include` directly
+/// rather than `[[artefact.layer]]` tables.
+pub const DEFAULT_LAYER: &str = "default";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayerSpec {
+    pub name: String,
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct GitScaleConfig {
     pub repos: Vec<RepoEntry>,
-    pub storage_url: String,
+    /// `[registries]`: where artefacts of a host, or of a repository URL
+    /// prefix, are published — for anything the built-in forge mapping
+    /// does not cover. See [`crate::registry::image_for`].
+    pub registries: BTreeMap<String, String>,
+    pub artefact: Option<ArtefactSpec>,
     pub hooks: Hooks,
     pub share: Share,
     pub clean: Clean,
@@ -167,12 +199,34 @@ pub struct GitScaleConfig {
 
 #[derive(Deserialize)]
 struct RawConfig {
-    storage: Option<RawStorage>,
+    storage: Option<toml::Value>,
+    registries: Option<BTreeMap<String, String>>,
+    artefact: Option<RawArtefact>,
     repos: Option<BTreeMap<String, RawRepo>>,
     hooks: Option<RawHooks>,
     share: Option<RawShare>,
     clean: Option<RawClean>,
     cache: Option<RawCache>,
+}
+
+// Unknown keys are errors here, unlike the older tables: a misspelt
+// `includes` would otherwise publish an artefact missing what it was meant to
+// carry, and nothing downstream could tell.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawArtefact {
+    root: Option<String>,
+    include: Option<Vec<String>>,
+    exclude: Option<Vec<String>>,
+    layer: Option<Vec<RawLayer>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLayer {
+    name: Option<String>,
+    include: Option<Vec<String>>,
+    exclude: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -197,11 +251,6 @@ struct RawShare {
 struct RawHooks {
     post_sync: Option<String>,
     on_pull_error: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct RawStorage {
-    url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -239,7 +288,8 @@ pub fn load_config(config_path: &Path) -> Result<GitScaleConfig> {
     let raw: RawConfig = toml::from_str(&text)
         .with_context(|| format!("{}: invalid TOML", config_path.display()))?;
 
-    let storage_url = parse_storage(raw.storage.as_ref(), config_path)?;
+    let registries = parse_registries(raw.storage.as_ref(), raw.registries.as_ref(), config_path)?;
+    let artefact = parse_artefact(raw.artefact.as_ref(), config_path)?;
     let repos = parse_repos(raw.repos.as_ref(), config_path)?;
     let hooks = parse_hooks(raw.hooks.as_ref(), config_path)?;
     let share = Share {
@@ -255,7 +305,8 @@ pub fn load_config(config_path: &Path) -> Result<GitScaleConfig> {
 
     Ok(GitScaleConfig {
         repos,
-        storage_url,
+        registries,
+        artefact,
         hooks,
         share,
         clean,
@@ -405,17 +456,122 @@ pub fn check_entry(directory: &str, url: &str, revision: &str, config_path: &Pat
     )
 }
 
-fn parse_storage(raw: Option<&RawStorage>, config_path: &Path) -> Result<String> {
-    let Some(storage) = raw else {
-        return Ok(String::new());
-    };
-    match &storage.url {
-        Some(u) if !u.is_empty() => {
-            check_url(u, "storage.url", config_path)?;
-            Ok(u.trim_end_matches('/').to_string())
-        }
-        _ => bail!("{}: storage.url is required", config_path.display()),
+/// `[registries]`. `[storage]` is refused: its `url` named an S3, GCS or local
+/// bucket, and artefacts now come from OCI registries instead.
+fn parse_registries(
+    storage: Option<&toml::Value>,
+    raw: Option<&BTreeMap<String, String>>,
+    config_path: &Path,
+) -> Result<BTreeMap<String, String>> {
+    if storage.is_some() {
+        bail!(
+            "{}: [storage] is no longer supported. Artefacts are published to and pulled \
+             from OCI registries, located from each entry's repository URL; remove \
+             [storage], and use [registries] for hosts the built-in mapping does not \
+             cover (see docs/artefacts.md)",
+            config_path.display()
+        );
     }
+    let registries = raw.cloned().unwrap_or_default();
+    for (key, registry) in &registries {
+        if key.is_empty() || registry.is_empty() {
+            bail!(
+                "{}: registries entries need a host or URL prefix and a registry",
+                config_path.display()
+            );
+        }
+        // `http://` is the one scheme accepted: an explicit opt-in to plain
+        // HTTP, for a registry without TLS on a private network.
+        if registry.trim_start_matches("http://").contains("://") {
+            bail!(
+                "{}: registries.\"{}\" = \"{}\": give the registry as host[:port][/namespace], \
+                 with no scheme — or http:// in front for a registry without TLS",
+                config_path.display(),
+                key,
+                registry
+            );
+        }
+    }
+    Ok(registries)
+}
+
+/// `[artefact]`: the groups `artefact publish` packs. Patterns are checked
+/// here, so a broken one is reported when the config is read rather than half
+/// way through a publish.
+fn parse_artefact(raw: Option<&RawArtefact>, config_path: &Path) -> Result<Option<ArtefactSpec>> {
+    let Some(artefact) = raw else {
+        return Ok(None);
+    };
+    let at = |what: &str| format!("{}: artefact{}", config_path.display(), what);
+
+    let root = artefact.root.clone().unwrap_or_else(|| ".".to_string());
+    check_relative(&root).with_context(|| at(".root"))?;
+
+    if artefact.layer.is_some() && (artefact.include.is_some() || artefact.exclude.is_some()) {
+        bail!(
+            "{}: use include and exclude directly in [artefact] for a single group, or \
+             [[artefact.layer]] tables with their own include and exclude — not both",
+            at("")
+        );
+    }
+    let layers = match (&artefact.layer, &artefact.include) {
+        (Some(layers), _) => layers
+            .iter()
+            .map(|layer| LayerSpec {
+                name: layer.name.clone().unwrap_or_default(),
+                include: layer.include.clone().unwrap_or_default(),
+                exclude: layer.exclude.clone().unwrap_or_default(),
+            })
+            .collect::<Vec<_>>(),
+        (None, Some(include)) => vec![LayerSpec {
+            name: DEFAULT_LAYER.to_string(),
+            include: include.clone(),
+            exclude: artefact.exclude.clone().unwrap_or_default(),
+        }],
+        (None, None) => bail!(
+            "{}: says nothing to publish; give include = [...] or [[artefact.layer]] tables",
+            at("")
+        ),
+    };
+
+    let mut seen = std::collections::HashSet::new();
+    for layer in &layers {
+        if layer.name.is_empty()
+            || !layer
+                .name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        {
+            bail!(
+                "{}: layer name \"{}\" must be non-empty letters, digits, '.', '_' or '-'",
+                at(""),
+                layer.name
+            );
+        }
+        if !seen.insert(layer.name.as_str()) {
+            bail!("{}: layer name \"{}\" is used twice", at(""), layer.name);
+        }
+        if layer.include.is_empty() {
+            bail!("{}: layer \"{}\" includes nothing", at(""), layer.name);
+        }
+        for pattern in layer.include.iter().chain(&layer.exclude) {
+            crate::artefact::check_pattern(pattern)
+                .with_context(|| format!("{}: layer \"{}\"", at(""), layer.name))?;
+        }
+    }
+    Ok(Some(ArtefactSpec { root, layers }))
+}
+
+/// A path that must stay below the directory it is relative to.
+fn check_relative(path: &str) -> Result<()> {
+    let p = Path::new(path);
+    if path.is_empty() || p.is_absolute() {
+        bail!("\"{}\" must be a relative path", path);
+    }
+    if p.components().any(|c| c == Component::ParentDir) {
+        bail!("\"{}\" must not leave its directory with '..'", path);
+    }
+    Ok(())
 }
 
 /// `[clean] exclude`. Patterns reach `git clean -e` as arguments, so one
@@ -571,10 +727,44 @@ pub fn write_config(config_path: &Path, config: &GitScaleConfig) -> Result<()> {
         lines.push(String::new());
     }
 
-    if !config.storage_url.is_empty() {
-        lines.push("[storage]".to_string());
-        lines.push(format!("url = {}", toml_string(&config.storage_url)));
+    if !config.registries.is_empty() {
+        lines.push("[registries]".to_string());
+        for (key, registry) in &config.registries {
+            lines.push(format!("{} = {}", toml_string(key), toml_string(registry)));
+        }
         lines.push(String::new());
+    }
+
+    if let Some(artefact) = &config.artefact {
+        let list = |patterns: &[String]| {
+            let quoted: Vec<String> = patterns.iter().map(|p| toml_string(p)).collect();
+            format!("[{}]", quoted.join(", "))
+        };
+        lines.push("[artefact]".to_string());
+        if artefact.root != "." {
+            lines.push(format!("root = {}", toml_string(&artefact.root)));
+        }
+        match artefact.layers.as_slice() {
+            [only] if only.name == DEFAULT_LAYER => {
+                lines.push(format!("include = {}", list(&only.include)));
+                if !only.exclude.is_empty() {
+                    lines.push(format!("exclude = {}", list(&only.exclude)));
+                }
+                lines.push(String::new());
+            }
+            layers => {
+                lines.push(String::new());
+                for layer in layers {
+                    lines.push("[[artefact.layer]]".to_string());
+                    lines.push(format!("name = {}", toml_string(&layer.name)));
+                    lines.push(format!("include = {}", list(&layer.include)));
+                    if !layer.exclude.is_empty() {
+                        lines.push(format!("exclude = {}", list(&layer.exclude)));
+                    }
+                    lines.push(String::new());
+                }
+            }
+        }
     }
 
     if config.hooks.post_sync.is_some() || config.hooks.on_pull_error.is_some() {
@@ -654,8 +844,8 @@ mod tests {
     fn ordinary_urls_still_load() {
         let config = load(
             r#"
-[storage]
-url = "https://storage.example.com/bucket"
+[registries]
+"git.corp.example" = "registry.corp.example"
 
 [repos]
 "libs/a" = { url = "git@github.com:thepartly/a.git", revision = "main" }
@@ -699,7 +889,116 @@ url = "https://storage.example.com/bucket"
             "[repos]\n\"a\" = { url = \"https://example.com/a.git\", revision = \"--exec=payload\" }\n"
         )
         .is_err());
-        assert!(load("[storage]\nurl = \"-oProxyCommand=payload\"\n").is_err());
+    }
+
+    #[test]
+    fn a_storage_table_is_refused_with_directions() {
+        for text in [
+            "[storage]\nurl = \"https://bucket.s3.amazonaws.com/x\"\n",
+            "[storage.registries]\n\"a.example\" = \"r.example\"\n",
+        ] {
+            let err = load(text).unwrap_err().to_string();
+            assert!(err.contains("no longer supported"), "{}", err);
+            assert!(err.contains("[registries]"), "{}", err);
+        }
+    }
+
+    #[test]
+    fn a_registry_is_given_without_a_scheme() {
+        assert!(load("[registries]\n\"git.example\" = \"https://r.example\"\n").is_err());
+        assert!(load("[registries]\n\"git.example\" = \"http://r.example:5000\"\n").is_ok());
+        let config = load("[registries]\n\"git.example\" = \"r.example:5000/ns\"\n").unwrap();
+        assert_eq!(config.registries["git.example"], "r.example:5000/ns");
+    }
+
+    #[test]
+    fn hex_revisions_are_names_unless_they_are_full_shas() {
+        // An all-hex branch or tag name is accepted, in every mode: only a full
+        // SHA is taken for a commit, and a name that matches nothing fails
+        // when it is looked up, with a hint about abbreviated commits.
+        for mode in ["readwrite", "artefact"] {
+            for revision in [
+                "20241001",
+                "cafe123",
+                "9fceb02d0ae598e95dc970b74767f19372d61af8",
+            ] {
+                let text = format!(
+                    "[repos]\n\"a\" = {{ url = \"https://example.com/a.git\", revision = \"{}\", mode = \"{}\" }}\n",
+                    revision, mode
+                );
+                assert!(load(&text).is_ok(), "{} {}", mode, revision);
+            }
+        }
+        assert!(!crate::git::is_full_sha("20241001"));
+        assert!(crate::git::is_full_sha(&"a".repeat(64)));
+        assert!(!crate::git::is_full_sha(&"a".repeat(41)));
+    }
+
+    #[test]
+    fn a_single_group_can_skip_the_layer_tables() {
+        let config =
+            load("[artefact]\nroot = \"dist\"\ninclude = [\"**\"]\nexclude = [\"**/*.map\"]\n")
+                .unwrap();
+        let spec = config.artefact.unwrap();
+        assert_eq!(spec.root, "dist");
+        assert_eq!(spec.layers.len(), 1);
+        assert_eq!(spec.layers[0].name, DEFAULT_LAYER);
+        assert_eq!(spec.layers[0].exclude, vec!["**/*.map"]);
+    }
+
+    #[test]
+    fn layer_groups_keep_their_order() {
+        let config = load(
+            "[[artefact.layer]]\nname = \"vendor\"\ninclude = [\"vendor/**\"]\n\n\
+             [[artefact.layer]]\nname = \"app\"\ninclude = [\"**\"]\n",
+        )
+        .unwrap();
+        let names: Vec<String> = config
+            .artefact
+            .unwrap()
+            .layers
+            .into_iter()
+            .map(|l| l.name)
+            .collect();
+        assert_eq!(names, vec!["vendor", "app"]);
+    }
+
+    #[test]
+    fn broken_artefact_tables_are_refused() {
+        for text in [
+            "[artefact]\n",
+            "[artefact]\nincludes = [\"**\"]\n",
+            "[artefact]\ninclude = [\"**\"]\n[[artefact.layer]]\nname = \"a\"\ninclude = [\"**\"]\n",
+            "[artefact]\nroot = \"../out\"\ninclude = [\"**\"]\n",
+            "[artefact]\nroot = \"/abs\"\ninclude = [\"**\"]\n",
+            "[artefact]\ninclude = [\"../**\"]\n",
+            "[artefact]\ninclude = [\"/etc/**\"]\n",
+            "[artefact]\ninclude = [\"\"]\n",
+            "[artefact]\ninclude = [\"a/[\"]\n",
+            "[[artefact.layer]]\nname = \"a\"\ninclude = [\"**\"]\n[[artefact.layer]]\nname = \"a\"\ninclude = [\"x\"]\n",
+            "[[artefact.layer]]\nname = \"has space\"\ninclude = [\"**\"]\n",
+            "[[artefact.layer]]\nname = \"a\"\n",
+        ] {
+            assert!(load(text).is_err(), "should refuse:\n{}", text);
+        }
+    }
+
+    #[test]
+    fn artefact_and_registries_survive_a_rewrite() {
+        for text in [
+            "[registries]\n\"git.example\" = \"r.example\"\n\n[artefact]\nroot = \"dist\"\ninclude = [\"**\"]\nexclude = [\"*.map\"]\n",
+            "[[artefact.layer]]\nname = \"vendor\"\ninclude = [\"vendor/**\"]\n\n[[artefact.layer]]\nname = \"app\"\ninclude = [\"**\"]\nexclude = [\"x\"]\n",
+        ] {
+            let before = load(text).unwrap();
+            let dir = std::env::temp_dir().join(format!("gitscale-cfg-rw-{}-{}", std::process::id(), text.len()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join(CONFIG_FILENAME);
+            write_config(&path, &before).unwrap();
+            let after = load_config(&path).unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+            assert_eq!(before.registries, after.registries);
+            assert_eq!(before.artefact, after.artefact);
+        }
     }
 
     #[test]

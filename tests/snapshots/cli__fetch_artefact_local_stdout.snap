@@ -1,6 +1,6 @@
 ---
 source: tests/cli.rs
-expression: out.stdout
+expression: redact_shas(&out.stdout)
 ---
 Fetching...
-  ok    meta/app (artefact)
+  ok    meta/app (artefact [sha])

@@ -220,7 +220,7 @@ pub fn update(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
-    let (config, _config_root) = load_workspace(root)?;
+    let (config, config_root) = load_workspace(root)?;
     let Some(cache) = open(&config, no_cache) else {
         writeln!(out, "The object cache is off.")?;
         return Ok(());
@@ -235,6 +235,15 @@ pub fn update(
     let names: Vec<String> = selected.iter().map(|e| e.directory.clone()).collect();
     let by_name: std::collections::HashMap<&str, &RepoEntry> =
         selected.iter().map(|e| (e.directory.as_str(), e)).collect();
+    let artefacts = if selected.iter().any(|e| e.is_artefact()) {
+        Some(crate::artefact::Artefacts::new(
+            &config,
+            &config_root,
+            Some(cache.clone()),
+        ))
+    } else {
+        None
+    };
 
     let failed = run_parallel(
         "Updating cache entries...",
@@ -243,6 +252,19 @@ pub fn update(
         |name| {
             let entry = &by_name[name];
             let url = crate::git::remote_url(entry);
+            // An artefact entry holds the image its revision names now, the
+            // same on a developer machine as in CI.
+            if let (true, Some(artefacts)) = (entry.is_artefact(), &artefacts) {
+                return match artefacts.warm(entry) {
+                    Ok(Some(commit)) => RepoStatus::Ok(format!(
+                        "{} (artefact {})",
+                        name,
+                        crate::git::short_sha(&commit)
+                    )),
+                    Ok(None) => RepoStatus::Skip(format!("{} (the cache is off)", name)),
+                    Err(e) => RepoStatus::Fail(format!("{}: {}", name, e)),
+                };
+            }
             let result = if ci {
                 cache.pin(&url, &entry.revision).map(|pinned| match pinned {
                     Some(pinned) => Some(format!(
@@ -320,12 +342,14 @@ pub fn status(
     let declared: std::collections::HashMap<String, &str> = config
         .repos
         .iter()
-        .filter(|e| !e.is_artefact())
         .map(|e| {
-            (
-                cache::entry_name(&crate::git::remote_url(e)),
-                e.directory.as_str(),
-            )
+            let url = crate::git::remote_url(e);
+            let name = if e.is_artefact() {
+                cache::artefact_entry_name(&url)
+            } else {
+                cache::entry_name(&url)
+            };
+            (name, e.directory.as_str())
         })
         .collect();
 
@@ -346,6 +370,7 @@ pub fn status(
         match entry.kind {
             cache::Kind::Mirror => row.mirror += entry.bytes,
             cache::Kind::Snapshot => row.snapshot += entry.bytes,
+            cache::Kind::Artefact => row.artefact += entry.bytes,
         }
         row.last_used = row.last_used.max(entry.last_used);
         // Tagged with the kind that holds them: a snapshot's pins are worth
@@ -367,22 +392,31 @@ pub fn status(
         return Ok(());
     }
 
-    let headers = ["REPO", "MIRROR", "SNAPSHOTS", "TOTAL", "REVS", "LAST USED"];
-    let cells: Vec<[String; 6]> = rows
+    let headers = [
+        "REPO",
+        "MIRROR",
+        "SNAPSHOTS",
+        "ARTEFACTS",
+        "TOTAL",
+        "REVS",
+        "LAST USED",
+    ];
+    let cells: Vec<[String; 7]> = rows
         .iter()
         .map(|(repo, row)| {
             [
                 repo.clone(),
                 size_or_dash(row.mirror),
                 size_or_dash(row.snapshot),
-                size_or_dash(row.mirror + row.snapshot),
+                size_or_dash(row.artefact),
+                size_or_dash(row.mirror + row.snapshot + row.artefact),
                 row.revisions.len().to_string(),
                 cache::ago(row.last_used),
             ]
         })
         .collect();
 
-    let mut widths = [0usize; 6];
+    let mut widths = [0usize; 7];
     for (i, header) in headers.iter().enumerate() {
         widths[i] = header.len().max(
             cells
@@ -394,13 +428,13 @@ pub fn status(
     }
     let last = headers.len() - 1;
     // Sizes and counts read better against the right edge of their columns.
-    let line = |cells: &[String; 6]| {
+    let line = |cells: &[String; 7]| {
         cells
             .iter()
             .enumerate()
             .map(|(i, cell)| match i {
                 i if i == last => cell.clone(),
-                1..=4 => format!("{:>width$}", cell, width = widths[i]),
+                1..=5 => format!("{:>width$}", cell, width = widths[i]),
                 _ => format!("{:<width$}", cell, width = widths[i]),
             })
             .collect::<Vec<_>>()
@@ -440,6 +474,7 @@ pub fn status(
 struct Row {
     mirror: u64,
     snapshot: u64,
+    artefact: u64,
     last_used: Option<std::time::SystemTime>,
     revisions: Vec<(cache::Kind, cache::Revision)>,
 }
@@ -452,11 +487,12 @@ fn size_or_dash(bytes: u64) -> String {
     }
 }
 
-/// A pin ref as something to read: `pin/<40 hex>` is the ref git needs, not a
-/// name anyone scans a column for.
+/// A pin ref or an artefact's commit as something to read: `pin/<40 hex>` is
+/// the ref git needs, not a name anyone scans a column for.
 fn short_revision(name: &str) -> String {
     match name.strip_prefix("pin/") {
         Some(sha) => crate::git::short_sha(sha).to_string(),
+        None if crate::git::is_full_sha(name) => crate::git::short_sha(name).to_string(),
         None => name.to_string(),
     }
 }
@@ -479,9 +515,37 @@ pub fn repair(
         return Ok(());
     };
     let selected = cacheable(&config, names)?;
+    let artefacts = if selected.iter().any(|e| e.is_artefact()) {
+        Some(crate::artefact::Artefacts::new(
+            &config,
+            &config_root,
+            Some(cache.clone()),
+        ))
+    } else {
+        None
+    };
 
     let mut repaired = 0;
     for entry in &selected {
+        // Nothing borrows from an artefact entry, so there is no link to
+        // mend — only blobs to check against their digests. A damaged one is
+        // deleted, and downloaded again the next time it is wanted.
+        if let (true, Some(artefacts)) = (entry.is_artefact(), &artefacts) {
+            match artefacts.repair(entry)? {
+                Some(0) => writeln!(out, "  ok     {}", entry.directory)?,
+                Some(damaged) => {
+                    repaired += 1;
+                    writeln!(
+                        out,
+                        "  repair {} ({} removed)",
+                        entry.directory,
+                        cache::plural(damaged, "damaged blob", "damaged blobs")
+                    )?;
+                }
+                None => writeln!(out, "  skip   {} (not cached)", entry.directory)?,
+            }
+            continue;
+        }
         let checkout = config_root.join(&entry.directory);
         if !checkout.is_dir() || checkout.is_symlink() {
             continue;
@@ -548,11 +612,8 @@ pub fn compact(
     Ok(())
 }
 
-/// The selected entries a cache can hold anything for. An artefact is an
-/// unpacked archive with no object store, so it never has an entry.
+/// The selected entries a cache can hold anything for — every kind, now that
+/// artefacts are cached as image layouts.
 fn cacheable(config: &GitScaleConfig, names: &[String]) -> Result<Vec<RepoEntry>> {
-    Ok(filter_entries(&config.repos, names)?
-        .into_iter()
-        .filter(|e| !e.is_artefact())
-        .collect())
+    filter_entries(&config.repos, names)
 }

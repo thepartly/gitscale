@@ -1,3 +1,4 @@
+pub mod artefact;
 pub mod cache;
 pub mod ci;
 pub mod commands;
@@ -5,11 +6,12 @@ pub mod config;
 pub mod git;
 pub mod gitlab;
 pub mod hooks;
+pub mod oci_layout;
 pub mod progress;
+pub mod registry;
 pub mod resolve;
 pub mod share;
 mod ssh;
-pub mod storage;
 pub mod trust;
 pub mod urls;
 
@@ -114,6 +116,11 @@ enum Commands {
         #[arg(short = 'C', long)]
         root: Option<PathBuf>,
     },
+    /// Publish artefacts, and see what the registry holds for each entry
+    Artefact {
+        #[command(subcommand)]
+        action: ArtefactAction,
+    },
     /// Inspect and maintain the object cache
     Cache {
         #[command(subcommand)]
@@ -129,6 +136,40 @@ enum Commands {
         directory: String,
         #[arg(short = 'C', long)]
         root: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ArtefactAction {
+    /// Pack the files the [artefact] table selects and push them to the
+    /// registry, as the image for one commit
+    Publish {
+        #[arg(short = 'C', long)]
+        root: Option<PathBuf>,
+        /// The commit to publish for (full SHA). Default: the CI job's
+        /// commit, else HEAD
+        #[arg(long, value_name = "SHA")]
+        commit: Option<String>,
+        /// Replace an image already published for this commit with different
+        /// files
+        #[arg(long)]
+        force: bool,
+        /// List what each layer would hold and its digest, without pushing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Show, for each artefact entry, the image, the commit its revision
+    /// names now, whether that commit is published, and what is installed
+    Show {
+        #[arg(short = 'C', long)]
+        root: Option<PathBuf>,
+        names: Vec<String>,
+    },
+    /// List the commits each artefact entry has images for in the registry
+    List {
+        #[arg(short = 'C', long)]
+        root: Option<PathBuf>,
+        names: Vec<String>,
     },
 }
 
@@ -373,6 +414,22 @@ fn run_cli_inner(
         Commands::Remove { directory, root } => {
             commands::remove::run(&directory, root.as_deref(), out)
         }
+        Commands::Artefact { action } => match action {
+            ArtefactAction::Publish {
+                root,
+                commit,
+                force,
+                dry_run,
+            } => {
+                commands::artefact::publish(root.as_deref(), commit.as_deref(), force, dry_run, out)
+            }
+            ArtefactAction::Show { root, names } => {
+                commands::artefact::show(root.as_deref(), &names, out)
+            }
+            ArtefactAction::List { root, names } => {
+                commands::artefact::list(root.as_deref(), &names, out)
+            }
+        },
         Commands::Cache { action } => match action {
             CacheAction::Status { root } => {
                 commands::cache::status(root.as_deref(), verbose, no_cache, out)

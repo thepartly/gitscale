@@ -6,6 +6,7 @@
 - [What is never touched](#what-is-never-touched)
 - [GitLab job token allowlists](#gitlab-job-token-allowlists)
 - [GitHub Actions token scope](#github-actions-token-scope)
+- [Artefact registries](#artefact-registries)
 - [Turning it off](#turning-it-off)
 
 ## The problem
@@ -132,6 +133,29 @@ whole change:
     GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
 ```
 
+## Artefact registries
+
+The same job token logs in to the registry [artefacts](artefacts.md) live in —
+but only to the one registry the CI server owns, and only through a token
+service on the CI server or on that registry:
+
+| | Registry the token may go to | Token service it may go through |
+|---|---|---|
+| GitLab | `CI_REGISTRY` | the CI server itself (`/jwt/auth`) |
+| GitHub | `ghcr.io`, or `containers.<host>` on GitHub Enterprise Server | `ghcr.io` / the registry itself (`/token`) |
+
+A registry anywhere else, or one that names a token service anywhere else, gets
+no credentials from the job — a `docker login` stored on the runner still
+applies, as it would outside CI.
+
+Reading another project's artefacts needs the same grant as cloning it on
+GitLab: the consuming project on the producer's job-token allowlist. On GitHub
+the grant lives on the package instead: the consuming repository added under
+the package's *Manage Actions access* with the Read role, and
+`permissions: packages: read` in the workflow. Publishing needs
+`permissions: packages: write` on GitHub; GitLab's job token can always push to
+its own project's registry.
+
 ## Turning it off
 
 ```
@@ -139,7 +163,7 @@ export GITSCALE_NO_CI_AUTH=1
 ```
 
 GitScale then fetches exactly what the config says, with no rewriting and no
-credential helper.
+credential helper, and offers no job token to any registry.
 
 ---
 

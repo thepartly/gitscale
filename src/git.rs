@@ -141,11 +141,146 @@ pub(crate) fn set_origin(dir: &Path, url: &str) -> Result<bool> {
 // Core operations
 // ---------------------------------------------------------------------------
 
-/// True if `revision` names a commit rather than a branch or tag. `git clone
-/// --branch` accepts only branch and tag names, so a SHA-pinned entry cannot
-/// be cloned shallowly the usual way.
-pub(crate) fn looks_like_sha(revision: &str) -> bool {
-    revision.len() >= 7 && revision.len() <= 64 && revision.chars().all(|c| c.is_ascii_hexdigit())
+/// A commit spelled out in full: 40 hex digits for SHA-1, 64 for SHA-256 (a
+/// repository made with `--object-format=sha256`).
+///
+/// The one way a revision names a commit. Anything else is a branch or tag
+/// name, so a tag called `20241001` is a tag, not a commit: an abbreviated SHA
+/// cannot be told apart from such a name, and git cannot expand one without
+/// the history a shallow clone or an artefact entry never downloads. `git clone
+/// --branch` accepts only branch and tag names, so a SHA-pinned entry cannot be
+/// cloned shallowly the usual way.
+pub fn is_full_sha(revision: &str) -> bool {
+    matches!(revision.len(), 40 | 64) && revision.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Whether `revision` looks like an abbreviated commit: hex digits only, but
+/// too short to be a full SHA. Taken as a branch or tag name like any other;
+/// this only decides whether a failure to find one says why.
+fn is_abbreviated_sha(revision: &str) -> bool {
+    revision.len() >= 7 && !is_full_sha(revision) && revision.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// `error`, with a hint when the revision that could not be found looks like
+/// an abbreviated commit — the likeliest reason, and one git cannot name.
+pub(crate) fn with_revision_hint(revision: &str, error: anyhow::Error) -> anyhow::Error {
+    let message = format!("{:#}", error);
+    if !is_abbreviated_sha(revision) || message.contains("\nhint: ") {
+        return error;
+    }
+    anyhow::anyhow!(
+        "{}\nhint: '{}' is not a branch or tag. A commit must be given as its full SHA \
+         (40 or 64 hex digits): run `git rev-parse {}` in a checkout of the repository",
+        message,
+        revision,
+        revision
+    )
+}
+
+/// The commit `revision` names in the repository at `url`, asked of the remote
+/// itself: one ref advertisement, no objects.
+///
+/// A full SHA is its own answer. An empty revision is the remote's default
+/// branch, whatever it is called today. Anything else must be a branch or a
+/// tag, matched by its exact name — `ls-remote`'s own patterns match any ref
+/// ending in the name, so `main` would also find `feature/main` — and a tag
+/// resolves to the commit it points at, annotated or not.
+pub fn resolve_remote_commit(url: &str, revision: &str) -> Result<String> {
+    if is_full_sha(revision) {
+        return Ok(revision.to_lowercase());
+    }
+    if revision.is_empty() {
+        let listed = run_git(&["ls-remote", "--symref", url, "HEAD"], None, true)?;
+        let text = String::from_utf8_lossy(&listed.stdout);
+        return text
+            .lines()
+            .filter_map(|line| line.split_once('\t'))
+            .find(|(sha, name)| *name == "HEAD" && is_full_sha(sha))
+            .map(|(sha, _)| sha.to_string())
+            .ok_or_else(|| anyhow::anyhow!("{} has no default branch", url));
+    }
+    let listed = ls_remote_revision(url, revision, true)?;
+    listed.map(|(sha, _)| sha).ok_or_else(|| {
+        with_revision_hint(
+            revision,
+            anyhow::anyhow!("'{}' is not a branch or tag of {}", revision, url),
+        )
+    })
+}
+
+/// The commit a branch or tag named `revision` points at on the remote, and
+/// whether it is a tag — `None` when the remote has neither.
+///
+/// Matched by exact name: `ls-remote`'s own patterns match any ref *ending*
+/// in the name, so `main` would also find `zzz/main`. A branch wins over a tag
+/// of the same name, and a tag resolves to the commit it points at: the peeled
+/// line of an annotated tag is listed only when asked for by name, and without
+/// it the answer is the tag object. With `check` false, a failing `ls-remote`
+/// is `None` too.
+pub(crate) fn ls_remote_revision(
+    url: &str,
+    revision: &str,
+    check: bool,
+) -> Result<Option<(String, bool)>> {
+    let (branch, tag) = if revision.starts_with("refs/") {
+        (revision.to_string(), revision.to_string())
+    } else {
+        (
+            format!("refs/heads/{}", revision),
+            format!("refs/tags/{}", revision),
+        )
+    };
+    let peeled_name = format!("{}^{{}}", tag);
+    let listed = run_git(
+        &["ls-remote", url, &branch, &tag, &peeled_name],
+        None,
+        check,
+    )?;
+    if !listed.status.success() {
+        return Ok(None);
+    }
+    let text = String::from_utf8_lossy(&listed.stdout);
+    let (mut on_branch, mut peeled, mut on_tag) = (None, None, None);
+    for (sha, name) in text.lines().filter_map(|line| line.split_once('\t')) {
+        if name == branch && branch != tag {
+            on_branch = Some(sha);
+        } else if name == peeled_name {
+            peeled = Some(sha);
+        } else if name == tag {
+            on_tag = Some(sha);
+        }
+    }
+    Ok(match (on_branch, peeled.or(on_tag)) {
+        (Some(sha), _) => Some((sha.to_string(), false)),
+        // Spelled `refs/heads/…`, the one name is a branch's, not a tag's.
+        (None, Some(sha)) => Some((sha.to_string(), !revision.starts_with("refs/heads/"))),
+        (None, None) => None,
+    })
+}
+
+/// Every branch and tag of the remote at `url`, as `(commit, name)` with the
+/// `refs/heads/` or `refs/tags/` taken off. An annotated tag is listed under
+/// the commit it points at, not the tag object.
+pub fn ls_remote_refs(url: &str) -> Result<Vec<(String, String)>> {
+    let listed = run_git(&["ls-remote", "--heads", "--tags", url], None, true)?;
+    let text = String::from_utf8_lossy(&listed.stdout);
+    let lines: Vec<(&str, &str)> = text.lines().filter_map(|l| l.split_once('\t')).collect();
+    let peeled: std::collections::HashSet<&str> = lines
+        .iter()
+        .filter_map(|(_, name)| name.strip_suffix("^{}"))
+        .collect();
+    Ok(lines
+        .iter()
+        .filter(|(_, name)| !peeled.contains(name))
+        .map(|(sha, name)| {
+            let name = name.strip_suffix("^{}").unwrap_or(name);
+            let short = name
+                .strip_prefix("refs/heads/")
+                .or_else(|| name.strip_prefix("refs/tags/"))
+                .unwrap_or(name);
+            (sha.to_string(), short.to_string())
+        })
+        .collect())
 }
 
 /// A commit as people read it: its first 7 hex digits, git's (and GitHub's)
@@ -204,6 +339,30 @@ pub fn is_checkout(dir: &Path) -> bool {
 /// snapshot cache entry. See [`crate::share`] and [`crate::cache`] for how one
 /// is worked out; [`Source::default`] always produces an ordinary clone.
 pub fn clone_repo(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source) -> Result<()> {
+    check_names_a_ref(entry)?;
+    clone_repo_at(entry, root, verbose, source).map_err(|e| with_revision_hint(&entry.revision, e))
+}
+
+/// Refuse an abbreviated commit before git gets to expand it. A full clone
+/// would — it has the history — while a shallow one cannot, so the same entry
+/// would work on a developer machine and fail in CI. A revision that only
+/// looks like one, an all-hex branch or tag name, is checked with the remote
+/// and goes ahead.
+fn check_names_a_ref(entry: &RepoEntry) -> Result<()> {
+    if entry.is_artefact() || !is_abbreviated_sha(&entry.revision) {
+        return Ok(());
+    }
+    let url = remote_url(entry);
+    if ls_remote_revision(&url, &entry.revision, true)?.is_some() {
+        return Ok(());
+    }
+    Err(with_revision_hint(
+        &entry.revision,
+        anyhow::anyhow!("'{}' is not a branch or tag of {}", entry.revision, url),
+    ))
+}
+
+fn clone_repo_at(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source) -> Result<()> {
     if entry.is_artefact() {
         return Ok(());
     }
@@ -229,7 +388,7 @@ pub fn clone_repo(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source
 
     if let Some(pinned) = &source.pinned {
         clone_pinned(entry, root, &dest, pinned, verbose)?;
-    } else if source.shallow && looks_like_sha(&entry.revision) {
+    } else if source.shallow && is_full_sha(&entry.revision) {
         // This path builds the repository with `init` + a one-commit `fetch`
         // rather than `clone`, and there is no `--reference` for fetch. Little
         // is lost: a depth-1 fetch of a single commit transfers about as much
@@ -419,7 +578,9 @@ pub fn is_shallow(dest: &Path) -> bool {
 }
 
 pub fn fetch_repo(entry: &RepoEntry, root: &Path, source: &Source) -> Result<()> {
+    check_names_a_ref(entry)?;
     refresh(entry, &root.join(&entry.directory), source)
+        .map_err(|e| with_revision_hint(&entry.revision, e))
 }
 
 /// Bring into `dest` the refs `entry.revision` needs, without moving the
@@ -433,7 +594,7 @@ pub fn fetch_repo(entry: &RepoEntry, root: &Path, source: &Source) -> Result<()>
 /// a full one fetches its remote.
 fn refresh(entry: &RepoEntry, dest: &Path, source: &Source) -> Result<()> {
     let shallow = is_shallow(dest);
-    let sha_pin = shallow && looks_like_sha(&entry.revision) && source.pinned.is_none();
+    let sha_pin = shallow && is_full_sha(&entry.revision) && source.pinned.is_none();
     if source.local.is_some() && !sha_pin {
         return fetch_from_cache(dest, source);
     }
@@ -575,6 +736,11 @@ fn fast_forward(dest: &Path) -> Result<()> {
 /// is the usual case in a freshly created worktree, where the hook-triggered
 /// pull is the first thing to run. `reference` is used only for that clone.
 pub fn pull_repo(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source) -> Result<()> {
+    check_names_a_ref(entry)?;
+    pull_repo_at(entry, root, verbose, source).map_err(|e| with_revision_hint(&entry.revision, e))
+}
+
+fn pull_repo_at(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source) -> Result<()> {
     if entry.is_artefact() {
         return Ok(());
     }
@@ -598,7 +764,7 @@ pub fn pull_repo(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source)
                 true,
             )?;
         } else if is_shallow(&dest) {
-            if looks_like_sha(&entry.revision) {
+            if is_full_sha(&entry.revision) {
                 // Detach rather than reset: a checkout moved here from a
                 // branch pin would otherwise drag that branch to this commit.
                 run_git(
@@ -633,7 +799,7 @@ pub fn pull_repo(entry: &RepoEntry, root: &Path, verbose: bool, source: &Source)
 fn fetch_shallow(entry: &RepoEntry, dest: &Path) -> Result<()> {
     if entry.revision.is_empty() {
         run_git(&["fetch", "--depth", "1", "--quiet"], Some(dest), true)?;
-    } else if looks_like_sha(&entry.revision) {
+    } else if is_full_sha(&entry.revision) {
         run_git(
             &[
                 "fetch",
@@ -911,6 +1077,9 @@ pub struct RepoStatus {
     /// answer as an abbreviated commit — a spelling the revision can never
     /// match, however right the checkout is.
     pub at_expected: bool,
+    /// What an artefact entry has installed and what the last fetch saw —
+    /// `None` for a git entry.
+    pub artefact: Option<crate::artefact::State>,
 }
 
 impl RepoStatus {
@@ -934,6 +1103,7 @@ impl RepoStatus {
             has_unlinked_modified: false,
             cache: crate::cache::CacheUse::Unused,
             at_expected: true,
+            artefact: None,
         }
     }
 
@@ -1136,25 +1306,15 @@ pub fn get_artefact_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
     if dest.is_symlink() {
         return RepoStatus::symlink(entry, &dest, false);
     }
-
-    let exists = crate::storage::is_downloaded(&dest);
-    let read = |name: &str| {
-        fs::read_to_string(dest.join(name))
-            .unwrap_or_default()
-            .trim()
-            .to_string()
-    };
-    let (local, remote) = (read(".etag"), read(".etag-remote"));
-    let behind = (!local.is_empty() && !remote.is_empty() && local != remote) as i32;
-
+    let state = crate::artefact::state(entry, root);
     RepoStatus {
-        exists,
-        current_ref: if exists {
-            "artefact".to_string()
-        } else {
-            String::new()
-        },
-        behind,
+        exists: state.installed.is_some(),
+        current_ref: state
+            .installed
+            .as_ref()
+            .map(|i| short_sha(&i.commit).to_string())
+            .unwrap_or_default(),
+        artefact: Some(state),
         ..RepoStatus::new(entry)
     }
 }

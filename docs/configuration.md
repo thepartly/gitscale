@@ -3,7 +3,8 @@
 - [Where the file lives](#where-the-file-lives)
 - [A complete example](#a-complete-example)
 - [`[repos]`](#repos)
-- [`[storage]`](#storage)
+- [`[registries]`](#registries)
+- [`[artefact]`](#artefact)
 - [`[cache]`](#cache)
 - [`[share]`](#share)
 - [`[clean]`](#clean)
@@ -22,7 +23,9 @@ search from `PATH` instead.
 A checked-out sub-repository may carry its own `.gitscale.toml`. Which parts of
 it are read, and when, is covered under [nested configs](#nested-configs).
 
-Unknown keys and unknown tables are ignored on read — but see
+Unknown keys and unknown tables are ignored on read, except inside
+[`[artefact]`](#artefact), where a misspelt key would quietly publish less than
+meant — but see
 [how `add` and `remove` rewrite the file](#how-add-and-remove-rewrite-the-file).
 
 ## A complete example
@@ -34,8 +37,13 @@ Unknown keys and unknown tables are ignored on read — but see
 "meta/frontend" = { url = "https://github.com/org/frontend.git", revision = "main", mode = "artefact" }
 "vendor/tools"  = { url = "https://github.com/org/tools.git", recursive = false }
 
-[storage]
-url = "https://my-bucket.s3.us-east-1.amazonaws.com/gitscale"
+[registries]
+"gitlab.corp.example" = "registry.corp.example"
+
+[artefact]
+root    = "dist"
+include = ["**"]
+exclude = ["**/*.map"]
 
 [cache]
 enabled    = true
@@ -70,29 +78,78 @@ the config.
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `url` | string | **required** | Repository URL: HTTPS, SSH (`git@host:owner/repo.git` or `ssh://git@host/owner/repo.git`), or a local path |
-| `revision` | string | `""` | Branch, tag or commit SHA. Empty means the remote's default branch, or a revision [adopted from a child config](recursive-dependencies.md#revision-resolution-and-the-mismatch-check). See [pinning a revision](dependencies.md#pinning-a-revision) |
+| `revision` | string | `""` | Branch, tag or full commit SHA (40 or 64 hex digits). Empty means the remote's default branch, or a revision [adopted from a child config](recursive-dependencies.md#revision-resolution-and-the-mismatch-check). See [pinning a revision](dependencies.md#pinning-a-revision) |
 | `mode` | string | `"readwrite"` | `"readwrite"`, `"readonly"` or `"artefact"`. See [checkout modes](dependencies.md#checkout-modes) |
 | `recursive` | bool | `true` | Read this repository's own `.gitscale.toml`: resolve its transitive dependencies, and clean it by its own `[clean]` rules. With `false`, that config is not read at all, and [`clean`](clean.md#per-repo-clean) cleans the repository without its keep-list |
 
 The directory key must be relative and free of `..`, and must not be empty.
 
-## `[storage]`
+## `[registries]`
 
-Where [artefact](dependencies.md#artefact) archives live.
+Where [artefacts](artefacts.md) are published, for repositories the built-in
+mapping does not cover. GitHub, GitLab.com and the registry a CI job's own
+server owns need nothing here — see
+[where artefacts live](artefacts.md#where-artefacts-live).
+
+```toml
+[registries]
+"gitlab.corp.example" = "registry.corp.example"
+"/srv/repos/"         = "registry.corp.example:5000/mirrors"
+```
+
+| Key | Value |
+|---|---|
+| a host, such as `gitlab.corp.example` | The registry for every repository on that host, as `host[:port][/namespace]`. The image is `<registry>/<repo path>/gitscale` |
+| anything containing `/`: a URL prefix | The registry for every repository URL starting with it, on a path boundary. The longest matching prefix wins, and the image path is what follows the prefix |
+
+Both kinds of key and value must be non-empty. A value carries no scheme,
+except `http://` to opt in to plain HTTP for a registry without TLS. A registry
+on `localhost`, `127.0.0.1` or `[::1]` is spoken to over plain HTTP anyway,
+every other one over HTTPS. No credential is sent over plain HTTP to anything
+but this machine.
+
+The table is read by consumers and by [`artefact publish`](artefacts.md#artefact-publish)
+alike, so a producer and its consumers on a self-hosted forge need the same
+entry.
+
+The `[storage]` table, whose `url` named an S3, GCS or local bucket, is no
+longer supported: a config that has one fails to load, with directions.
+
+## `[artefact]`
+
+What [`gitscale artefact publish`](artefacts.md#artefact-publish) ships from
+this repository: its build output, as one image layer per group of glob
+patterns.
+
+```toml
+[artefact]
+root = "dist"
+
+[[artefact.layer]]
+name    = "vendor"
+include = ["vendor/**"]
+
+[[artefact.layer]]
+name    = "app"
+include = ["**"]
+exclude = ["**/*.map"]
+```
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `url` | string | — | Base URL for artefact objects. **Required if the table is present**, and must not be empty |
+| `root` | string | `"."` | The directory, relative to the config, that patterns and the archive's paths are relative to. Must stay below the config's directory |
+| `include` | array of strings | — | For a single group: the files to ship |
+| `exclude` | array of strings | `[]` | For a single group: files to leave out of what `include` matched |
+| `layer` | array of tables | — | One table per group, in layer order, each with `name`, `include` and an optional `exclude`. Use either these or `include` directly, not both |
 
-```toml
-[storage]
-url = "https://my-bucket.s3.us-east-1.amazonaws.com/gitscale"
-```
+A layer's `name` is letters, digits, `.`, `_` or `-`, unique, and recorded as
+the layer's title. Patterns are [plain globs](artefacts.md#patterns) relative to
+`root`; one that starts with `/`, contains `.` or `..` components, or does not
+compile is an error when the config is read. A file goes to the first group
+that matches it, and a group that matches nothing fails the publish.
 
-Backends, credentials and the object layout are covered in
-[artefact storage](dependencies.md#artefact-storage). Without this table,
-artefact entries fail with `no [storage] configured`; git entries are
-unaffected.
+This table belongs to the producing repository. A workspace that declares an
+artefact entry never reads it.
 
 ## `[cache]`
 
@@ -155,8 +212,8 @@ When a checked-out repository carries its own `.gitscale.toml` and the entry is
   instead of a nested checkout.
 - **`[clean]`** — to decide what [`clean`](clean.md) keeps in that repository.
 
-Everything else in a nested config — `[storage]`, `[cache]`, `[share]`,
-`[hooks]` — belongs to that repository when it is used as a workspace in its own
+Everything else in a nested config — `[registries]`, `[artefact]`,
+`[cache]`, `[share]`, `[hooks]` — belongs to that repository when it is used as a workspace in its own
 right, and is not read by the parent.
 
 ## Values GitScale refuses to pass to git
@@ -188,8 +245,10 @@ parsed. Consequences:
 - Defaults are not written back: `mode = "readwrite"`, `recursive = true`, an
   empty revision, and every default `[cache]` / `[share]` / `[clean]` / `[hooks]`
   value are simply omitted.
-- Tables are emitted in a fixed order: `[share]`, `[cache]`, `[storage]`,
-  `[hooks]`, `[clean]`, `[repos]`, with entries inline and sorted by directory.
+- Tables are emitted in a fixed order: `[share]`, `[cache]`,
+  `[registries]`, `[artefact]`, `[hooks]`, `[clean]`, `[repos]`, with
+  entries inline and sorted by directory. A single `[artefact]` group named
+  `default` is written in the short form, with `include` directly in the table.
 
 If you keep comments in the file, edit it by hand instead.
 
@@ -219,13 +278,15 @@ If you keep comments in the file, edit it by hand instead.
 | `GITHUB_TOKEN`, `GH_TOKEN` | GitHub — the token, first one found |
 | `GITHUB_SERVER_URL` | GitHub — the server, default `https://github.com` |
 
-### Artefact storage
+### Artefact registries
 
-| Variable | Backend |
+| Variable | Effect |
 |---|---|
-| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | S3-compatible; required |
-| `AWS_DEFAULT_REGION` | S3-compatible; otherwise derived from the URL, else `us-east-1` |
-| `GOOGLE_TOKEN`, `GCLOUD_ACCESS_TOKEN` | Google Cloud Storage, first one found |
+| `CI_REGISTRY` | GitLab — the registry the CI server owns: the only one the job token is sent to, and where repositories on the CI server's own host publish |
+| `CI_COMMIT_SHA`, `CI_PROJECT_URL` | GitLab, with `GITLAB_CI=true` — the commit and repository `artefact publish` publishes for |
+| `GITHUB_SHA`, `GITHUB_REPOSITORY` | GitHub Actions — the same |
+| `DOCKER_CONFIG` | The directory holding Docker's `config.json`, instead of `~/.docker` — for [stored logins](artefacts.md#logging-in) |
+| `REGISTRY_AUTH_FILE` | Podman's auth file, instead of `$XDG_RUNTIME_DIR/containers/auth.json` and `~/.config/containers/auth.json` |
 
 ### Set by GitScale for git
 
@@ -242,4 +303,4 @@ these is missing, once for the whole run.
 
 ---
 
-[← 2.8 Cleaning](clean.md) · [Contents](README.md) · [Next → 4. Command line reference](cli.md)
+[← 2.9 Artefacts](artefacts.md) · [Contents](README.md) · [Next → 4. Command line reference](cli.md)

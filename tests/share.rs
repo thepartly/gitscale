@@ -363,7 +363,8 @@ fn editing_the_config_preserves_every_table() {
     let bare = env.create_bare_repo("core", "main", &[("a.txt", "a")]);
     env.write_config(&format!(
         "[share]\ndissociate = true\n\n\
-         [storage]\nurl = \"https://example.com/artefacts\"\n\n\
+         [registries]\n\"git.example\" = \"registry.example\"\n\n\
+         [artefact]\nroot = \"dist\"\ninclude = [\"**\"]\n\n\
          [hooks]\npost_sync = \"echo hi\"\non_pull_error = \"fail\"\n\n\
          [repos]\n\"libs/core\" = {{ url = \"{}\", revision = \"main\", mode = \"readonly\" }}\n",
         bare.display()
@@ -375,9 +376,11 @@ fn editing_the_config_preserves_every_table() {
     let config = gitscale::config::load_config(&env.playground.join(".gitscale.toml")).unwrap();
     assert!(config.share.dissociate, "[share] should survive");
     assert_eq!(
-        config.storage_url, "https://example.com/artefacts",
-        "[storage] should survive"
+        config.registries.get("git.example").map(String::as_str),
+        Some("registry.example"),
+        "[registries] should survive"
     );
+    assert!(config.artefact.is_some(), "[artefact] should survive");
     assert_eq!(
         config.hooks.post_sync.as_deref(),
         Some("echo hi"),
