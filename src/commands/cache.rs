@@ -1,263 +1,62 @@
-//! `gitscale cache` — the commands that own the cache directly.
+//! `gitscale cache` — the commands that own the CI cache directly.
 //!
-//! Everything else touches it implicitly: a clone, fetch or pull updates the
-//! entries it is about to read and says nothing about it. These are for the
-//! times that is not enough — warming a repo nobody has pulled yet, putting a
-//! hand-cloned root on the cache, rebuilding an entry something deleted, and
-//! keeping the directory from growing without bound.
+//! In CI, `pull` and `fetch` use the cache by themselves and say nothing about
+//! it. These work on it anywhere, `CI` set or not: to see what it holds, to
+//! warm it — a runner image built ahead of time — and to keep it from growing
+//! without bound.
 
 use anyhow::Result;
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use crate::cache::{self, Adoption, Cache};
-use crate::config::{
-    filter_entries, find_config, load_config, load_workspace, GitScaleConfig, RepoEntry,
-};
-use crate::git::is_ci;
+use crate::cache::{self, Cache};
+use crate::config::{find_config, load_config, load_workspace, GitScaleConfig, RepoEntry};
 use crate::progress::{run_parallel, RepoStatus};
-use crate::share::Source;
 
-/// The cache a command should use: what the config asks for, unless
-/// `--no-cache` was given.
-pub fn open(config: &GitScaleConfig, no_cache: bool) -> Option<Cache> {
-    if no_cache {
-        return None;
-    }
-    Cache::open(&config.cache)
-}
-
-/// Where a command's checkouts get their objects, worked out once per command:
-/// the cache (unless `--no-cache`), the workspace this one was derived from,
-/// and whether this is CI. [`Sources::for_entry`] answers for each entry.
-pub struct Sources {
-    pub cache: Option<Cache>,
-    workspace: Option<PathBuf>,
-    dissociate: bool,
-    pub ci: bool,
-    verbose: bool,
-}
-
-impl Sources {
-    pub fn new(config: &GitScaleConfig, config_root: &Path, no_cache: bool, verbose: bool) -> Self {
-        Sources {
-            cache: open(config, no_cache),
-            // Resolved once: every entry maps onto the same source workspace,
-            // and the lookup shells out to git.
-            workspace: crate::share::source_workspace(config_root),
-            dissociate: config.share.dissociate,
-            ci: is_ci(),
-            verbose,
-        }
-    }
-
-    /// Like [`Sources::new`], for a command that updates the cache: the
-    /// workspace root is put on it too, as the config asks — see
-    /// [`adopt_root`].
-    pub fn adopting(
-        config: &GitScaleConfig,
-        config_root: &Path,
-        no_cache: bool,
-        verbose: bool,
-        out: &mut dyn Write,
-    ) -> Result<Self> {
-        let sources = Sources::new(config, config_root, no_cache, verbose);
-        adopt_root(sources.cache.as_ref(), config, config_root, out)?;
-        Ok(sources)
-    }
-
-    pub fn for_entry(&self, entry: &RepoEntry) -> Source {
-        cache::source_for(
-            self.cache.as_ref(),
-            self.workspace.as_deref(),
-            entry,
-            self.dissociate,
-            self.ci,
-            self.verbose,
-        )
-    }
-}
-
-/// Relink the workspace's own root repository to the cache, if the config asks
-/// for it, and keep the entry a linked root borrows from alive.
-///
-/// Opt-in, and it stays opt-in: adopting deletes the root's own objects and
-/// converts a repository that stood on its own into one that depends on the
-/// cache. A root `gitscale clone` created is already linked, so adopting is
-/// only ever about one somebody cloned with plain `git clone` — but both kinds
-/// need their entry marked as wanted, since nothing else about the root ever
-/// goes through the cache.
-pub fn adopt_root(
-    cache: Option<&Cache>,
-    config: &GitScaleConfig,
-    config_root: &Path,
-    out: &mut dyn Write,
-) -> Result<()> {
-    let Some(cache) = cache else {
-        return Ok(());
-    };
-    // A linked worktree shares its object store with the main worktree and
-    // every sibling, so adopting from one would relink all of them. That is
-    // `gitscale cache adopt --shared`, asked for by name — never a side effect
-    // of the pull `git worktree add` fires. The main worktree adopts for all.
-    let linked = crate::share::main_worktree(config_root).is_some();
-    if config.cache.adopt_root && !linked && crate::git::is_repo_root(config_root) {
-        if let Some(url) = crate::git::origin_url(config_root) {
-            // Anything short of adopting is left for `gitscale cache adopt` to
-            // explain: said on every pull, it would only be noise.
-            if cache.adopt(config_root, &url)? == Adoption::Adopted {
-                writeln!(out, "  adopt {} into the cache", config_root.display())?;
-            }
-        }
-    }
-    cache.keep_alive(config_root);
-    Ok(())
-}
-
-/// `gitscale cache adopt` — relink the workspace root to the cache now,
-/// whatever `[cache] adopt_root` says, and say why when it will not.
-///
-/// From a linked worktree it refuses unless `shared` is set: the object store
-/// it would relink belongs to the main worktree, and to every sibling with it.
-pub fn adopt(root: Option<&Path>, shared: bool, no_cache: bool, out: &mut dyn Write) -> Result<()> {
-    let (config, config_root) = load_workspace(root)?;
-    let Some(cache) = open(&config, no_cache) else {
-        writeln!(out, "The object cache is off.")?;
-        return Ok(());
-    };
-    if !crate::git::is_repo_root(&config_root) {
-        anyhow::bail!(
-            "{} is not the top of a git repository",
-            config_root.display()
-        );
-    }
-    let Some(url) = crate::git::origin_url(&config_root) else {
-        anyhow::bail!("{} has no origin to cache", config_root.display());
-    };
-    let worktrees = crate::share::worktrees(&config_root);
-    let main = crate::share::main_worktree(&config_root);
-    if let Some(main) = &main {
-        // Nothing to relink, so nothing to refuse.
-        if cache.borrows(&config_root) {
-            writeln!(
-                out,
-                "{} already borrows from the cache.",
-                config_root.display()
-            )?;
-            return Ok(());
-        }
-        if !shared {
-            anyhow::bail!(
-                "{} is a worktree of {}. Adopting would relink the object store it shares with: {}. \
-                 Run `gitscale cache adopt` in {}, or pass --shared to do it from here.",
-                config_root.display(),
-                main.display(),
-                sharers(&worktrees, &config_root),
-                main.display()
-            );
-        }
-    }
-    let shown = config_root.display();
-    match cache.adopt(&config_root, &url)? {
-        Adoption::Adopted if worktrees.len() > 1 => {
-            let owner = main.as_deref().unwrap_or(&config_root);
-            writeln!(
-                out,
-                "Adopted the repository at {} into the cache.",
-                owner.display()
-            )?;
-            // One object store, so every worktree of it moved with it.
-            writeln!(
-                out,
-                "  Its other worktrees borrow from the cache too: {}",
-                sharers(&worktrees, owner)
-            )?;
-        }
-        Adoption::Adopted => writeln!(out, "Adopted {} into the cache.", shown)?,
-        Adoption::Already => writeln!(out, "{} already borrows from the cache.", shown)?,
-        Adoption::Borrowing => writeln!(
-            out,
-            "Left {} alone: it borrows objects from somewhere else, and adopting would cut it off from them.",
-            shown
-        )?,
-        Adoption::Shallow => writeln!(
-            out,
-            "Left {} alone: it is a shallow clone, and a mirror cannot take refs from one.",
-            shown
-        )?,
-        Adoption::Empty => writeln!(
-            out,
-            "Left {} alone: it has no remote-tracking branches to seed an entry with.",
-            shown
-        )?,
-    }
-    Ok(())
-}
-
-/// Every worktree in `worktrees` other than `except`, comma-separated — who
-/// else an adoption touches.
-fn sharers(worktrees: &[std::path::PathBuf], except: &Path) -> String {
-    let except = except
-        .canonicalize()
-        .unwrap_or_else(|_| except.to_path_buf());
-    worktrees
-        .iter()
-        .filter(|w| w.canonicalize().map(|w| w != except).unwrap_or(true))
-        .map(|w| w.display().to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
+/// The cache at its usual location, or an error saying there is none.
+fn open() -> Result<Cache> {
+    Cache::open().ok_or_else(|| {
+        anyhow::anyhow!("no cache location: set GITSCALE_CACHE_DIR, XDG_DATA_HOME or HOME")
+    })
 }
 
 /// `gitscale cache update` — bring entries up to date without touching any
-/// checkout. The one command that warms a repo nobody has pulled yet.
+/// checkout: a snapshot pin for each git entry's revision, and the image each
+/// artefact entry's revision names — exactly what a CI job would take.
 pub fn update(
     root: Option<&Path>,
     names: &[String],
     verbose: bool,
-    no_cache: bool,
     interactive: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
     let (config, config_root) = load_workspace(root)?;
-    let Some(cache) = open(&config, no_cache) else {
-        writeln!(out, "The object cache is off.")?;
-        return Ok(());
-    };
+    let cache = open()?;
     if config.repos.is_empty() {
         writeln!(out, "Nothing to cache.")?;
         return Ok(());
     }
     // The revisions resolution settles on, implicit dependencies included:
-    // what the next clone or pull will ask the cache for.
+    // what the next job will ask the cache for.
+    let sources = crate::store::Sources {
+        stores: None,
+        cache: Some(cache.clone()),
+    };
+    let artefacts = crate::artefact::Artefacts::new(&config, &config_root, sources.images());
     let resolution = crate::resolve::workspace(
         &config,
         &config_root,
         true,
-        Some(cache.clone()),
-        Some(&crate::artefact::Artefacts::new(
-            &config,
-            &config_root,
-            Some(cache.clone()),
-        )),
+        &sources,
+        Some(&artefacts),
         verbose,
     )?;
     let selected = resolution.select(names)?;
-
-    let ci = is_ci();
     let names: Vec<String> = selected.iter().map(|e| e.directory.clone()).collect();
     let by_name: std::collections::HashMap<&str, &RepoEntry> =
         selected.iter().map(|e| (e.directory.as_str(), e)).collect();
-    let artefacts = if selected.iter().any(|e| e.is_artefact()) {
-        Some(crate::artefact::Artefacts::new(
-            &config,
-            &config_root,
-            Some(cache.clone()),
-        ))
-    } else {
-        None
-    };
 
     let failed = run_parallel(
         "Updating cache entries...",
@@ -265,34 +64,27 @@ pub fn update(
         interactive,
         |name| {
             let entry = &by_name[name];
-            let url = crate::git::remote_url(entry);
-            // An artefact entry holds the image its revision names now, the
-            // same on a developer machine as in CI.
-            if let (true, Some(artefacts)) = (entry.is_artefact(), &artefacts) {
+            if entry.is_artefact() {
                 return match artefacts.warm(entry) {
                     Ok(Some(commit)) => RepoStatus::Ok(format!(
                         "{} (artefact {})",
                         name,
                         crate::git::short_sha(&commit)
                     )),
-                    Ok(None) => RepoStatus::Skip(format!("{} (the cache is off)", name)),
+                    Ok(None) => RepoStatus::Skip(format!("{} (no image store)", name)),
                     Err(e) => RepoStatus::Fail(format!("{}: {}", name, e)),
                 };
             }
-            let result = if ci {
-                cache.pin(&url, &entry.revision).map(|pinned| match pinned {
-                    Some(pinned) => Some(format!(
-                        "{} (pinned at {})",
-                        name,
-                        crate::git::short_sha(&pinned.sha)
-                    )),
-                    None => None,
-                })
-            } else {
-                cache.mirror(&url).map(|_| Some(name.to_string()))
-            };
-            match result {
-                Ok(Some(message)) => RepoStatus::Ok(message),
+            let commit = resolution
+                .slot(name)
+                .and_then(|s| s.commit.clone())
+                .unwrap_or_else(|| entry.revision.clone());
+            match cache.pin(&crate::git::remote_url(entry), &commit) {
+                Ok(Some(pinned)) => RepoStatus::Ok(format!(
+                    "{} (pinned at {})",
+                    name,
+                    crate::git::short_sha(&pinned.sha)
+                )),
                 Ok(None) => RepoStatus::Skip(format!("{} (nothing to pin)", name)),
                 Err(e) => RepoStatus::Fail(format!("{}: {}", name, e)),
             }
@@ -320,10 +112,10 @@ pub fn update(
     Ok(())
 }
 
-/// The config `status` and `compact` honour when there is one. Neither needs
-/// a workspace, so finding no config is fine; finding one that does not parse
-/// is not, since it may name a cache other than the default these would
-/// otherwise act on.
+/// The config `status` uses when there is one, to name the entries this
+/// workspace declares. Not needed — the cache belongs to the user, not to a
+/// workspace — but one that does not parse is an error, not a reason to
+/// guess.
 fn optional_workspace_config(root: Option<&Path>) -> Result<GitScaleConfig> {
     match find_config(root) {
         Ok(path) => load_config(&path),
@@ -331,26 +123,13 @@ fn optional_workspace_config(root: Option<&Path>) -> Result<GitScaleConfig> {
     }
 }
 
-/// `gitscale cache status` — what the cache holds, entry by entry.
-///
-/// The summary line under `gitscale status` answers "where is it and what is
-/// it costing me". This answers the next question: which repository each entry
-/// belongs to, what it is holding, and how long since anything wanted it —
-/// which is what decides whether `compact` would take it.
-pub fn status(
-    root: Option<&Path>,
-    verbose: bool,
-    no_cache: bool,
-    out: &mut dyn Write,
-) -> Result<()> {
-    // As with `compact`: the cache belongs to the user, so this works from
-    // anywhere. A config is used when there is one, to name the entries this
-    // workspace declares and to honour `[cache] dir`.
+/// `gitscale cache status` — what the cache holds, entry by entry: which
+/// repository each belongs to, what it is holding, and how long since
+/// anything wanted it — which is what decides whether `compact` would take
+/// it.
+pub fn status(root: Option<&Path>, out: &mut dyn Write) -> Result<()> {
     let config = optional_workspace_config(root)?;
-    let Some(cache) = open(&config, no_cache) else {
-        writeln!(out, "The object cache is off.")?;
-        return Ok(());
-    };
+    let cache = open()?;
 
     // Entry directory name -> the directory this workspace declares it under.
     let declared: std::collections::HashMap<String, &str> = config
@@ -359,17 +138,16 @@ pub fn status(
         .map(|e| {
             let url = crate::git::remote_url(e);
             let name = if e.is_artefact() {
-                cache::artefact_entry_name(&url)
+                crate::store::image_entry_name(&url)
             } else {
-                cache::entry_name(&url)
+                crate::store::entry_name(&url)
             };
             (name, e.directory.as_str())
         })
         .collect();
 
-    // One row per repository, not per entry: a repository can have a mirror and
-    // a snapshot at once — a developer machine that also runs jobs — and what
-    // it costs is both of them.
+    // One row per repository, not per entry: a repository consumed both as
+    // source and as an artefact has an entry of each kind.
     let mut rows: BTreeMap<String, Row> = BTreeMap::new();
     for entry in cache.stats() {
         let name = entry
@@ -382,15 +160,11 @@ pub fn status(
         let repo = declared.get(&name).map(|d| d.to_string()).unwrap_or(name);
         let row = rows.entry(repo).or_default();
         match entry.kind {
-            cache::Kind::Mirror => row.mirror += entry.bytes,
             cache::Kind::Snapshot => row.snapshot += entry.bytes,
-            cache::Kind::Artefact => row.artefact += entry.bytes,
+            cache::Kind::Image => row.image += entry.bytes,
         }
         row.last_used = row.last_used.max(entry.last_used);
-        // Tagged with the kind that holds them: a snapshot's pins are worth
-        // listing every time, a mirror's refs only when asked for.
-        row.revisions
-            .extend(entry.revisions.into_iter().map(|rev| (entry.kind, rev)));
+        row.revisions.extend(entry.revisions);
     }
 
     let usage = cache.usage();
@@ -406,31 +180,22 @@ pub fn status(
         return Ok(());
     }
 
-    let headers = [
-        "REPO",
-        "MIRROR",
-        "SNAPSHOTS",
-        "ARTEFACTS",
-        "TOTAL",
-        "REVS",
-        "LAST USED",
-    ];
-    let cells: Vec<[String; 7]> = rows
+    let headers = ["REPO", "SNAPSHOTS", "IMAGES", "TOTAL", "REVS", "LAST USED"];
+    let cells: Vec<[String; 6]> = rows
         .iter()
         .map(|(repo, row)| {
             [
                 repo.clone(),
-                size_or_dash(row.mirror),
                 size_or_dash(row.snapshot),
-                size_or_dash(row.artefact),
-                size_or_dash(row.mirror + row.snapshot + row.artefact),
+                size_or_dash(row.image),
+                size_or_dash(row.snapshot + row.image),
                 row.revisions.len().to_string(),
                 cache::ago(row.last_used),
             ]
         })
         .collect();
 
-    let mut widths = [0usize; 7];
+    let mut widths = [0usize; 6];
     for (i, header) in headers.iter().enumerate() {
         widths[i] = header.len().max(
             cells
@@ -442,13 +207,13 @@ pub fn status(
     }
     let last = headers.len() - 1;
     // Sizes and counts read better against the right edge of their columns.
-    let line = |cells: &[String; 7]| {
+    let line = |cells: &[String; 6]| {
         cells
             .iter()
             .enumerate()
             .map(|(i, cell)| match i {
                 i if i == last => cell.clone(),
-                1..=5 => format!("{:>width$}", cell, width = widths[i]),
+                1..=4 => format!("{:>width$}", cell, width = widths[i]),
                 _ => format!("{:<width$}", cell, width = widths[i]),
             })
             .collect::<Vec<_>>()
@@ -459,38 +224,28 @@ pub fn status(
     writeln!(out, "  {}", line(&headers.map(|h| h.to_string())))?;
     for (row, rendered) in rows.values().zip(&cells) {
         writeln!(out, "  {}", line(rendered))?;
-        for (kind, revision) in &row.revisions {
-            // Pins are listed every time: a snapshot holds a handful, and they
-            // are what `compact` drops one at a time. A mirror's refs are
-            // every branch and tag the remote has, which is not a summary, so
-            // those are counted above and listed only on request.
-            if *kind == cache::Kind::Mirror && !verbose {
-                continue;
-            }
+        // Every pin and image listed with its own age: they are what
+        // `compact` drops one at a time.
+        for revision in &row.revisions {
             writeln!(
                 out,
-                "      {}{}",
+                "      {}  {}",
                 short_revision(&revision.name),
-                match cache::ago(revision.last_used) {
-                    // A mirror's refs are kept as a set, not one by one, so
-                    // there is no per-ref age to report.
-                    age if age == "unknown" => String::new(),
-                    age => format!("  {}", age),
-                }
+                cache::ago(revision.last_used)
             )?;
         }
     }
     Ok(())
 }
 
-/// One repository's line: what each kind of entry costs it, and what they hold.
+/// One repository's line: what each kind of entry costs it, and what they
+/// hold.
 #[derive(Default)]
 struct Row {
-    mirror: u64,
     snapshot: u64,
-    artefact: u64,
+    image: u64,
     last_used: Option<std::time::SystemTime>,
-    revisions: Vec<(cache::Kind, cache::Revision)>,
+    revisions: Vec<cache::Revision>,
 }
 
 fn size_or_dash(bytes: u64) -> String {
@@ -501,7 +256,7 @@ fn size_or_dash(bytes: u64) -> String {
     }
 }
 
-/// A pin ref or an artefact's commit as something to read: `pin/<40 hex>` is
+/// A pin ref or an image's commit as something to read: `pin/<40 hex>` is
 /// the ref git needs, not a name anyone scans a column for.
 fn short_revision(name: &str) -> String {
     match name.strip_prefix("pin/") {
@@ -511,101 +266,11 @@ fn short_revision(name: &str) -> String {
     }
 }
 
-/// `gitscale cache repair` — re-mirror the entries this workspace borrows from
-/// but that are no longer there.
-///
-/// A workspace whose alternate has been deleted cannot read its own history,
-/// and git reports nothing until something tries to read an object. This is
-/// the way back.
-pub fn repair(
-    root: Option<&Path>,
-    names: &[String],
-    no_cache: bool,
-    out: &mut dyn Write,
-) -> Result<()> {
-    let (config, config_root) = load_workspace(root)?;
-    let Some(cache) = open(&config, no_cache) else {
-        writeln!(out, "The object cache is off.")?;
-        return Ok(());
-    };
-    let selected = cacheable(&config, names)?;
-    let artefacts = if selected.iter().any(|e| e.is_artefact()) {
-        Some(crate::artefact::Artefacts::new(
-            &config,
-            &config_root,
-            Some(cache.clone()),
-        ))
-    } else {
-        None
-    };
-
-    let mut repaired = 0;
-    for entry in &selected {
-        // Nothing borrows from an artefact entry, so there is no link to
-        // mend — only blobs to check against their digests. A damaged one is
-        // deleted, and downloaded again the next time it is wanted.
-        if let (true, Some(artefacts)) = (entry.is_artefact(), &artefacts) {
-            match artefacts.repair(entry)? {
-                Some(0) => writeln!(out, "  ok     {}", entry.directory)?,
-                Some(damaged) => {
-                    repaired += 1;
-                    writeln!(
-                        out,
-                        "  repair {} ({} removed)",
-                        entry.directory,
-                        cache::plural(damaged, "damaged blob", "damaged blobs")
-                    )?;
-                }
-                None => writeln!(out, "  skip   {} (not cached)", entry.directory)?,
-            }
-            continue;
-        }
-        let checkout = config_root.join(&entry.directory);
-        if !checkout.is_dir() || checkout.is_symlink() {
-            continue;
-        }
-        let url = crate::git::remote_url(entry);
-        match cache.repair(&checkout, &url)? {
-            Some(true) => {
-                repaired += 1;
-                writeln!(out, "  repair {}", entry.directory)?;
-            }
-            Some(false) => writeln!(out, "  ok     {}", entry.directory)?,
-            None => writeln!(out, "  skip   {} (not borrowing)", entry.directory)?,
-        }
-    }
-    // The root repository borrows too, once it has been adopted.
-    if let Some(url) = crate::git::origin_url(&config_root) {
-        if let Some(true) = cache.repair(&config_root, &url)? {
-            repaired += 1;
-            writeln!(out, "  repair .")?;
-        }
-    }
-    writeln!(
-        out,
-        "Repaired {}.",
-        cache::plural(repaired, "entry", "entries")
-    )?;
-    Ok(())
-}
-
-/// `gitscale cache compact` — repack every entry and evict the ones nothing
-/// has used for `keep_recent`.
-pub fn compact(
-    root: Option<&Path>,
-    keep_recent: &str,
-    no_cache: bool,
-    out: &mut dyn Write,
-) -> Result<()> {
+/// `gitscale cache compact` — evict what nothing has used for `keep_recent`:
+/// whole entries, then the pins and images inside the ones that stay.
+pub fn compact(keep_recent: &str, out: &mut dyn Write) -> Result<()> {
     let keep = cache::parse_period(keep_recent)?;
-    // A config is not required here: the cache belongs to the user, not to any
-    // one workspace, so this works from anywhere. One is used when there is
-    // one, so that `[cache] dir` is honoured.
-    let config = optional_workspace_config(root)?;
-    let Some(cache) = open(&config, no_cache) else {
-        writeln!(out, "The object cache is off.")?;
-        return Ok(());
-    };
+    let cache = open()?;
     let before = cache.usage();
     let report = cache.compact(keep)?;
     let after = cache.usage();
@@ -624,10 +289,4 @@ pub fn compact(
         cache::human_size(after.bytes)
     )?;
     Ok(())
-}
-
-/// The selected entries a cache can hold anything for — every kind, now that
-/// artefacts are cached as image layouts.
-fn cacheable(config: &GitScaleConfig, names: &[String]) -> Result<Vec<RepoEntry>> {
-    filter_entries(&config.repos, names)
 }

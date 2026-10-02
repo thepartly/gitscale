@@ -137,8 +137,15 @@ impl Allowlist {
 /// that a pattern must be ended deliberately — `github.com/acme*` also matches
 /// `github.com/acme-evil/x`, where `github.com/acme/*` does not.
 pub(crate) fn glob_match(pattern: &str, subject: &str) -> bool {
+    wildcard_match(pattern, &subject.to_lowercase())
+}
+
+/// `*` and `?` matching, `*` crossing `/`, and nothing else special — what
+/// both the allowlist and `[develop] pinned` mean by a pattern. Case matters
+/// here; [`glob_match`] is the case-insensitive form repository names want.
+pub(crate) fn wildcard_match(pattern: &str, subject: &str) -> bool {
     let pat: Vec<char> = pattern.chars().collect();
-    let sub: Vec<char> = subject.to_lowercase().chars().collect();
+    let sub: Vec<char> = subject.chars().collect();
     let (mut p, mut s) = (0usize, 0usize);
     // Where to resume from if the current `*` turns out to have matched too
     // little: the star itself, and how much it had consumed.

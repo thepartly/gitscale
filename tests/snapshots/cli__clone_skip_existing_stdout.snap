@@ -1,6 +1,0 @@
----
-source: tests/cli.rs
-expression: out2.stdout
----
-Cloning missing repos...
-  skip  libs/mylib (already exists)

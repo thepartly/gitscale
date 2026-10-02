@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::io::Write;
 use std::path::Path;
 
-use crate::config::{filter_entries, load_workspace};
+use crate::config::load_workspace;
 use crate::git::is_tree_modified;
 use crate::hooks;
 use crate::resolve::create_symlinks;
@@ -28,28 +28,6 @@ pub fn run(
             failed.get_or_insert(e);
         }
     };
-    keep(crate::commands::clone::run(
-        root,
-        names,
-        verbose,
-        no_cache,
-        interactive,
-        out,
-        err,
-    ));
-    // Every checkout the workspace has, implicit ones included — offline:
-    // clone has just fetched what resolution reads.
-    let checkouts = crate::resolve::workspace(
-        &config,
-        &config_root,
-        false,
-        crate::commands::cache::open(&config, no_cache),
-        None,
-        verbose,
-    )
-    .map(|r| r.entries())
-    .unwrap_or_else(|_| config.repos.clone());
-    keep(reconcile_remotes(&checkouts, &config_root, names, out));
     // pull runs its own post_sync hook, skip it here to avoid double-run
     keep(crate::commands::pull::run_no_hooks(
         root,
@@ -63,16 +41,11 @@ pub fn run(
 
     // Restore symlinks for unlinked clones and remove orphaned links before
     // pushing, so local hygiene isn't blocked by a remote/auth failure.
-    // A graph that does not resolve has no links to restore: clone already
-    // failed with the reason.
-    let resolved = crate::resolve::workspace(
-        &config,
-        &config_root,
-        false,
-        crate::commands::cache::open(&config, no_cache),
-        None,
-        verbose,
-    );
+    // A graph that does not resolve has no links to restore: pull already
+    // failed with the reason. Offline: pull has just fetched what it reads.
+    let resolved = crate::store::Sources::new(&config_root, no_cache).and_then(|sources| {
+        crate::resolve::workspace(&config, &config_root, false, &sources, None, verbose)
+    });
     match resolved {
         Ok(resolution) => keep(relink(
             &resolution,
@@ -85,56 +58,21 @@ pub fn run(
         Err(e) => keep(Err(e)),
     }
 
-    // An implicit checkout is readonly, and nothing of it is pushed: named,
-    // it simply has no push step. Declared ones go on as named.
-    let declared: Vec<String> = names
-        .iter()
-        .filter(|n| config.repos.iter().any(|e| &e.directory == *n))
-        .cloned()
-        .collect();
-    if names.is_empty() || !declared.is_empty() {
-        keep(crate::commands::push::run(
-            root,
-            &declared,
-            verbose,
-            interactive,
-            out,
-            err,
-        ));
-    }
+    // Only checkouts on the topic have anything to push; named, an implicit
+    // one is pushed like any other.
+    keep(crate::commands::push::run(
+        root,
+        names,
+        interactive,
+        out,
+        err,
+    ));
 
     // The hook is for a workspace that synced: not one left half done.
     if let Some(e) = failed {
         return Err(e);
     }
     hooks::run_post_sync(&config.hooks, &config_root, verbose, out)?;
-    Ok(())
-}
-
-/// Update each existing clone's `origin` remote to match the configured URL.
-fn reconcile_remotes(
-    checkouts: &[crate::config::RepoEntry],
-    config_root: &Path,
-    names: &[String],
-    out: &mut dyn Write,
-) -> Result<()> {
-    let selected = filter_entries(checkouts, names)?;
-
-    let mut header_done = false;
-    for entry in &selected {
-        if crate::git::reconcile_remote(entry, config_root)? {
-            if !header_done {
-                writeln!(out, "Reconciling remotes...")?;
-                header_done = true;
-            }
-            writeln!(
-                out,
-                "  update  {} -> {}",
-                entry.directory,
-                crate::git::remote_url(entry)
-            )?;
-        }
-    }
     Ok(())
 }
 

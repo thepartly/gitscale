@@ -1,6 +1,7 @@
 ---
 source: tests/cli.rs
+assertion_line: 1008
 expression: plain
 ---
-    REPO         PATH   MODE        REF    EXPECTED   STATUS
-✔   libs/mylib   -      readwrite   main   main       ok
+    REPO         PATH   ARTEFACT   REF       EXPECTED   STATUS
+✔   libs/mylib   -      -          [sha]   main       ok

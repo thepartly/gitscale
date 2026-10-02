@@ -3,10 +3,14 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 
-use crate::config::{filter_entries, load_workspace};
-use crate::git::{commit_path, is_repo_root};
+use crate::config::load_workspace;
+use crate::git::commit_path;
 use crate::progress::{run_parallel, RepoStatus};
+use crate::store::Sources;
 
+/// Commit, with one message, the root and every checkout on the workspace's
+/// topic that has changes. A checkout off the topic is never committed — its
+/// HEAD is detached at a pin — and one with changes says how to bring it in.
 pub fn run(
     root: Option<&Path>,
     names: &[String],
@@ -20,35 +24,50 @@ pub fn run(
     }
 
     let (config, config_root) = load_workspace(root)?;
-    let selected = filter_entries(&config.repos, names)?;
-
-    let entry_map: HashMap<&str, &crate::config::RepoEntry> =
-        selected.iter().map(|e| (e.directory.as_str(), e)).collect();
+    let sources = Sources::new(&config_root, false)?;
+    let topic = crate::topic::root(&config, &config_root, false);
+    let resolution =
+        crate::resolve::workspace(&config, &config_root, false, &sources, None, false)?;
+    let selected = resolution.select(names)?;
     let dir_names: Vec<String> = selected.iter().map(|e| e.directory.clone()).collect();
+    let entries: HashMap<&str, &crate::config::RepoEntry> =
+        selected.iter().map(|e| (e.directory.as_str(), e)).collect();
 
     let mut failed = run_parallel(
         "Committing local changes...",
         &dir_names,
         interactive,
         |name| {
-            let entry = &entry_map[name];
-
-            if entry.is_artefact() {
-                return RepoStatus::Skip(format!("{} (artefact)", name));
-            }
-            if entry.is_readonly() {
-                return RepoStatus::Skip(format!("{} (readonly)", name));
-            }
+            let entry = entries[name];
             let dest = config_root.join(&entry.directory);
             if !crate::git::is_checkout(&dest) {
                 return RepoStatus::Skip(format!("{} (not cloned)", name));
             }
-            // Resolved recursive deps are symlinks to a root-level checkout that
-            // is committed on its own; don't commit through the symlink.
+            // A dependency's link to a checkout committed under its own name.
             if dest.is_symlink() {
                 return RepoStatus::Skip(format!("{} (symlink)", name));
             }
-
+            let on_topic = resolution
+                .slot(name)
+                .and_then(|s| s.topic.as_ref())
+                .is_some_and(|t| crate::git::current_branch(&dest).as_deref() == Some(&t.branch));
+            if !on_topic {
+                let planted = resolution.planted_in(name);
+                if crate::git::uncommitted(&dest, &planted).is_none() {
+                    return RepoStatus::Skip(format!("{} (clean)", name));
+                }
+                return RepoStatus::Skip(match topic.topic() {
+                    Some(branch) => format!(
+                        "{} (not on topic {}; run gitscale develop {})",
+                        name, branch, name
+                    ),
+                    None => format!(
+                        "{} (at its pin; switch the root to a topic branch, then gitscale \
+                         develop {})",
+                        name, name
+                    ),
+                });
+            }
             match commit_path(&dest, message) {
                 Ok(true) => RepoStatus::Ok(name.to_string()),
                 Ok(false) => RepoStatus::Skip(format!("{} (clean)", name)),
@@ -59,9 +78,7 @@ pub fn run(
         err,
     )?;
 
-    // When committing everything, also commit the workspace repo itself, but
-    // only if the config root is that repo's top level (never an ancestor repo).
-    if names.is_empty() && is_repo_root(&config_root) {
+    if names.is_empty() {
         match commit_path(&config_root, message) {
             Ok(true) => writeln!(out, "  ok    . (workspace root)")?,
             Ok(false) => writeln!(out, "  skip  . (workspace root, clean)")?,

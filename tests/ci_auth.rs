@@ -105,11 +105,11 @@ fn ssh_entry_on_the_ci_server_is_cloned_over_https() {
         CI_HOST
     ));
 
-    let out = run_in_ci_job(&env, &["clone"]);
+    let out = run_in_ci_job(&env, &["pull"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         !out.status.success(),
-        "clone of an unresolvable host should fail"
+        "a pull of an unresolvable host should fail"
     );
     assert!(
         stderr.contains(&format!("https://{}/acme/mylib.git", CI_HOST)),
@@ -130,60 +130,11 @@ fn entry_on_another_host_keeps_its_ssh_url() {
 "#,
     );
 
-    let out = run_in_ci_job(&env, &["clone"]);
+    let out = run_in_ci_job(&env, &["pull"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success());
     assert!(
         !stderr.contains("https://github.invalid"),
         "a third-party host must be fetched as configured, got: {stderr}"
-    );
-}
-
-/// A workspace that already has an SSH `origin` — restored from cache, or
-/// cloned before the job — is repointed before the network operation runs.
-#[test]
-fn existing_ssh_remote_is_repointed_under_ci() {
-    let env = TestEnv::new("ci_auth_repoint");
-    let bare = env.create_bare_repo("mylib", "main", &[("README.md", "# mylib\n")]);
-    env.write_config(&format!(
-        r#"[repos]
-"libs/mylib" = {{ url = "{}", revision = "main" }}
-"#,
-        bare.display()
-    ));
-
-    // Clone from the local bare repo, then point origin at the CI server the
-    // way a runner's own SSH-based checkout would have.
-    let clone = env.run(&["clone"]);
-    assert!(clone.success, "stderr: {}", clone.stderr);
-    let dest = env.playground.join("libs/mylib");
-    helpers::run_git_pub(
-        &dest,
-        &[
-            "remote",
-            "set-url",
-            "origin",
-            &format!("git@{}:acme/mylib.git", CI_HOST),
-        ],
-    );
-
-    // The config still names the SSH URL, so gitscale must rewrite it.
-    env.write_config(&format!(
-        r#"[repos]
-"libs/mylib" = {{ url = "git@{}:acme/mylib.git", revision = "main" }}
-"#,
-        CI_HOST
-    ));
-    let out = run_in_ci_job(&env, &["fetch"]);
-    assert!(!out.status.success());
-
-    let origin = Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(&dest)
-        .output()
-        .unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&origin.stdout).trim(),
-        format!("https://{}/acme/mylib.git", CI_HOST)
     );
 }

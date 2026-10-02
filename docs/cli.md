@@ -3,7 +3,6 @@
 - [Synopsis](#synopsis)
 - [Global options](#global-options)
 - [Output and exit status](#output-and-exit-status)
-- [`gitscale clone`](#gitscale-clone)
 - [`gitscale fetch`](#gitscale-fetch)
 - [`gitscale pull`](#gitscale-pull)
 - [`gitscale push`](#gitscale-push)
@@ -11,7 +10,9 @@
 - [`gitscale commit`](#gitscale-commit)
 - [`gitscale clean`](#gitscale-clean)
 - [`gitscale status`](#gitscale-status)
-- [`gitscale resolve`](#gitscale-resolve)
+- [`gitscale develop`](#gitscale-develop)
+- [`gitscale upgrade`](#gitscale-upgrade)
+- [`gitscale check`](#gitscale-check)
 - [`gitscale add`](#gitscale-add)
 - [`gitscale remove`](#gitscale-remove)
 - [`gitscale artefact`](#gitscale-artefact)
@@ -31,18 +32,19 @@ command.
 
 | Command | Purpose |
 |---|---|
-| [`clone`](#gitscale-clone) | Create missing checkouts, or clone a whole workspace from a URL |
 | [`fetch`](#gitscale-fetch) | Update remote state without touching working trees |
-| [`pull`](#gitscale-pull) | Bring every checkout up to date, cloning what is missing |
-| [`push`](#gitscale-push) | Push each writable checkout |
-| [`sync`](#gitscale-sync) | clone + reconcile remotes + pull + relink + push |
+| [`pull`](#gitscale-pull) | Put every checkout where resolution says, checking out what is missing |
+| [`push`](#gitscale-push) | Push the topic branch of the root and every checkout on it |
+| [`sync`](#gitscale-sync) | pull + relink + push |
 | [`commit`](#gitscale-commit) | Commit across the workspace with one message |
 | [`clean`](#gitscale-clean) | Remove untracked files, safely |
 | [`status`](#gitscale-status) | Report the state of every checkout, and how each got its revision |
-| [`resolve`](#gitscale-resolve) | Show where resolution moved the root's revisions, and record them |
+| [`develop`](#gitscale-develop) | Put checkouts on the topic, writable — or take them off |
+| [`upgrade`](#gitscale-upgrade) | Promote a topic's released repositories, raise dependencies, or record what resolution selected |
+| [`check`](#gitscale-check) | The merge gate: fail while anything comes from a topic branch |
 | [`add`](#gitscale-add) / [`remove`](#gitscale-remove) | Edit `.gitscale.toml` |
 | [`artefact`](#gitscale-artefact) | Publish this repository's build output as an artefact, and see what the registry holds |
-| [`cache`](#gitscale-cache) | Inspect and maintain the object cache |
+| [`cache`](#gitscale-cache) | Inspect and maintain the CI cache |
 | [`hook`](#gitscale-hook) | Install or inspect GitScale's git hooks |
 
 ## Global options
@@ -51,8 +53,8 @@ Accepted by every command, before or after the subcommand.
 
 | Option | Meaning |
 |---|---|
-| `-v, --verbose` | Verbose output: cache fallbacks, per-repository fetch lines, hook commands, cache totals |
-| `--no-cache` | Talk to remotes directly, ignoring the [object cache](caching.md) |
+| `-v, --verbose` | Verbose output: per-repository fetch lines, hook commands, images pruned |
+| `--no-cache` | In CI, talk to remotes directly instead of through the [CI cache](stores.md#the-ci-cache) |
 | `-C, --root <PATH>` | Start the search for `.gitscale.toml` at `PATH` instead of the current directory. Accepted by every leaf command — for `cache` and `hook` that means the sub-subcommand: `gitscale cache status -C /path`, not `gitscale cache -C /path status` |
 | `-h, --help` | Help for the command |
 | `-V, --version` | Version (top level only) |
@@ -82,49 +84,17 @@ printed sequentially as plain text.
 Exit status is `0` on success and `1` on any failure, with a summary such as
 `2 repo(s) failed to pull`. Skips are not failures.
 
-## `gitscale clone`
-
-```
-gitscale clone [OPTIONS] [NAMES...]
-gitscale clone [OPTIONS] <URL> [DIRECTORY]
-```
-
-Create the checkouts that do not exist yet, or — given a URL — clone a whole
-workspace. Every checkout lands at the revision
-[resolution](recursive-dependencies.md#how-a-revision-is-chosen) settles on,
-worked out before anything is cloned, implicit dependencies included. Full
-behaviour: [workflow → clone](workflow.md#clone).
-
-The URL form is not the usual way to set a workspace up: with a
-[git hook](hooks.md#git-hooks) installed, a plain `git clone` does it. Use this
-where no hook applies.
-
-| Argument | Meaning |
-|---|---|
-| `NAMES...` | Directories to clone, declared or implicit. Empty means all |
-| `URL [DIRECTORY]` | A repository to clone the workspace from, and optionally the directory to create (default: the repository name) |
-
-The first argument is read as a URL when it has a scheme, is an scp-style SSH
-address, or is an absolute path.
-
-```
-gitscale clone
-gitscale clone imports/core
-gitscale clone https://github.com/org/root.git
-gitscale clone git@github.com:org/root.git my-ws
-```
-
 ## `gitscale fetch`
 
 ```
 gitscale fetch [OPTIONS] [NAMES...]
 ```
 
-Update remote state without modifying working trees: `git fetch` for git
-entries (through the cache); for artefact entries, the commit the revision
-names and whether it has an image, recorded without downloading anything — a
-commit with no image fails. Git entries with no checkout are skipped. Also
-refreshes what resolution reads, so the next offline `status` sees the remotes
+Update remote state without modifying working trees: every git entry's
+[store](stores.md) is fetched, checked out or not; for artefact entries, the
+commit the revision names and whether it has an image, recorded without
+downloading anything — a commit with no image fails. In CI, git entries are
+skipped. Also refreshes what resolution reads, so the next offline `status` sees the remotes
 as they are now. When resolution itself fails, the declared entries are fetched
 anyway and the command fails afterwards with the reason — alongside the count
 of entries that failed to fetch, when some did. See [workflow → fetch](workflow.md#fetch).
@@ -135,15 +105,16 @@ of entries that failed to fetch, when some did. See [workflow → fetch](workflo
 gitscale pull [OPTIONS] [NAMES...]
 ```
 
-Bring every selected checkout to the revision
-[resolution](recursive-dependencies.md#how-a-revision-is-chosen) settles on
-against the remotes now, cloning anything missing first — into an empty
-directory too, while one holding files but no repository fails — then
-re-create [recursive dependency](recursive-dependencies.md) symlinks and run the
-[`post_sync` hook](hooks.md#post_sync). A checkout is moved to another revision
-only when that loses nothing: changes to tracked files, or a detached HEAD no
-ref holds, fail the entry and leave it as it was. See
-[workflow → pull](workflow.md#pull).
+Put every selected checkout where
+[resolution](recursive-dependencies.md#how-a-revision-is-chosen) says against
+the remotes now — detached at its pin, or on the [topic](topics.md) branch —
+checking out anything missing first, into an empty directory too, while one
+holding files but no repository fails. Then re-create
+[recursive dependency](recursive-dependencies.md) symlinks, prune unused
+images once a day, and run the [`post_sync` hook](hooks.md#post_sync). A
+checkout is moved only when that loses nothing: uncommitted changes to tracked
+files, or a detached HEAD no ref holds, fail the entry and leave it as it was.
+See [workflow → pull](workflow.md#pull).
 
 ## `gitscale push`
 
@@ -151,8 +122,10 @@ ref holds, fail the entry and leave it as it was. See
 gitscale push [OPTIONS] [NAMES...]
 ```
 
-`git push` in each readwrite checkout. `readonly`, `artefact` and entries
-with no checkout are skipped.
+`git push -u origin <topic>` in the root and in every checkout on the
+[topic](topics.md). Checkouts off the topic, artefacts and entries with no
+checkout are skipped; off a topic nothing is pushed. See
+[workflow → push](workflow.md#push).
 
 ## `gitscale sync`
 
@@ -162,9 +135,9 @@ gitscale sync [OPTIONS] [NAMES...]
 
 | Option | Meaning |
 |---|---|
-| `--force` | Also relink unlinked clones that have local modifications, remove orphaned symlinks whose target still resolves, and remove checkouts nothing needs any more that have local modifications |
+| `--force` | Also relink unlinked checkouts that have local modifications, remove orphaned symlinks whose target still resolves, and remove checkouts nothing needs any more that have local modifications |
 
-clone → reconcile remotes → pull → relink → push → `post_sync`. See
+pull → relink → push → `post_sync`. See
 [workflow → sync](workflow.md#sync).
 
 ## `gitscale commit`
@@ -177,10 +150,11 @@ gitscale commit [OPTIONS] -m <MESSAGE> [NAMES...]
 |---|---|
 | `-m, --message <MESSAGE>` | **Required.** The commit message, used for every repository |
 
-`git add -A` plus `git commit -m` in each selected checkout. Skips `artefact`
-and `readonly` entries, entries with no checkout, symlinked entries and repositories
-that are already clean. With no names, the workspace repository is committed too
-when it is the top level of a git repository. Nothing is pushed. See
+`git add -A` plus `git commit -m` in each selected checkout on the
+[topic](topics.md). Skips checkouts off the topic — naming the `gitscale
+develop` that brings one with changes in — artefacts, entries with no checkout,
+symlinked entries and repositories that are already clean. With no names, the
+root repository is committed too. Nothing is pushed. See
 [workflow → commit](workflow.md#commit).
 
 ## `gitscale clean`
@@ -193,6 +167,8 @@ gitscale clean [OPTIONS] [NAMES...]
 |---|---|
 | `-f, --force` | Actually delete. Without it, clean only lists what would go |
 | `-e, --exclude <PATTERN>` | A path to keep, in `.gitignore` syntax, anchored at each repository's root. Applies to every repository cleaned; repeatable |
+| `--gc` | Compact instead: `git gc` in every store of the root, and drop the images nothing has used lately. Takes no names, `-f` or `-e`; refuses in CI |
+| `--keep-recent <PERIOD>` | With `--gc`: how recently an image must have been used to be kept. Default `[clean] keep_recent`, else `3months` |
 
 `.` addresses the workspace repository itself. See [cleaning](clean.md).
 
@@ -201,6 +177,7 @@ gitscale clean
 gitscale clean -f
 gitscale clean -f core
 gitscale clean -f . -e 'dist/' -e '*.log'
+gitscale clean --gc
 ```
 
 ## `gitscale status`
@@ -219,29 +196,72 @@ Note that `-f` here is `--format`, not `--force`. Status takes no repository
 names; it always reports everything. Without `--fetch` it resolves from what
 is on this machine, and never touches the network. See [status](status.md).
 
-## `gitscale resolve`
+## `gitscale develop`
 
 ```
-gitscale resolve [OPTIONS]
+gitscale develop [OPTIONS] <DIR>...
 ```
 
 | Option | Meaning |
 |---|---|
-| `--write` | Write each resolved revision into the root's entry for it |
-| `-C, --root <PATH>` | Workspace to resolve |
+| `--stop` | Take the checkouts off the topic instead: back at their pins, their topic branches deleted |
 
-Resolve against the remotes and list the root entries whose revision
-resolution raised:
+Put each named checkout on the workspace's [topic](topics.md) — the root's
+current branch — on a branch of that name from the commit it is at, writable.
+A `replace` artefact becomes a checkout of its source at the same commit. A
+directory is named by its checkout's path or by the path of a link a
+repository has to it. Refuses off a topic, in CI, for an entry the root
+overrides, and for a slot a dependency's pinned branch holds. `--stop` refuses
+while the remote has the branch, or while it holds work no remote has. See
+[`gitscale develop`](topics.md#gitscale-develop).
 
 ```
-$ gitscale resolve
-imports/d   v1.2.0 → v1.5.0   raised by imports/c
-1 entry would change; run with --write to update .gitscale.toml
+gitscale develop imports/core
+gitscale develop imports/b/libs/d
+gitscale develop --stop imports/core
 ```
 
-`--write` records them, editing only those revisions: comments, key order and
-every other table stay as they were. Entries without a revision, and entries
-marked `override`, are left alone; implicit dependencies are never added.
+## `gitscale upgrade`
+
+```
+gitscale upgrade [OPTIONS] [DIR...]
+```
+
+| Option | Meaning |
+|---|---|
+| `--resolved` | Write the revision resolution selected into the root's own entries, with no tag lookup |
+| `--major` | Let a raise cross a semver major |
+| `--commit` | Commit each edited `.gitscale.toml`, that file alone |
+| `--dry-run` | Print the plan and change nothing |
+| `-c, --create <BRANCH>` | The topic to create when none is active and a repository other than the root has to be edited |
+
+With no directories: promote the topic's slots whose change a release now
+holds, writing that release into the topic's configs and taking them off the
+topic. With directories: raise each to its newest release in every config that
+asks for it, developing the requesters on a topic — created with `git switch
+-c` in the root when there is none. With `--resolved`: record what resolution
+selected. Edits keep comments and key order. Refuses in CI. See
+[promotion](topics.md#promotion-gitscale-upgrade),
+[raising](topics.md#raising-a-dependency-gitscale-upgrade-dir) and
+[`--resolved`](topics.md#writing-what-resolution-selected-upgrade---resolved).
+
+```
+gitscale upgrade --commit
+gitscale upgrade imports/d
+gitscale upgrade --resolved --dry-run
+```
+
+## `gitscale check`
+
+```
+gitscale check [OPTIONS]
+```
+
+The merge gate: fails while any checkout resolves from a topic branch rather
+than a revision written in a config, naming each one and how to fix it. In a
+merge request pipeline whose target is not a branch the root pins, it passes
+without checking. Needs no history. See
+[the merge gate](topics.md#topics-in-ci).
 
 ## `gitscale add`
 
@@ -254,15 +274,15 @@ gitscale add [OPTIONS] <DIRECTORY> <REPO_URL> <REVISION>
 | `DIRECTORY` | Where the checkout goes, relative to the config |
 | `REPO_URL` | The repository URL |
 | `REVISION` | Branch, tag or commit SHA. Required positionally; pass `""` to leave it unset |
-| `--mode <MODE>` | `readwrite` (default), `readonly` or `artefact` |
+| `--artefact <USE>` | `replace` or `overlay`: consume the repository's published [artefact](artefacts.md) |
 
-Edits `.gitscale.toml` only — run `gitscale clone` afterwards. Creates a config
+Edits `.gitscale.toml` only — run `gitscale pull` afterwards. Creates a config
 if none exists. Fails if the directory is already declared. See
 [the caveat about rewriting](configuration.md#how-add-and-remove-rewrite-the-file).
 
 ```
 gitscale add imports/core https://github.com/org/core.git main
-gitscale add meta/svc https://github.com/org/svc.git main --mode artefact
+gitscale add meta/svc https://github.com/org/svc.git main --artefact replace
 ```
 
 ## `gitscale remove`
@@ -308,32 +328,29 @@ gitscale artefact list meta/app
 ## `gitscale cache`
 
 ```
-gitscale cache <status|update|adopt|repair|compact> [OPTIONS]
+gitscale cache <status|update|compact> [OPTIONS]
 ```
+
+The per-user [CI cache](stores.md#the-ci-cache). A developer machine keeps
+everything in the root's own [stores](stores.md) instead.
 
 | Subcommand | Purpose |
 |---|---|
-| [`status`](caching.md#cache-status) | What the cache holds, one row per repository: mirrors, snapshots and artefact images. `-v` also lists every ref a mirror holds |
-| [`update`](caching.md#cache-update) | Refresh entries without touching any checkout; an artefact entry downloads the image its revision names. Takes optional `NAMES...` |
-| [`adopt`](caching.md#cache-adopt) | Relink the workspace root to the cache now, whatever `adopt_root` says, and say why when it will not |
-| [`repair`](caching.md#cache-repair) | Re-create entries this workspace borrows from but that are gone, and check every cached artefact blob against its digest. Takes optional `NAMES...` |
-| [`compact`](caching.md#cache-compact) | Repack entries and evict the ones nothing used lately, artefact images included |
+| [`status`](stores.md#cache-status) | What the cache holds, one row per repository — snapshots and images — and every pin and image with its age |
+| [`update`](stores.md#cache-update) | Add the pins and images a CI job of this workspace would take, touching no checkout. Takes optional `NAMES...` |
+| [`compact`](stores.md#cache-compact) | Evict what nothing has used lately |
 
 | Option | Subcommand | Meaning |
 |---|---|---|
-| `--shared` | `adopt` | Adopt from a linked worktree, relinking the object store it shares with its main worktree and every sibling |
 | `--keep-recent <PERIOD>` | `compact` | How recently an entry must have been used to be kept. Default `12months`; accepts any [humantime](https://docs.rs/humantime) period, such as `12h`, `30d`, `2 weeks`, `1y` or `1d 12h`; a month is 30.44 days. A bare `m` is refused as ambiguous: write `min` or `months` |
 
-`status` and `compact` work from anywhere — the cache belongs to the user, not
-to a workspace. A config is used when there is one, so `[cache] dir` is honoured.
-All five print `The object cache is off.` and do nothing under `--no-cache` or
-`[cache] enabled = false`.
+The commands work with `CI` set or not. `status` and `compact` work from
+anywhere — the cache belongs to the user, not to a workspace; `compact` accepts
+`-C` and ignores it.
 
 ```
 gitscale cache status
 gitscale cache update imports/core
-gitscale cache adopt
-gitscale cache repair
 gitscale cache compact --keep-recent 2weeks
 ```
 

@@ -1,6 +1,7 @@
 ---
 source: tests/cli.rs
+assertion_line: 148
 expression: out.stdout
 ---
-Pushing local changes...
+Pulling latest changes...
   ok    libs/mylib

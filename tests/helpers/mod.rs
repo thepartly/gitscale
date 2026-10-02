@@ -51,6 +51,11 @@ impl TestEnv {
 
         fs::create_dir_all(&playground).unwrap();
         fs::create_dir_all(&repos_remote).unwrap();
+        // A workspace is the top of a git repository: its stores and records
+        // live in that repository's git directory.
+        run_git(&playground, &["init", "--quiet", "-b", "main"]);
+        run_git(&playground, &["config", "user.email", "test@test.com"]);
+        run_git(&playground, &["config", "user.name", "Test"]);
 
         Self {
             playground,
@@ -167,9 +172,11 @@ impl TestEnv {
     }
 
     /// Publish `files` as the artefact of the commit `revision` names in
-    /// `bare`, with gitscale's own `artefact publish`. Returns the commit.
+    /// `bare`, with gitscale's own `artefact publish`: the build output under
+    /// `dist/`, which the producer ignores, so a consumer finds each file at
+    /// `dist/<name>`. Returns the commit.
     pub fn publish(&self, bare: &Path, revision: &str, files: &[(&str, &str)]) -> String {
-        let artefact = "[artefact]\nroot = \"dist\"\ninclude = [\"**\"]\n";
+        let artefact = "[artefact]\ninclude = [\"dist/**\"]\n";
         let (out, commit) = self.publish_with(bare, revision, artefact, files, &[]);
         assert!(out.success, "publish failed:\n{}{}", out.stdout, out.stderr);
         commit
@@ -192,6 +199,13 @@ impl TestEnv {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, content).unwrap();
         }
+        // Build output is ignored, as the artefact policy asks of anything an
+        // image ships that the commit does not track.
+        let ignore = producer.join(".git/info/exclude");
+        fs::create_dir_all(ignore.parent().unwrap()).unwrap();
+        let mut rules = fs::read_to_string(&ignore).unwrap_or_default();
+        rules.push_str("/dist/\n");
+        fs::write(&ignore, rules).unwrap();
         fs::write(
             producer.join(".gitscale.toml"),
             format!("{}{}", self.registries(), artefact_toml),
@@ -275,24 +289,23 @@ impl TestEnv {
     }
 
     /// Write a .gitscale.toml config in the playground directory.
-    ///
-    /// A `[cache]` table is prepended unless the caller wrote one, so each
-    /// test gets a cache of its own — created on demand, removed on drop, and
-    /// never the one the developer's own workspaces use.
     pub fn write_config(&self, config_content: &str) {
-        let text = if config_content.contains("[cache]") {
-            config_content.to_string()
-        } else {
-            format!(
-                "[cache]\ndir = \"{}\"\n\n{}",
-                self.cache.display(),
-                config_content
-            )
-        };
-        fs::write(self.playground.join(".gitscale.toml"), text).unwrap();
+        fs::write(self.playground.join(".gitscale.toml"), config_content).unwrap();
     }
 
-    /// The cache entries that exist right now, by directory name.
+    /// The root's own store for `url`: where every checkout of it is a
+    /// worktree of.
+    pub fn store(&self, url: &str) -> PathBuf {
+        let common = git_stdout(
+            &self.playground,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        );
+        PathBuf::from(common)
+            .join("gitscale/repos")
+            .join(gitscale::store::entry_name(url))
+    }
+
+    /// The CI cache entries that exist right now, by directory name.
     pub fn cache_entries(&self, kind: &str) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(self.cache.join(kind))
             .map(|listing| {
@@ -306,9 +319,14 @@ impl TestEnv {
         names
     }
 
-    /// The single cache entry for `url`, which must exist.
+    /// The single CI cache entry for `url`, which must exist.
     pub fn cache_entry(&self, kind: &str, url: &str) -> PathBuf {
-        let path = self.cache.join(kind).join(gitscale::cache::entry_name(url));
+        let name = if kind == "images" {
+            gitscale::store::image_entry_name(url)
+        } else {
+            gitscale::store::entry_name(url)
+        };
+        let path = self.cache.join(kind).join(name);
         assert!(
             path.is_dir(),
             "no {} entry for {} at {}",
@@ -322,7 +340,7 @@ impl TestEnv {
     /// Run the real gitscale binary with extra environment variables — the
     /// only way to exercise anything that reads the process environment (`CI`,
     /// say), since the in-process runner shares one environment across every
-    /// test thread.
+    /// test thread. The CI cache is this test's own unless `vars` names one.
     pub fn run_with_env(&self, vars: &[(&str, &str)], args: &[&str]) -> CliOutput {
         self.run_binary_with(None, vars, args)
     }
@@ -360,12 +378,22 @@ impl TestEnv {
         let mut full_args: Vec<String> = Vec::new();
         if let Some((subcmd, rest)) = args.split_first() {
             full_args.push(subcmd.to_string());
+            // `artefact …` and `cache …` take -C after their own subcommand.
+            let nested = (*subcmd == "artefact" || *subcmd == "cache") && !rest.is_empty();
+            let rest = if nested {
+                full_args.push(rest[0].to_string());
+                &rest[1..]
+            } else {
+                rest
+            };
             full_args.push("-C".to_string());
             full_args.push(self.playground.to_str().unwrap().to_string());
             full_args.extend(rest.iter().map(|a| a.to_string()));
         }
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_gitscale"));
-        cmd.args(&full_args).env_remove("GITSCALE_HOOK_ALLOW");
+        cmd.args(&full_args)
+            .env_remove("GITSCALE_HOOK_ALLOW")
+            .env("GITSCALE_CACHE_DIR", &self.cache);
         if let Some(allow) = allow {
             cmd.env("GITSCALE_HOOK_ALLOW", allow);
         }
@@ -388,7 +416,8 @@ impl TestEnv {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_gitscale"));
         cmd.args(["hook", "run", hook, "-C", self.playground.to_str().unwrap()])
             .env("GITSCALE_HOOK", hook)
-            .env("GITSCALE_HOOK_ALLOW", allow);
+            .env("GITSCALE_HOOK_ALLOW", allow)
+            .env("GITSCALE_CACHE_DIR", &self.cache);
         for (name, value) in vars {
             cmd.env(name, value);
         }
@@ -406,15 +435,11 @@ impl TestEnv {
         run_git(&self.playground, &["remote", "add", "origin", url]);
     }
 
-    /// Init the playground as a git repo (needed for status to show self ".")
+    /// Give the playground's repo a first commit, so HEAD exists.
     pub fn init_playground_git(&self) {
-        run_git(&self.playground, &["init"]);
-        run_git(&self.playground, &["config", "user.email", "test@test.com"]);
-        run_git(&self.playground, &["config", "user.name", "Test"]);
-        // Initial commit so HEAD exists
         fs::write(self.playground.join(".gitkeep"), "").unwrap();
-        run_git(&self.playground, &["add", "."]);
-        run_git(&self.playground, &["commit", "-m", "init"]);
+        run_git(&self.playground, &["add", ".gitkeep"]);
+        run_git(&self.playground, &["commit", "--quiet", "-m", "init"]);
     }
 }
 
@@ -480,4 +505,21 @@ pub fn run_git_pub(cwd: &Path, args: &[&str]) {
 pub fn strip_ansi(s: &str) -> String {
     let re = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
     re.replace_all(s, "").to_string()
+}
+
+/// Make `path` writable again: a checkout at its pin is read-only, and a test
+/// standing in for someone editing it anyway has to say so.
+pub fn make_writable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(path).unwrap().permissions();
+    perms.set_mode(perms.mode() | 0o200);
+    fs::set_permissions(path, perms).unwrap();
+}
+
+/// Write `content` to `path` in a checkout, read-only or not.
+pub fn edit(path: &Path, content: &str) {
+    if path.exists() {
+        make_writable(path);
+    }
+    fs::write(path, content).unwrap();
 }

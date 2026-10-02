@@ -44,7 +44,7 @@
 
   <rect x="274" y="222" width="212" height="56" rx="8" class="box"/>
   <text x="380" y="246" text-anchor="middle" font-weight="600" class="ink">Consumer workspace</text>
-  <text x="380" y="264" text-anchor="middle" font-size="11.5" class="quiet">gitscale clone / pull</text>
+  <text x="380" y="264" text-anchor="middle" font-size="11.5" class="quiet">gitscale pull</text>
 
   <text x="255" y="70" text-anchor="middle" font-size="11.5" class="quiet">every push</text>
   <text x="505" y="70" text-anchor="middle" font-size="11.5" class="quiet">tag = commit SHA</text>

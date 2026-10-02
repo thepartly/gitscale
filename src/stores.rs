@@ -4,16 +4,17 @@
 //! What resolution needs is small: each repository's branches and tags, and
 //! the `.gitscale.toml` of each selected commit. So:
 //!
-//! * **Mirror** — on a developer machine with the cache on, a source
-//!   repository is read from its cache mirror: the entry every checkout is
-//!   about to be built from anyway, updated once per command. Full history is
-//!   there, which is the one place the `ahead` warning can be computed.
-//! * **Light** — everywhere else (`--no-cache`, CI, a repository only ever
-//!   used as an artefact) a bare repository in the workspace's own git
-//!   directory, holding no history: refs come from `ls-remote` and are kept
-//!   beside it, and a commit's config arrives with a depth-1, blobless fetch
-//!   of that one commit — or, in CI with the cache on, from the snapshot pin
-//!   the checkout will be built from anyway.
+//! * **Repo** — on a developer machine, a source repository is read from the
+//!   root's own store for it: the repository every checkout of it is a
+//!   worktree of, fetched once per command. Full history is there, which is
+//!   the one place the `ahead` warning can be computed — and its own branches
+//!   are where topics are developed.
+//! * **Light** — everywhere else (CI, a repository only ever used as an
+//!   artefact) a bare repository in the workspace's own git directory,
+//!   holding no history: refs come from `ls-remote` and are kept beside it,
+//!   and a commit's config arrives with a depth-1, blobless fetch of that one
+//!   commit — or, in CI with the cache on, from the snapshot pin the checkout
+//!   will be built from anyway.
 //!
 //! Offline (`status` without `--fetch`), nothing is fetched: what is on disk
 //! answers, and what it cannot is [`Unavailable`].
@@ -25,85 +26,71 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::artefact::Artefacts;
-use crate::cache::Cache;
 use crate::config::CONFIG_FILENAME;
 use crate::resolution::{unavailable, Checkouts, Kind, Refs, Repos, Unavailable};
+use crate::store::Sources;
 
 /// The refs a light store last saw, beside it.
 const REFS_FILE: &str = "gitscale-refs.json";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Store {
-    Mirror,
+    Repo,
     Light,
 }
 
 pub struct GitStores<'a> {
     online: bool,
-    ci: bool,
-    cache: Option<Cache>,
+    sources: &'a Sources,
     /// Where the workspace's light stores live.
     local: PathBuf,
     artefacts: Option<&'a Artefacts>,
     verbose: bool,
     /// The refs of each store, read or fetched once per command, by path.
     refs: Mutex<HashMap<PathBuf, std::result::Result<Refs, String>>>,
-    /// Mirrors whose default branch this command has already asked the
-    /// remote for.
-    asked_default: Mutex<std::collections::HashSet<PathBuf>>,
 }
 
 impl<'a> GitStores<'a> {
     pub fn new(
         config_root: &Path,
-        cache: Option<Cache>,
+        sources: &'a Sources,
         online: bool,
         artefacts: Option<&'a Artefacts>,
         verbose: bool,
     ) -> Self {
         GitStores {
             online,
-            ci: crate::git::is_ci(),
-            cache,
+            sources,
             local: local_dir(config_root),
             artefacts,
             verbose,
             refs: Mutex::new(HashMap::new()),
-            asked_default: Mutex::new(Default::default()),
         }
     }
 
-    /// Which store `url` is read from. Offline, a workspace whose checkouts
-    /// were made without the cache has no mirror to read, but its own store.
-    fn store(&self, url: &str, kind: Kind) -> Store {
-        let preferred = match (&self.cache, kind) {
-            (Some(_), Kind::Source) if !self.ci => Store::Mirror,
+    /// Which store `url` is read from: a source repository from the root's
+    /// own store for it, anything else — and everything in CI — light.
+    fn store(&self, _url: &str, kind: Kind) -> Store {
+        match (&self.sources.stores, kind) {
+            (Some(_), Kind::Source) => Store::Repo,
             _ => Store::Light,
-        };
-        if preferred == Store::Mirror && !self.online {
-            let mirror = self.mirror_path(url);
-            let light = self.light_path(url);
-            if !is_store(&mirror) && light.join(REFS_FILE).is_file() {
-                return Store::Light;
-            }
         }
-        preferred
     }
 
-    fn mirror_path(&self, url: &str) -> PathBuf {
-        match &self.cache {
-            Some(cache) => cache.mirror_path(&crate::ci::remote_url(url)),
+    fn repo_path(&self, url: &str) -> PathBuf {
+        match &self.sources.stores {
+            Some(stores) => stores.repo_path(url),
             None => self.light_path(url),
         }
     }
 
     fn light_path(&self, url: &str) -> PathBuf {
-        self.local.join(crate::cache::entry_name(url))
+        self.local.join(crate::store::entry_name(url))
     }
 
     fn path(&self, url: &str, kind: Kind) -> PathBuf {
         match self.store(url, kind) {
-            Store::Mirror => self.mirror_path(url),
+            Store::Repo => self.repo_path(url),
             Store::Light => self.light_path(url),
         }
     }
@@ -116,13 +103,13 @@ impl<'a> GitStores<'a> {
             if self.verbose {
                 eprintln!("  resolve  {}", url);
             }
-            let fetched = match (store, &self.cache) {
-                (Store::Mirror, Some(cache)) => cache.mirror(&remote).map(|_| ()),
+            let fetched = match (store, &self.sources.stores) {
+                (Store::Repo, Some(stores)) => stores.update(&remote).map(|_| ()),
                 _ => refresh_light(&remote, path),
             };
             if let Err(e) = fetched {
                 let had = match store {
-                    Store::Mirror => is_store(path),
+                    Store::Repo => is_store(path),
                     Store::Light => path.join(REFS_FILE).is_file(),
                 };
                 if !had {
@@ -136,7 +123,7 @@ impl<'a> GitStores<'a> {
             }
         }
         match store {
-            Store::Mirror if is_store(path) => mirror_refs(path),
+            Store::Repo if is_store(path) => repo_refs(path),
             Store::Light if path.join(REFS_FILE).is_file() => {
                 let text = fs::read_to_string(path.join(REFS_FILE))?;
                 serde_json::from_str(&text)
@@ -223,9 +210,16 @@ impl Repos for GitStores<'_> {
 
     fn config_at(&self, url: &str, commit: &str, revision: &str) -> Result<Option<String>> {
         let remote = crate::ci::remote_url(url);
-        match (self.store(url, Kind::Source), &self.cache) {
-            (Store::Mirror, Some(cache)) => {
-                let path = cache.mirror_path(&remote);
+        match self.store(url, Kind::Source) {
+            Store::Repo => {
+                let path = self.repo_path(url);
+                // An artefact on the topic is read as the source it then is,
+                // from a store nothing may have made yet.
+                if self.online && !is_store(&path) {
+                    if let Some(stores) = &self.sources.stores {
+                        stores.update(&remote)?;
+                    }
+                }
                 if let Some(found) = self.show(&path, commit)? {
                     return Ok(found);
                 }
@@ -238,10 +232,10 @@ impl Repos for GitStores<'_> {
                 }
                 Err(self.not_here(url, commit))
             }
-            (_, cache) => {
+            Store::Light => {
                 // CI with the cache on: the snapshot pin the checkout is built
                 // from holds exactly this commit.
-                if let (Some(cache), true) = (cache, self.ci) {
+                if let Some(cache) = &self.sources.cache {
                     let snapshot = cache.snapshot_path(&remote);
                     if is_store(&snapshot) {
                         if let Some(found) = self.show(&snapshot, commit)? {
@@ -294,23 +288,12 @@ impl Repos for GitStores<'_> {
     }
 
     fn default_branch(&self, url: &str, kind: Kind) -> Result<Option<String>> {
-        let path = self.path(url, kind);
-        if self.store(url, kind) == Store::Mirror
-            && self.online
-            && self.asked_default.lock().unwrap().insert(path.clone())
-        {
-            // A mirror's fetch does not carry the remote's HEAD: asked for
-            // once, the first time a command needs it, and kept as the
-            // mirror's own HEAD for every read after.
-            set_default_branch(&crate::ci::remote_url(url), &path);
-            self.refs.lock().unwrap().remove(&path);
-        }
         Ok(self.refs(url, kind)?.default_branch)
     }
 
     fn is_ancestor(&self, url: &str, kind: Kind, ancestor: &str, descendant: &str) -> Result<bool> {
-        // Only a mirror has history; nothing else fetches it for a warning.
-        if self.store(url, kind) != Store::Mirror {
+        // Only a store has history; nothing else fetches it for a warning.
+        if self.store(url, kind) != Store::Repo {
             return Err(unavailable("no history on this machine"));
         }
         let path = self.path(url, kind);
@@ -323,6 +306,17 @@ impl Repos for GitStores<'_> {
             Some(1) => Ok(false),
             _ => Err(unavailable("the history is not on this machine")),
         }
+    }
+
+    fn local_branch(&self, url: &str, branch: &str) -> Option<String> {
+        if self.store(url, Kind::Source) != Store::Repo {
+            return None;
+        }
+        let path = self.repo_path(url);
+        if !is_store(&path) {
+            return None;
+        }
+        crate::git::resolve_ref(&path, &format!("refs/heads/{}^{{commit}}", branch))
     }
 
     fn prepare(&self, wanted: &[(String, Kind)]) {
@@ -351,25 +345,22 @@ impl Repos for GitStores<'_> {
     }
 }
 
-/// Where the workspace keeps its own stores: in its git directory when it is
-/// the top of a repository, so they never show up as untracked files, else
-/// beside its config.
+/// Where the workspace keeps its light stores: in its git directory, so they
+/// never show up as untracked files.
 fn local_dir(config_root: &Path) -> PathBuf {
-    let in_git = if crate::git::is_repo_root(config_root) {
-        crate::git::git_path(config_root, "gitscale/resolve")
-    } else {
-        None
-    };
-    in_git.unwrap_or_else(|| config_root.join(".gitscale/resolve"))
+    crate::git::git_path(config_root, "gitscale/resolve")
+        .unwrap_or_else(|| config_root.join(".git/gitscale/resolve"))
 }
 
 fn is_store(path: &Path) -> bool {
     path.join("HEAD").is_file()
 }
 
-/// A mirror's branches and tags, each peeled to its commit, and the default
-/// branch its HEAD names.
-fn mirror_refs(path: &Path) -> Result<Refs> {
+/// A store's view of its remote: the remote's branches as it last fetched
+/// them, its tags, each peeled to its commit, and the default branch
+/// `refs/remotes/origin/HEAD` names. The store's own branches are not the
+/// remote's, and are not listed.
+fn repo_refs(path: &Path) -> Result<Refs> {
     let dir = path.to_string_lossy().to_string();
     let listed = crate::git::run_git(
         &[
@@ -377,7 +368,7 @@ fn mirror_refs(path: &Path) -> Result<Refs> {
             &dir,
             "for-each-ref",
             "--format=%(refname)%09%(objectname)%09%(*objectname)",
-            "refs/heads",
+            "refs/remotes/origin",
             "refs/tags",
         ],
         None,
@@ -394,14 +385,20 @@ fn mirror_refs(path: &Path) -> Result<Refs> {
             .filter(|p| !p.is_empty())
             .unwrap_or(object)
             .to_string();
-        if let Some(branch) = name.strip_prefix("refs/heads/") {
-            refs.branches.insert(branch.to_string(), commit);
+        if let Some(branch) = name.strip_prefix("refs/remotes/origin/") {
+            if branch != "HEAD" {
+                refs.branches.insert(branch.to_string(), commit);
+            }
         } else if let Some(tag) = name.strip_prefix("refs/tags/") {
             refs.tags.insert(tag.to_string(), commit);
         }
     }
-    refs.default_branch = crate::git::query(path, &["symbolic-ref", "--short", "HEAD"])
-        .filter(|b| refs.branches.contains_key(b));
+    refs.default_branch = crate::git::query(
+        path,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .and_then(|b| b.strip_prefix("origin/").map(str::to_string))
+    .filter(|b| refs.branches.contains_key(b));
     Ok(refs)
 }
 
@@ -481,28 +478,6 @@ fn fetch_one(path: &Path, commit: &str, revision: &str) {
         return;
     }
     let _ = fetch(revision);
-}
-
-/// The remote's default branch, from its HEAD symref.
-fn default_branch(url: &str) -> Option<String> {
-    let listed = crate::git::run_git(&["ls-remote", "--symref", url, "HEAD"], None, false).ok()?;
-    let text = String::from_utf8_lossy(&listed.stdout);
-    text.lines().find_map(|line| {
-        line.strip_prefix("ref: refs/heads/")?
-            .split_once('\t')
-            .filter(|(_, name)| *name == "HEAD")
-            .map(|(branch, _)| branch.to_string())
-    })
-}
-
-/// Point the mirror's HEAD at the remote's default branch, which is what a
-/// bare repository's HEAD means. Best effort.
-fn set_default_branch(url: &str, path: &Path) {
-    if let Some(branch) = default_branch(url) {
-        let dir = path.to_string_lossy().to_string();
-        let target = format!("refs/heads/{}", branch);
-        let _ = crate::git::run_git(&["-C", &dir, "symbolic-ref", "HEAD", &target], None, false);
-    }
 }
 
 /// The workspace's checkouts as resolution sees them.

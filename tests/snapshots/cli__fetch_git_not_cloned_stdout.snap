@@ -1,6 +1,7 @@
 ---
 source: tests/cli.rs
+assertion_line: 485
 expression: out.stdout
 ---
 Fetching...
-  skip  libs/mylib (not cloned)
+  ok    libs/mylib

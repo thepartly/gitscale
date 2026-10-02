@@ -85,7 +85,7 @@ fn a_dependency_raises_the_root_and_status_says_why() {
         ("imports/d", &d, ", revision = \"v1.2.0\""),
     ]));
 
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v1.5.0"));
     let link = env.playground.join("imports/b/libs/d");
@@ -95,7 +95,7 @@ fn a_dependency_raises_the_root_and_status_says_why() {
     assert!(row.contains("v1.5.0"), "{}", row);
     // STATUS keeps the checkout's own state; RESOLUTION says how the
     // revision was chosen, and how many asked.
-    assert!(row.contains("   detached   "), "{}", row);
+    assert!(row.contains("   ok   "), "{}", row);
     assert!(
         row.ends_with("raised from v1.2.0 by imports/b, 2 requests"),
         "{}",
@@ -148,11 +148,11 @@ fn an_override_at_the_root_holds_a_dependency_down() {
         ("imports/d", &d, ", revision = \"v1.2.0\", override = true"),
     ]));
 
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
     assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v1.2.0"));
     let row = status_row(&env, "imports/d");
     assert!(row.starts_with('↧'), "{}", row);
-    assert!(row.contains("detached, override"), "{}", row);
+    assert!(row.contains("   override   "), "{}", row);
     assert!(
         row.ends_with("held at v1.2.0, imports/b wants v1.5.0, 2 requests"),
         "{}",
@@ -161,7 +161,7 @@ fn an_override_at_the_root_holds_a_dependency_down() {
 }
 
 #[test]
-fn resolve_write_records_the_resolved_revisions_and_keeps_comments() {
+fn upgrade_resolved_records_the_resolved_revisions_and_keeps_comments() {
     let env = TestEnv::new("res_write");
     let (b, d) = diamond(&env);
     env.write_config(&format!(
@@ -171,7 +171,7 @@ fn resolve_write_records_the_resolved_revisions_and_keeps_comments() {
         d.display()
     ));
 
-    let out = env.run(&["resolve"]);
+    let out = env.run(&["upgrade", "--resolved", "--dry-run"]);
     assert!(out.success, "{}", out.stderr);
     assert!(out.stdout.contains("v1.2.0 → v1.5.0"), "{}", out.stdout);
     assert!(
@@ -180,14 +180,14 @@ fn resolve_write_records_the_resolved_revisions_and_keeps_comments() {
         out.stdout
     );
 
-    let out = env.run(&["resolve", "--write"]);
+    let out = env.run(&["upgrade", "--resolved"]);
     assert!(out.success, "{}", out.stderr);
     let config = std::fs::read_to_string(env.playground.join(".gitscale.toml")).unwrap();
     assert!(config.contains("revision = \"v1.5.0\""), "{}", config);
     assert!(config.contains("# the workspace"), "{}", config);
     assert!(config.contains("# raised by b"), "{}", config);
 
-    let out = env.run(&["resolve"]);
+    let out = env.run(&["upgrade", "--resolved"]);
     assert!(out.stdout.contains("already declares"), "{}", out.stdout);
 }
 
@@ -220,7 +220,7 @@ fn two_majors_get_a_checkout_each_unless_one_is_a_singleton() {
         ])
     );
     env.write_config(&config);
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v1.5.0"));
     assert_eq!(head(&env, "imports/d_v2"), tag_commit(&d, "v2.0.0"));
@@ -254,7 +254,7 @@ fn two_majors_get_a_checkout_each_unless_one_is_a_singleton() {
         ("imports/c", &c, ", revision = \"v1.0.0\""),
         ("imports/d", &d, ", singleton = true"),
     ]));
-    let out = fresh.run(&["clone"]);
+    let out = fresh.run(&["pull"]);
     assert!(!out.success);
     assert!(out.stderr.contains("singleton"), "{}", out.stderr);
 }
@@ -283,7 +283,7 @@ fn a_cycle_fails_before_anything_is_cloned() {
         ("imports/b", &b, ", revision = \"v1.0.0\""),
         ("imports/c", &c, ", revision = \"v1.0.0\""),
     ]));
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(!out.success);
     assert!(out.stderr.contains("cycle"), "{}", out.stderr);
     assert!(!env.playground.join("imports").exists());
@@ -294,9 +294,9 @@ fn pull_moves_a_checkout_only_when_nothing_can_be_lost() {
     let env = TestEnv::new("res_safe_move");
     let d = tagged(&env, "d", &[("v1.2.0", ""), ("v1.5.0", "")]);
     env.write_config(&repos(&[("imports/d", &d, ", revision = \"v1.2.0\"")]));
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
     let dest = env.playground.join("imports/d");
-    std::fs::write(dest.join("README.md"), "local edit").unwrap();
+    helpers::edit(&dest.join("README.md"), "local edit");
 
     env.write_config(&repos(&[("imports/d", &d, ", revision = \"v1.5.0\"")]));
     let out = env.run(&["pull"]);
@@ -348,15 +348,15 @@ fn calendar_versions_order_by_date_then_modifier() {
         ("imports/c", &c, ", revision = \"v1.0.0\""),
         ("imports/d", &d, ", revision = \"v2026.09.30\""),
     ]));
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v2026.09.30-11"));
 }
 
-/// Without the cache, resolution reads refs from `ls-remote` and each config
-/// from one commit fetched at depth 1: no history crosses the wire.
+/// In CI without the cache, resolution reads refs from `ls-remote` and each
+/// config from one commit fetched at depth 1: no history crosses the wire.
 #[test]
-fn resolving_without_the_cache_fetches_no_history() {
+fn resolving_in_ci_without_the_cache_fetches_no_history() {
     let env = TestEnv::new("res_no_history");
     env.init_playground_git();
     let (b, _d) = diamond(&env);
@@ -369,7 +369,7 @@ fn resolving_without_the_cache_fetches_no_history() {
         allow(&env),
         repos(&[("imports/b", &b, ", revision = \"v1.0.0\"")])
     ));
-    let out = env.run(&["clone", "--no-cache"]);
+    let out = env.run_with_env(&[("CI", "true")], &["pull", "--no-cache"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/d"), tag_commit(&_d, "v1.5.0"));
 
@@ -401,7 +401,9 @@ fn resolving_without_the_cache_fetches_no_history() {
     );
 
     // Offline afterwards: status reads what is on disk.
-    let row = status_row(&env, "imports/d");
+    let out = env.run_with_env(&[("CI", "true")], &["status"]);
+    let table = strip_ansi(&out.stdout);
+    let row = table.lines().find(|l| l.contains("imports/d")).unwrap();
     assert!(row.contains("implicit via imports/b"), "{}", row);
 }
 
@@ -413,7 +415,7 @@ fn an_artefact_brings_its_dependencies_in_its_config_layer() {
     let dep = tagged(&env, "dep", &[("v1.0.0", "")]);
     let art = env.create_bare_repo("art", "main", &[("README.md", "art")]);
     let producer = format!(
-        "[artefact]\nroot = \"dist\"\ninclude = [\"**\"]\n\n{}",
+        "[artefact]\ninclude = [\"dist/**\"]\n\n{}",
         repos(&[("vendor/dep", &dep, ", revision = \"v1.0.0\"")])
     );
     let (published, _) = env.publish_with(&art, "main", &producer, &[("app.bin", "x")], &[]);
@@ -430,10 +432,10 @@ fn an_artefact_brings_its_dependencies_in_its_config_layer() {
         repos(&[(
             "meta/app",
             &art,
-            ", revision = \"main\", mode = \"artefact\""
+            ", revision = \"main\", artefact = \"replace\""
         )])
     ));
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/dep"), tag_commit(&dep, "v1.0.0"));
     let link = env.playground.join("meta/app/vendor/dep");
@@ -466,7 +468,7 @@ fn sync_removes_an_implicit_checkout_left_behind() {
         )
     };
     env.write_config(&config("v1.0.0"));
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
     assert!(env.playground.join("imports/d").is_dir());
     // Someone's own clone, which gitscale did not make.
     run_git_pub(
@@ -503,7 +505,7 @@ fn one_failing_entry_fails_the_command_after_the_rest_is_done() {
             (
                 "meta/art",
                 &art,
-                ", revision = \"main\", mode = \"artefact\""
+                ", revision = \"main\", artefact = \"replace\""
             ),
         ])
     ));
@@ -535,35 +537,30 @@ fn one_failing_entry_fails_the_command_after_the_rest_is_done() {
     }
 }
 
-/// A shallow checkout moves with a plain checkout, so an untracked file in the
-/// way of the new revision stops the move rather than being overwritten.
+/// A checkout moves with a plain checkout, so an untracked file in the way of
+/// the new revision stops the move rather than being overwritten.
 #[test]
-fn a_shallow_move_never_overwrites_an_untracked_file() {
-    let env = TestEnv::new("res_shallow_untracked");
+fn a_move_never_overwrites_an_untracked_file() {
+    let env = TestEnv::new("res_untracked_in_the_way");
     let d = env.create_bare_repo("d", "main", &[("README.md", "d")]);
     let v1 = env.push_commit(&d, "main", "VERSION", "1");
     run_git_pub(&d, &["tag", "v1", &v1]);
     let v2 = env.push_commit(&d, "main", "new.txt", "from v2");
     run_git_pub(&d, &["tag", "v2", &v2]);
-    // file://, so the readonly clone is really shallow.
     let url = format!("file://{}", d.display());
     let entry = |rev: &str| {
         format!(
-            "[repos]\n\"imports/d\" = {{ url = \"{}\", revision = \"{}\", mode = \"readonly\" }}\n",
+            "[repos]\n\"imports/d\" = {{ url = \"{}\", revision = \"{}\" }}\n",
             url, rev
         )
     };
     env.write_config(&entry("v1"));
-    assert!(env.run(&["clone", "--no-cache"]).success);
+    assert!(env.run(&["pull"]).success);
     let dest = env.playground.join("imports/d");
-    assert_eq!(
-        git_stdout(&dest, &["rev-parse", "--is-shallow-repository"]),
-        "true"
-    );
     std::fs::write(dest.join("new.txt"), "mine").unwrap();
 
     env.write_config(&entry("v2"));
-    let out = env.run(&["pull", "--no-cache"]);
+    let out = env.run(&["pull"]);
     assert!(!out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(
         std::fs::read_to_string(dest.join("new.txt")).unwrap(),
@@ -583,7 +580,7 @@ fn links_a_repository_does_not_ignore_are_flagged_apart_from_dirty() {
         ("imports/b", &b, ", revision = \"v1.0.0\""),
         ("imports/d", &d, ", revision = \"v1.2.0\""),
     ]));
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
 
     let out = env.run(&["status"]);
     let text = strip_ansi(&out.stdout);
@@ -597,20 +594,18 @@ fn links_a_repository_does_not_ignore_are_flagged_apart_from_dirty() {
     );
 
     // Real work in the same checkout is still dirty.
-    std::fs::write(env.playground.join("imports/b/README.md"), "edited").unwrap();
+    helpers::edit(&env.playground.join("imports/b/README.md"), "edited");
     let row = status_row(&env, "imports/b");
     assert!(row.contains("dirty, untracked-links"), "{}", row);
 
     // Ignored, the links are nobody's business.
-    run_git_pub(
-        &env.playground.join("imports/b"),
-        &["checkout", "--", "README.md"],
-    );
-    std::fs::write(
-        env.playground.join("imports/b/.git/info/exclude"),
-        "/libs/\n",
-    )
-    .unwrap();
+    let checkout = env.playground.join("imports/b");
+    run_git_pub(&checkout, &["checkout", "--", "README.md"]);
+    // A worktree's exclude file is its store's, shared by every worktree.
+    let exclude = git_stdout(&checkout, &["rev-parse", "--git-path", "info/exclude"]);
+    let exclude = checkout.join(exclude);
+    std::fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+    std::fs::write(&exclude, "/libs/\n").unwrap();
     let row = status_row(&env, "imports/b");
     assert!(
         !row.contains("untracked-links") && !row.contains("dirty"),
@@ -644,7 +639,7 @@ fn sync_keeps_a_left_behind_checkout_with_work_and_fails() {
         )
     };
     env.write_config(&config("v1.0.0"));
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
     std::fs::write(env.playground.join("imports/d/notes.txt"), "mine").unwrap();
 
     env.write_config(&config("v1.1.0"));
@@ -683,7 +678,7 @@ fn an_override_from_above_works_around_a_missing_revision() {
         ("imports/b", &b, ", revision = \"v1.0.0\""),
         ("imports/d", &d, ", revision = \"v1.2.0\""),
     ]));
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(!out.success);
     assert!(
         out.stderr
@@ -697,7 +692,7 @@ fn an_override_from_above_works_around_a_missing_revision() {
         ("imports/b", &b, ", revision = \"v1.0.0\""),
         ("imports/d", &d, ", revision = \"v1.2.0\", override = true"),
     ]));
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v1.2.0"));
     let row = status_row(&env, "imports/d");
@@ -756,7 +751,7 @@ fn sync_removes_a_left_behind_implicit_artefact() {
                 &repos(&[(
                     "libs/art",
                     &art,
-                    ", revision = \"v1.0.0\", mode = \"artefact\"",
+                    ", revision = \"v1.0.0\", artefact = \"replace\"",
                 )]),
             ),
             ("v1.1.0", "[repos]\n"),
@@ -772,9 +767,9 @@ fn sync_removes_a_left_behind_implicit_artefact() {
         )
     };
     env.write_config(&config("v1.0.0"));
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
-    assert!(env.playground.join("imports/art/app.bin").is_file());
+    assert!(env.playground.join("imports/art/dist/app.bin").is_file());
     let records = env.playground.join(".git/gitscale/artefacts");
     assert!(std::fs::read_dir(&records).unwrap().count() > 0);
 
@@ -815,7 +810,7 @@ fn clean_keeps_implicit_checkouts_and_their_links() {
     let env = TestEnv::new("res_clean_implicit");
     env.init_playground_git();
     implicit_d(&env);
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
     std::fs::write(env.playground.join("stray.txt"), "x").unwrap();
 
     let out = env.run(&["clean", "-f"]);
@@ -832,7 +827,7 @@ fn pull_does_not_move_a_detached_head_with_commits_on_no_branch() {
     let env = TestEnv::new("res_detached_work");
     let d = tagged(&env, "d", &[("v1.2.0", ""), ("v1.5.0", "")]);
     env.write_config(&repos(&[("imports/d", &d, ", revision = \"v1.2.0\"")]));
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
     let dest = env.playground.join("imports/d");
     run_git_pub(
         &dest,
@@ -884,7 +879,7 @@ fn resolution_and_moves_in_ci() {
     for cache in [true, false] {
         let env = TestEnv::new(&format!("res_ci_{}", cache));
         let (b, d) = implicit_d(&env);
-        let mut args = vec!["clone"];
+        let mut args = vec!["pull"];
         if !cache {
             args.push("--no-cache");
         }
@@ -946,7 +941,7 @@ fn fetch_fetches_the_declared_entries_when_resolution_fails() {
         allow(&env),
         repos(&[("imports/b", &b, ", revision = \"v1.0.0\"")])
     ));
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
     let fresh = env.push_commit(&b, "main", "news.txt", "new");
 
     // c's request for d cannot be ordered against b's: neither is above.
@@ -1021,7 +1016,7 @@ fn an_override_in_a_dependency_reaches_only_what_it_is_above() {
 
     // e is below b: b's override wins over it. c asks for less: it agrees.
     env.write_config(&config(&c_with("v1.3.1")));
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v1.5.0"));
     let row = status_row(&env, "imports/d");
@@ -1035,33 +1030,32 @@ fn an_override_in_a_dependency_reaches_only_what_it_is_above() {
     // c asks for more, and b is not above c: no order without the root.
     std::fs::remove_dir_all(env.playground.join("imports")).unwrap();
     env.write_config(&config(&c_with("v1.6.0")));
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(!out.success);
     assert!(out.stderr.contains("override conflict"), "{}", out.stderr);
 }
 
 /// Offline, status reads what is on this machine: a repository nothing has
-/// fetched yet is unresolved until `status --fetch`.
+/// fetched yet is unresolved until `status --fetch`. In CI, where checkouts
+/// hold no history, that is the light stores resolution keeps.
 #[test]
 fn status_is_unresolved_until_fetched() {
     let env = TestEnv::new("res_offline");
     env.init_playground_git();
     let (b, d) = diamond(&env);
-    env.write_config(&format!(
-        "[cache]\nenabled = false\n\n{}",
-        repos(&[
-            ("imports/b", &b, ", revision = \"v1.0.0\""),
-            ("imports/d", &d, ", revision = \"v1.2.0\""),
-        ])
-    ));
+    env.write_config(&repos(&[
+        ("imports/b", &b, ", revision = \"v1.0.0\""),
+        ("imports/d", &d, ", revision = \"v1.2.0\""),
+    ]));
     // Before anything: only missed.
     let row = status_row(&env, "imports/b");
     assert!(row.ends_with("missed"), "{}", row);
 
-    assert!(env.run(&["clone"]).success);
+    let ci = [("CI", "true")];
+    assert!(env.run_with_env(&ci, &["pull", "--no-cache"]).success);
     // The workspace's own stores go; the checkouts stay.
     std::fs::remove_dir_all(env.playground.join(".git/gitscale/resolve")).unwrap();
-    let out = env.run(&["status"]);
+    let out = env.run_with_env(&ci, &["status"]);
     let table = strip_ansi(&out.stdout);
     let row = table.lines().find(|l| l.contains("imports/d")).unwrap();
     assert!(row.contains("unresolved"), "{}", table);
@@ -1071,7 +1065,7 @@ fn status_is_unresolved_until_fetched() {
         table
     );
 
-    let out = env.run(&["status", "--fetch"]);
+    let out = env.run_with_env(&ci, &["status", "--fetch", "--no-cache"]);
     let table = strip_ansi(&out.stdout);
     let row = table.lines().find(|l| l.contains("imports/d")).unwrap();
     assert!(!row.contains("unresolved"), "{}", table);
@@ -1088,15 +1082,14 @@ fn an_uncommitted_config_edit_takes_effect() {
         ("imports/b", &b, ", revision = \"v1.0.0\""),
         ("imports/d", &d, ", revision = \"v1.2.0\""),
     ]));
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
     assert!(status_row(&env, "imports/d").contains("v1.5.0"));
 
     // b now asks for no more than the root does.
-    std::fs::write(
-        env.playground.join("imports/b/.gitscale.toml"),
-        repos(&[("libs/d", &d, ", revision = \"v1.2.0\"")]),
-    )
-    .unwrap();
+    helpers::edit(
+        &env.playground.join("imports/b/.gitscale.toml"),
+        &repos(&[("libs/d", &d, ", revision = \"v1.2.0\"")]),
+    );
     let row = status_row(&env, "imports/d");
     let expected = row.split_whitespace().nth(5).unwrap_or_default();
     assert_eq!(expected, "v1.2.0", "{}", row);
@@ -1111,7 +1104,7 @@ fn why_shows_the_shared_checkouts_or_the_ones_named() {
         ("imports/b", &b, ", revision = \"v1.0.0\""),
         ("imports/d", &d, ", revision = \"v1.2.0\""),
     ]));
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
 
     let out = env.run(&["status", "--why"]);
     assert!(out.success, "{}", out.stderr);
@@ -1187,7 +1180,7 @@ fn placement_follows_the_hoist_dir_majors_kind_and_names() {
             ("imports/c", &c, ", revision = \"v1.0.0\""),
         ])
     ));
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "vendor/d"), tag_commit(&d, "v0.3.0"));
     assert_eq!(head(&env, "vendor/d_v0.4"), tag_commit(&d, "v0.4.0"));
@@ -1205,7 +1198,7 @@ fn placement_follows_the_hoist_dir_majors_kind_and_names() {
             ("imports/c", &c, ", revision = \"v1.0.0\""),
         ])
     ));
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert!(env.playground.join("imports/d/VERSION").is_file());
 
@@ -1223,7 +1216,7 @@ fn placement_follows_the_hoist_dir_majors_kind_and_names() {
             ("imports/c", &c, ", revision = \"v1.0.0\""),
         ])
     ));
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(!out.success);
     assert!(
         out.stderr.contains("two repositories want imports/shared"),
@@ -1242,7 +1235,11 @@ fn an_artefact_beside_the_source_of_one_repository() {
     let c = dependant(
         &env,
         "c",
-        &[("libs/d", &d, ", revision = \"v1.0.0\", mode = \"artefact\"")],
+        &[(
+            "libs/d",
+            &d,
+            ", revision = \"v1.0.0\", artefact = \"replace\"",
+        )],
     );
     env.write_config(&format!(
         "{}{}{}",
@@ -1253,14 +1250,16 @@ fn an_artefact_beside_the_source_of_one_repository() {
             ("imports/c", &c, ", revision = \"v1.0.0\""),
         ])
     ));
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert!(
         env.playground.join("imports/d/README.md").is_file(),
         "the source"
     );
     assert!(
-        env.playground.join("imports/d_artefact/d.bin").is_file(),
+        env.playground
+            .join("imports/d_artefact/dist/d.bin")
+            .is_file(),
         "the build"
     );
     assert_eq!(
@@ -1275,14 +1274,14 @@ fn an_artefact_beside_the_source_of_one_repository() {
 fn cache_update_covers_implicit_dependencies() {
     let env = TestEnv::new("res_cache_update");
     let (_, d) = implicit_d(&env);
-    let out = env.run(&["cache", "update"]);
+    let out = env.run_with_env(&[], &["cache", "update"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert!(out.stdout.contains("imports/d"), "{}", out.stdout);
-    let mirror = env.cache_entry("mirror", d.to_str().unwrap());
-    assert!(mirror.join("HEAD").is_file(), "{}", mirror.display());
+    let snapshot = env.cache_entry("snapshots", d.to_str().unwrap());
+    assert!(snapshot.join("HEAD").is_file(), "{}", snapshot.display());
 }
 
-/// Where the cache mirror holds history, a winner by position that is behind
+/// Where the root's store holds history, a winner by position that is behind
 /// what a losing request asked for is flagged — and still wins.
 #[test]
 fn a_winner_behind_a_request_is_flagged_where_history_is_local() {
@@ -1294,7 +1293,7 @@ fn a_winner_behind_a_request_is_flagged_where_history_is_local() {
         ("imports/c", &c, ", revision = \"v1.0.0\""),
         ("imports/d", &d, ", revision = \"stable\""),
     ]));
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v1.3.1"));
     let row = status_row(&env, "imports/d");
@@ -1302,9 +1301,9 @@ fn a_winner_behind_a_request_is_flagged_where_history_is_local() {
     assert!(row.contains("behind imports/c's v1.5.0"), "{}", row);
 }
 
-/// `--write` edits table-style entries as well as inline ones.
+/// `upgrade --resolved` edits table-style entries as well as inline ones.
 #[test]
-fn resolve_write_edits_table_style_entries() {
+fn upgrade_resolved_edits_table_style_entries() {
     let env = TestEnv::new("res_write_table");
     let (b, d) = diamond(&env);
     env.write_config(&format!(
@@ -1313,7 +1312,7 @@ fn resolve_write_edits_table_style_entries() {
         b.display(),
         d.display()
     ));
-    let out = env.run(&["resolve", "--write"]);
+    let out = env.run(&["upgrade", "--resolved"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     let config = std::fs::read_to_string(env.playground.join(".gitscale.toml")).unwrap();
     assert!(
@@ -1327,46 +1326,6 @@ fn resolve_write_edits_table_style_entries() {
 // ---------------------------------------------------------------------------
 // Found by the doc review
 // ---------------------------------------------------------------------------
-
-/// A commit made on the branch of a shallow checkout is work: the move that
-/// would reset that branch is refused, while one fetched by name is not.
-#[test]
-fn a_shallow_pull_never_drops_a_local_commit() {
-    let env = TestEnv::new("res_shallow_commit");
-    let d = env.create_bare_repo("d", "main", &[("README.md", "d")]);
-    let url = format!("file://{}", d.display());
-    env.write_config(&format!(
-        "[repos]\n\"imports/d\" = {{ url = \"{}\", revision = \"main\", mode = \"readonly\" }}\n",
-        url
-    ));
-    assert!(env.run(&["clone", "--no-cache"]).success);
-    let dest = env.playground.join("imports/d");
-    assert_eq!(
-        git_stdout(&dest, &["rev-parse", "--is-shallow-repository"]),
-        "true"
-    );
-    run_git_pub(
-        &dest,
-        &[
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "user.name=t",
-            "commit",
-            "--allow-empty",
-            "-m",
-            "mine",
-        ],
-    );
-    let mine = head(&env, "imports/d");
-    env.push_commit(&d, "main", "VERSION", "upstream");
-
-    let out = env.run(&["pull", "--no-cache"]);
-    let text = format!("{}{}", out.stdout, out.stderr);
-    assert!(!out.success, "{}", text);
-    assert!(text.contains("no remote has would be lost"), "{}", text);
-    assert_eq!(head(&env, "imports/d"), mine);
-}
 
 /// A checkout nothing needs, whose only change is the links gitscale planted
 /// in it, holds nothing to lose and goes.
@@ -1387,12 +1346,12 @@ fn sync_removes_a_checkout_whose_only_change_is_its_links() {
     assert!(!env.playground.join("imports/b").exists(), "{}", out.stdout);
 }
 
-/// `sync` takes the name of an implicit checkout, as `clone` and `pull` do.
+/// `sync` takes the name of an implicit checkout, as `pull` does.
 #[test]
 fn sync_takes_an_implicit_checkout_by_name() {
     let env = TestEnv::new("res_sync_implicit_name");
     implicit_d(&env);
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
     let out = env.run(&["sync", "imports/d"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
 }
@@ -1407,7 +1366,7 @@ fn a_missed_row_has_no_resolution_text() {
         ("imports/b", &b, ", revision = \"v1.0.0\""),
         ("imports/d", &d, ", revision = \"v1.2.0\""),
     ]));
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
     std::fs::remove_dir_all(env.playground.join("imports/d")).unwrap();
     let row = status_row(&env, "imports/d");
     assert!(row.ends_with("missed"), "{}", row);
@@ -1430,7 +1389,7 @@ fn fetch_reports_both_failures() {
             ("imports/gone", &gone, ", revision = \"v1.0.0\""),
         ])
     ));
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
     std::fs::remove_dir_all(&gone).unwrap();
     env.write_config(&repos(&[
         ("imports/b", &b, ", revision = \"v1.0.0\""),

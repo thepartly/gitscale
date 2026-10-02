@@ -210,26 +210,6 @@ impl Layout {
         Ok(freed)
     }
 
-    /// Check every blob against its name and delete those that fail.
-    /// Returns how many were deleted.
-    pub fn verify(&self) -> Result<usize> {
-        let mut removed = 0;
-        let Ok(listing) = fs::read_dir(self.path.join("blobs/sha256")) else {
-            return Ok(0);
-        };
-        for found in listing.flatten() {
-            let name = found.file_name().to_string_lossy().into_owned();
-            let intact = file_digest(&found.path())
-                .map(|d| d == format!("sha256:{}", name))
-                .unwrap_or(false);
-            if !intact {
-                fs::remove_file(found.path())?;
-                removed += 1;
-            }
-        }
-        Ok(removed)
-    }
-
     fn read_index(&self) -> Index {
         fs::read(self.path.join(INDEX_FILE))
             .ok()
@@ -332,9 +312,6 @@ mod tests {
         assert!(layout.verified_blob(&digest).is_none());
         assert!(!layout.blob_path(&digest).unwrap().exists());
 
-        let digest = put(&layout, b"good bytes");
-        fs::write(layout.blob_path(&digest).unwrap(), b"rot").unwrap();
-        assert_eq!(layout.verify().unwrap(), 1);
         let _ = fs::remove_dir_all(layout.path());
     }
 

@@ -50,7 +50,7 @@ fn unique(name: &str) -> String {
 
 fn entry_config(env: &TestEnv, bare: &Path) -> String {
     format!(
-        "{}[repos]\n\"meta/app\" = {{ url = \"{}\", revision = \"main\", mode = \"artefact\" }}\n",
+        "{}[repos]\n\"meta/app\" = {{ url = \"{}\", revision = \"main\", artefact = \"replace\" }}\n",
         env.registries(),
         bare.display()
     )
@@ -88,7 +88,7 @@ fn publish_clone_and_pull_against_a_real_registry() {
     );
 
     env.write_config(&entry_config(&env, &bare));
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(
         std::fs::read_to_string(env.playground.join("meta/app/app.js")).unwrap(),
@@ -143,7 +143,7 @@ fn a_missing_tag_is_reported_by_a_real_registry() {
     use_registry(&env, &addr);
     let bare = env.create_bare_repo(&unique("unpublished"), "main", &[("README.md", "x")]);
     env.write_config(&entry_config(&env, &bare));
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(!out.success);
     assert!(out.stderr.contains("no artefact for"), "{}", out.stderr);
 }
@@ -250,7 +250,7 @@ fn gitscale_reads_what_other_tools_publish() {
     );
 
     env.write_config(&entry_config(&env, &target));
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(
         std::fs::read_to_string(env.playground.join("meta/app/hello.txt")).unwrap(),

@@ -1,5 +1,6 @@
 ---
 source: tests/cli.rs
+assertion_line: 44
 expression: out.stdout
 ---
-Added meta/svc → https://github.com/org/svc.git @ main [artefact]
+Added meta/svc → https://github.com/org/svc.git @ main [artefact replace]

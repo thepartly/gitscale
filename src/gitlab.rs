@@ -150,7 +150,6 @@ mod tests {
             directory: directory.to_string(),
             repo_url: String::new(),
             revision: String::new(),
-            mode: crate::config::RepoMode::Readwrite,
             recursive: true,
             ..Default::default()
         }

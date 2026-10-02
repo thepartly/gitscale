@@ -2,11 +2,11 @@ use anyhow::Result;
 use std::io::Write;
 use std::path::Path;
 
-use crate::cache::{self, Cache};
-use crate::commands::cache::Sources;
 use crate::config::load_workspace;
-use crate::git::{fetch_repo, get_artefact_status, get_repo_status, is_tree_modified, RepoStatus};
+use crate::git::{get_artefact_status, get_repo_status, is_tree_modified, Expected, RepoStatus};
+use crate::promote::State;
 use crate::resolution::{Kind, Resolution, Slot};
+use crate::store::Sources;
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -27,9 +27,8 @@ pub fn run(
         return Ok(());
     }
 
-    // Never `Sources::adopting`: status changes nothing, even with --fetch.
-    let sources = Sources::new(&config, &config_root, no_cache, verbose);
-    let artefacts = crate::artefact::Artefacts::new(&config, &config_root, sources.cache.clone());
+    let sources = Sources::new(&config_root, no_cache)?;
+    let artefacts = crate::artefact::Artefacts::new(&config, &config_root, sources.images());
 
     // Offline unless `--fetch`: what this machine already has. A graph that
     // cannot be resolved is still worth a table — the declared entries, each
@@ -38,7 +37,7 @@ pub fn run(
         &config,
         &config_root,
         do_fetch,
-        sources.cache.clone(),
+        &sources,
         Some(&artefacts),
         verbose,
     ) {
@@ -53,31 +52,21 @@ pub fn run(
         return print_why(&resolution, dirs, out);
     }
 
+    // Resolving online fetched every store; what is left is what the
+    // registry has for each artefact.
     if do_fetch {
         for slot in &resolution.slots {
             let entry = slot.entry();
             let dest = config_root.join(&entry.directory);
-            let fetched = if entry.is_artefact() {
-                if dest.is_symlink() {
-                    Ok(())
-                } else {
-                    if verbose {
-                        writeln!(out, "Fetching {}...", entry.directory)?;
-                    }
-                    artefacts.fetch(&entry).map(|_| ())
-                }
-            } else if crate::git::is_checkout(&dest) && !dest.is_symlink() {
-                if verbose {
-                    writeln!(out, "Fetching {}...", entry.directory)?;
-                }
-                let from = sources.for_entry(&entry);
-                fetch_repo(&entry, &config_root, &from)
-            } else {
-                Ok(())
-            };
+            if !entry.is_artefact() || dest.is_symlink() {
+                continue;
+            }
+            if verbose {
+                writeln!(out, "Fetching {}...", entry.directory)?;
+            }
             // Status still reports, but must not pass off what the last
             // successful fetch saw as what `--fetch` just found.
-            if let Err(e) = fetched {
+            if let Err(e) = artefacts.fetch(&entry) {
                 writeln!(
                     err,
                     "  fetch {}: {} (showing the last fetched state)",
@@ -88,28 +77,33 @@ pub fn run(
     }
 
     let mut statuses: Vec<RepoStatus> = Vec::new();
-
-    // Resolved whether or not the cache is switched on: `--no-cache` changes
-    // what the next command does, not where the objects a checkout already
-    // borrows happen to live.
-    let cache_root = cache::resolve_dir(&config.cache.dir);
-
     let entries = resolution.entries();
-    for entry in &entries {
-        if entry.is_artefact() {
+    for (entry, slot) in entries.iter().zip(&resolution.slots) {
+        let dest = config_root.join(&entry.directory);
+        // An artefact on the topic may be its source instead.
+        if entry.is_artefact() && !crate::git::is_checkout(&dest) {
             statuses.push(get_artefact_status(entry, &config_root));
-        } else {
-            let mut status = get_repo_status(entry, &config_root);
-            let url = crate::git::remote_url(entry);
-            if status.exists && !status.is_symlink {
-                status.cache = cache::cache_use(
-                    &config_root.join(&entry.directory),
-                    &url,
-                    cache_root.as_deref(),
-                );
-            }
-            statuses.push(status);
+            continue;
         }
+        let expected = Expected {
+            branch: slot
+                .topic
+                .as_ref()
+                .filter(|t| t.developed || !entry.is_artefact())
+                .map(|t| t.branch.clone()),
+            commit: slot
+                .topic
+                .as_ref()
+                .map_or(slot.commit.clone(), |t| Some(t.commit.clone())),
+        };
+        let mut status = get_repo_status(entry, &config_root, &expected);
+        if status.exists && !status.is_symlink {
+            if let Some(stores) = &sources.stores {
+                let store = stores.repo_path(&crate::git::remote_url(entry));
+                status.foreign = !crate::store::is_worktree_of(&store, &dest);
+            }
+        }
+        statuses.push(status);
     }
 
     // The links planted inside a checkout are gitscale's, not its owner's
@@ -175,13 +169,117 @@ pub fn run(
         &config.resolve.hoist_dir,
     );
 
+    let topic = topic_view(&config, &config_root, &sources, &resolution);
+    let warnings = warnings(&config_root);
     let rows: Vec<(&RepoStatus, &Slot)> = statuses.iter().zip(&resolution.slots).collect();
     if output_format == "json" {
-        print_json(&rows, &orphans, sources.cache.as_ref(), out)?;
+        print_json(&rows, &orphans, &topic, &warnings, out)?;
     } else {
-        print_table(&rows, &orphans, out)?;
+        for warning in &warnings {
+            writeln!(out, "warning: {}", warning)?;
+        }
+        print_table(&rows, &orphans, &topic, out)?;
     }
     Ok(())
+}
+
+/// What the table says about the workspace's topic: its branch, where each
+/// topic slot's change stands, what it waits on, and what may merge next.
+/// Worked out offline, from the root's stores: never in CI.
+#[derive(Default)]
+struct TopicView {
+    branch: Option<String>,
+    states: std::collections::BTreeMap<String, State>,
+    waits: std::collections::BTreeMap<String, Vec<String>>,
+    /// Topic slots whose branch lacks the revision the graph now pins:
+    /// `behind <revision> wanted by <requester>`.
+    behind: std::collections::BTreeMap<String, String>,
+    next: Vec<String>,
+}
+
+fn topic_view(
+    config: &crate::config::GitScaleConfig,
+    config_root: &Path,
+    sources: &Sources,
+    resolution: &Resolution,
+) -> TopicView {
+    let Some(branch) = crate::topic::root(config, config_root, false)
+        .topic()
+        .map(str::to_string)
+    else {
+        return TopicView::default();
+    };
+    let Some(stores) = &sources.stores else {
+        return TopicView {
+            branch: Some(branch),
+            ..TopicView::default()
+        };
+    };
+    let mut states = std::collections::BTreeMap::new();
+    let mut behind = std::collections::BTreeMap::new();
+    for slot in resolution.topic_slots() {
+        let store = stores.repo_path(&crate::ci::remote_url(&slot.url));
+        let planted = resolution.planted_in(&slot.directory);
+        let state = crate::promote::assess(config_root, &store, slot, &planted, None);
+        states.insert(slot.directory.clone(), state);
+        let (Some(on), Some(pin)) = (&slot.topic, slot.pin()) else {
+            continue;
+        };
+        let contains = crate::git::run_git(
+            &["merge-base", "--is-ancestor", &pin.commit, &on.commit],
+            Some(&store),
+            false,
+        );
+        if contains.is_ok_and(|o| o.status.code() == Some(1)) {
+            behind.insert(
+                slot.directory.clone(),
+                format!("behind {} wanted by {}: rebase it", pin.revision, pin.by),
+            );
+        }
+    }
+    let promoted: std::collections::BTreeSet<String> = states
+        .iter()
+        .filter(|(_, s)| s.is_promoted())
+        .map(|(d, _)| d.clone())
+        .collect();
+    let requests = crate::promote::topic_requests(config, config_root, resolution);
+    let waits = states
+        .keys()
+        .map(|dir| {
+            (
+                dir.clone(),
+                crate::promote::waits_on(&requests, &promoted, dir),
+            )
+        })
+        .collect();
+    let next = if states.is_empty() {
+        Vec::new()
+    } else {
+        crate::promote::next_to_merge(&requests, &promoted)
+    };
+    TopicView {
+        branch: Some(branch),
+        states,
+        waits,
+        behind,
+        next,
+    }
+}
+
+/// What is wrong with the workspace as a whole, rather than with one row.
+fn warnings(config_root: &Path) -> Vec<String> {
+    let mut warnings = Vec::new();
+    // `git clone --bare` sets none: `origin/*` is then never updated.
+    let refspec = crate::git::query(config_root, &["config", "--get-all", "remote.origin.fetch"]);
+    if crate::git::origin_url(config_root).is_some() && refspec.is_none_or(|r| r.is_empty()) {
+        warnings.push(
+            "the root repository has no fetch refspec, so origin/* is never updated\n  \
+             ahead/behind and upstreams in this table may be wrong. To fix:\n  \
+             git config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*' && git fetch"
+                .to_string(),
+        );
+    }
+    warnings
 }
 
 /// The root's entries as declared, every one unresolved: what status shows
@@ -194,9 +292,9 @@ fn unresolved(config: &crate::config::GitScaleConfig, reason: &str) -> Resolutio
             .map(|e| Slot {
                 directory: e.directory.clone(),
                 url: e.repo_url.clone(),
-                mode: e.mode,
+                artefact: e.artefact,
                 recursive: e.recursive,
-                kind: Kind::of(e.mode),
+                kind: Kind::of(e),
                 class: crate::version::Class::Any,
                 declared: Some(e.revision.clone()),
                 implicit: false,
@@ -205,6 +303,10 @@ fn unresolved(config: &crate::config::GitScaleConfig, reason: &str) -> Resolutio
                 unread: None,
                 requests: Vec::new(),
                 majors: 1,
+                commit: None,
+                branch: None,
+                topic: None,
+                pinned_by: None,
             })
             .collect(),
         links: Vec::new(),
@@ -221,8 +323,37 @@ fn is_unresolved(slot: &Slot) -> bool {
 /// The RESOLUTION column: how the row's revision was chosen, when there is
 /// anything to say beyond "the root asked for it". The winner only, and a
 /// count when more than one repository asked — `--why` has the rest.
-fn notes(slot: &Slot) -> Vec<String> {
+fn notes(slot: &Slot, topic: &TopicView, status: Option<&RepoStatus>) -> Vec<String> {
     let mut notes = Vec::new();
+    if let Some(on) = &slot.topic {
+        notes.push(if on.developed {
+            "topic".to_string()
+        } else {
+            "topic, from remote".to_string()
+        });
+        if slot.artefact == Some(crate::config::ArtefactUse::Replace) {
+            let sources = status.is_some_and(|s| s.artefact.is_none());
+            notes.push(if sources {
+                "sources".to_string()
+            } else {
+                format!("image {}", crate::git::short_sha(&on.commit))
+            });
+        }
+        if let Some(waits) = topic.waits.get(&slot.directory).filter(|w| !w.is_empty()) {
+            notes.push(format!("waits on {}", waits.join(", ")));
+        }
+        if let Some(behind) = topic.behind.get(&slot.directory) {
+            notes.push(behind.clone());
+        }
+        if let Some(state) = topic.states.get(&slot.directory) {
+            if !matches!(state, State::Unknown(_)) {
+                notes.push(state.describe());
+            }
+        }
+    }
+    if let Some(by) = &slot.pinned_by {
+        notes.push(format!("pinned by {}", by));
+    }
     if let Some(reason) = &slot.unresolved {
         notes.push(
             if reason.contains("not on this machine") || reason.contains("not been fetched") {
@@ -234,7 +365,7 @@ fn notes(slot: &Slot) -> Vec<String> {
     } else if slot.unread.is_some() && slot.kind == Kind::Source {
         notes.push("its dependencies are not fetched yet: run status --fetch".to_string());
     }
-    if let Some(chosen) = &slot.chosen {
+    if let Some(chosen) = slot.chosen.as_ref().filter(|_| slot.topic.is_none()) {
         if chosen.resolution == "raised" {
             notes.push(format!(
                 "raised from {} by {}",
@@ -335,12 +466,14 @@ fn print_why(resolution: &Resolution, dirs: &[String], out: &mut dyn Write) -> R
         };
         writeln!(
             out,
-            "{}  {}  {}  {}  {}",
+            "{}  {}  {}  {}{}",
             slot.directory,
             slot.url,
             class,
             slot.kind.label(),
-            slot.mode
+            slot.artefact
+                .map(|a| format!("  {}", a))
+                .unwrap_or_default()
         )?;
         match (&slot.chosen, &slot.unresolved) {
             (_, Some(reason)) => writeln!(out, "  unresolved  {}", reason)?,
@@ -354,7 +487,7 @@ fn print_why(resolution: &Resolution, dirs: &[String], out: &mut dyn Write) -> R
             )?,
             (None, None) => writeln!(
                 out,
-                "  selected  no revision asked for: follows the branch its checkout is on"
+                "  selected  no revision asked for: the default branch's head"
             )?,
         }
         if slot.requests.is_empty() {
@@ -438,17 +571,13 @@ fn get_status_flags(s: &RepoStatus) -> String {
     if !s.untracked_links.is_empty() {
         flags.push("untracked-links".to_string());
     }
-    // The checkout borrows from an object store that is no longer there: it
-    // cannot read its own history, and git says nothing until something tries
-    // to read an object. `gitscale cache repair` is the way back.
-    if s.cache == crate::cache::CacheUse::Broken {
-        flags.push("cache-broken".to_string());
+    // Not a worktree of the root's store: a clone an older gitscale made, or
+    // one whose store is gone. `pull` will not touch it.
+    if s.foreign {
+        flags.push("foreign".to_string());
     }
     if s.is_stale {
         flags.push("stale".to_string());
-    }
-    if s.is_detached {
-        flags.push("detached".to_string());
     }
     if s.ahead > 0 {
         flags.push(format!("+{}", s.ahead));
@@ -456,14 +585,10 @@ fn get_status_flags(s: &RepoStatus) -> String {
     if s.behind > 0 {
         flags.push(format!("-{}", s.behind));
     }
-    // A tag or a SHA is checked out detached, so REF reads as a commit and can
+    // A checkout off the topic is detached, so REF reads as a commit and can
     // never equal the revision as text. What decides it is where HEAD actually
-    // is: detached at the pinned commit is right, detached anywhere else is
-    // the mismatch this flag is for — and used to miss.
-    if !s.expected_ref.is_empty()
-        && s.current_ref != s.expected_ref
-        && !(s.is_detached && s.at_expected)
-    {
+    // is: at the commit resolution selected, or on the topic branch.
+    if !s.at_expected {
         flags.push("ref-mismatch".to_string());
     }
     if flags.is_empty() {
@@ -491,7 +616,7 @@ fn status_icon(flags: &str) -> &'static str {
         return "~";
     }
     if flags.contains("dirty")
-        || flags.contains("cache-broken")
+        || flags.contains("foreign")
         || flags.contains("missing")
         || flags.contains("changed")
         || flags.contains("untracked-links")
@@ -549,7 +674,7 @@ fn status_color(flags: &str) -> &'static str {
         || flags.contains("ref-mismatch")
         || flags.contains("stale")
         || flags.contains("unlinked")
-        || flags.contains("cache-broken")
+        || flags.contains("foreign")
         || flags.contains("missing")
         || flags.contains("changed")
     {
@@ -588,10 +713,23 @@ fn abbreviate_revision(revision: &str) -> String {
 fn print_table(
     rows_in: &[(&RepoStatus, &Slot)],
     orphans: &[crate::resolve::OrphanLink],
+    topic: &TopicView,
     out: &mut dyn Write,
 ) -> Result<()> {
     if rows_in.is_empty() && orphans.is_empty() {
         return Ok(());
+    }
+    if let Some(branch) = &topic.branch {
+        if topic.next.is_empty() {
+            writeln!(out, "topic {}", branch)?;
+        } else {
+            writeln!(
+                out,
+                "topic {} · next to merge: {}",
+                branch,
+                topic.next.join(", ")
+            )?;
+        }
     }
 
     // RESOLUTION only when some row has something to say: a workspace where
@@ -603,12 +741,12 @@ fn print_table(
             if get_status_flags(s) == "missed" {
                 String::new()
             } else {
-                notes(slot).join(", ")
+                notes(slot, topic, Some(s)).join(", ")
             }
         })
         .collect();
     let with_resolution = resolutions.iter().any(|r| !r.is_empty());
-    let mut headers = vec!["", "REPO", "PATH", "MODE", "REF", "EXPECTED", "STATUS"];
+    let mut headers = vec!["", "REPO", "PATH", "ARTEFACT", "REF", "EXPECTED", "STATUS"];
     if with_resolution {
         headers.push("RESOLUTION");
     }
@@ -639,7 +777,7 @@ fn print_table(
             icon.to_string(),
             s.directory.clone(),
             path,
-            s.mode.clone(),
+            s.artefact_use.clone(),
             ref_str,
             abbreviate_revision(&s.expected_ref),
             flags,
@@ -764,7 +902,8 @@ fn pad(cell: &str, width: usize) -> String {
 fn print_json(
     rows: &[(&RepoStatus, &Slot)],
     orphans: &[crate::resolve::OrphanLink],
-    cache: Option<&Cache>,
+    topic: &TopicView,
+    warnings: &[String],
     out: &mut dyn Write,
 ) -> Result<()> {
     let mut data: Vec<serde_json::Value> = rows
@@ -779,14 +918,14 @@ fn print_json(
                 "detached": s.is_detached,
                 "ahead": s.ahead,
                 "behind": s.behind,
-                "mode": s.mode,
+                "artefact_use": s.artefact_use,
                 "stale": s.is_stale,
                 "symlink": s.is_symlink,
                 "symlink_target": s.symlink_target,
                 "untracked_links": s.untracked_links,
-                "cache": s.cache.label(),
+                "foreign": s.foreign,
             });
-            add_resolution(&mut row, slot);
+            add_resolution(&mut row, slot, topic, Some(s));
             // What an artefact has installed, and what the last fetch saw for
             // its revision — the commit and image digest of each.
             if let Some(artefact) = &s.artefact {
@@ -810,27 +949,25 @@ fn print_json(
             "broken": o.broken,
         }));
     }
-    // A row of its own, discriminated by a key, the way orphan rows are —
-    // `cache_dir` rather than `cache`, which every repo row above uses for the
-    // word in its CACHE column.
-    data.push(match cache {
-        Some(cache) => {
-            let usage = cache.usage();
-            serde_json::json!({
-                "cache_dir": cache.root().display().to_string(),
-                "entries": usage.entries,
-                "bytes": usage.bytes,
-            })
-        }
-        None => serde_json::json!({ "cache_dir": null }),
-    });
+    // Rows of their own, discriminated by a key, the way orphan rows are.
+    if let Some(branch) = &topic.branch {
+        data.push(serde_json::json!({ "topic": branch, "next_to_merge": topic.next }));
+    }
+    if !warnings.is_empty() {
+        data.push(serde_json::json!({ "warnings": warnings }));
+    }
     writeln!(out, "{}", serde_json::to_string_pretty(&data).unwrap())?;
     Ok(())
 }
 
 /// How resolution got to the row's revision: structure only, for consumers
 /// that decide for themselves what to make of it.
-fn add_resolution(row: &mut serde_json::Value, slot: &Slot) {
+fn add_resolution(
+    row: &mut serde_json::Value,
+    slot: &Slot,
+    topic: &TopicView,
+    status: Option<&RepoStatus>,
+) {
     let chosen = slot.chosen.as_ref();
     let requests: Vec<serde_json::Value> = slot
         .requests
@@ -842,6 +979,7 @@ fn add_resolution(row: &mut serde_json::Value, slot: &Slot) {
                 "directory": r.directory,
                 "revision": r.revision,
                 "revision_kind": r.revision_kind.map(|k| k.label()),
+                "commit": r.commit,
                 "override": r.is_override,
                 "selected": r.selected,
                 "overruled_by": r.overruled_by,
@@ -871,8 +1009,20 @@ fn add_resolution(row: &mut serde_json::Value, slot: &Slot) {
         "reason": chosen.map(|c| c.reason.label()),
         "unresolved": slot.unresolved,
         "unread": slot.unread,
-        "notes": notes(slot),
+        "notes": notes(slot, topic, status),
         "requests": requests,
+        "topic": slot.topic.as_ref().map(|t| serde_json::json!({
+            "branch": t.branch,
+            "commit": t.commit,
+            "developed": t.developed,
+            "pin": t.pin.as_ref().map(|p| serde_json::json!({
+                "revision": p.revision,
+                "commit": p.commit,
+                "by": p.by,
+            })),
+            "state": topic.states.get(&slot.directory).map(|s| s.label()),
+        })),
+        "pinned_by": slot.pinned_by,
     });
     if let (Some(row), serde_json::Value::Object(fields)) = (row.as_object_mut(), fields) {
         row.extend(fields);

@@ -35,7 +35,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::config::{
-    parse_dependency_config, GitScaleConfig, RepoEntry, RepoMode, CONFIG_FILENAME,
+    parse_dependency_config, ArtefactUse, GitScaleConfig, RepoEntry, CONFIG_FILENAME,
 };
 use crate::resolve::SymlinkEntry;
 use crate::version::{self, Class, Version};
@@ -84,10 +84,13 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub fn of(mode: RepoMode) -> Kind {
-        match mode {
-            RepoMode::Artefact => Kind::Artefact,
-            _ => Kind::Source,
+    /// An entry that replaces its checkout with an image is an artefact; one
+    /// that overlays an image is a source checkout like any other.
+    pub fn of(entry: &RepoEntry) -> Kind {
+        if entry.is_artefact() {
+            Kind::Artefact
+        } else {
+            Kind::Source
         }
     }
 
@@ -118,6 +121,12 @@ pub trait Repos {
     fn is_ancestor(&self, url: &str, kind: Kind, ancestor: &str, descendant: &str) -> Result<bool>;
     /// Make the repositories ready, in parallel where that helps. Optional.
     fn prepare(&self, _wanted: &[(String, Kind)]) {}
+    /// The commit a branch of this workspace's own — not the remote's —
+    /// points at: where a topic is developed. `None` where there are no
+    /// local branches, as in CI.
+    fn local_branch(&self, _url: &str, _branch: &str) -> Option<String> {
+        None
+    }
 }
 
 /// The checkouts already in the workspace.
@@ -166,6 +175,9 @@ pub enum Reason {
     /// Every request names the same commit.
     Equal,
     Override,
+    /// The slot is on the workspace's topic: its branch of that name beats
+    /// every request.
+    Topic,
 }
 
 impl Reason {
@@ -177,6 +189,7 @@ impl Reason {
             Reason::Position => "position",
             Reason::Equal => "equal",
             Reason::Override => "override",
+            Reason::Topic => "topic",
         }
     }
 
@@ -189,6 +202,7 @@ impl Reason {
             Reason::Position => "asked for by a repository above the other",
             Reason::Equal => "same commit",
             Reason::Override => "override",
+            Reason::Topic => "topic branch",
         }
     }
 }
@@ -221,6 +235,8 @@ pub struct RequestView {
     pub directory: String,
     pub revision: String,
     pub revision_kind: Option<RevKind>,
+    /// The commit the revision names, when it was looked up.
+    pub commit: Option<String>,
     pub is_override: bool,
     pub selected: bool,
     /// Beaten by an override from a repository that dominates the requester,
@@ -244,12 +260,37 @@ impl RequestView {
     }
 }
 
+/// What resolution would have chosen for a topic slot without the topic: the
+/// pin a merge of the topic ships.
+#[derive(Debug, Clone)]
+pub struct Pin {
+    pub revision: String,
+    pub commit: String,
+    /// `root`, or the directory of the checkout whose config asked for it.
+    pub by: String,
+}
+
+/// A slot on the workspace's topic.
+#[derive(Debug, Clone)]
+pub struct SlotTopic {
+    /// The slot's branch of the topic: the topic itself, or `<topic>@v<major>`
+    /// for a checkout of an older major.
+    pub branch: String,
+    pub commit: String,
+    /// The root's store has a branch of that name: developed here. Otherwise
+    /// only the remote has one, and the checkout follows it.
+    pub developed: bool,
+    pub pin: Option<Pin>,
+}
+
 /// One checkout of the workspace.
 #[derive(Debug, Clone)]
 pub struct Slot {
     pub directory: String,
     pub url: String,
-    pub mode: RepoMode,
+    /// How the root's entry uses the repository's artefact; `None` for a
+    /// plain source checkout, and for every implicit one but an artefact.
+    pub artefact: Option<ArtefactUse>,
     pub recursive: bool,
     pub kind: Kind,
     pub class: Class,
@@ -266,24 +307,50 @@ pub struct Slot {
     pub requests: Vec<RequestView>,
     /// How many checkouts this repository has, one per class.
     pub majors: usize,
+    /// The commit the checkout goes to: the winner's, the default branch's
+    /// head for a slot nobody gives a revision, or the topic branch's.
+    pub commit: Option<String>,
+    /// The slot's branch of the workspace's topic, when it may have one: the
+    /// root is on a topic, and nothing holds the slot at its pin.
+    pub branch: Option<String>,
+    /// Set when the slot is on the workspace's topic.
+    pub topic: Option<SlotTopic>,
+    /// The requester whose config pins the topic branch, keeping this slot
+    /// at its pin although its remote has the branch.
+    pub pinned_by: Option<String>,
 }
 
 impl Slot {
     /// The entry every command operates on: the declared one, at the
-    /// revision resolution chose.
+    /// revision resolution chose — the topic branch, on a topic.
     pub fn entry(&self) -> RepoEntry {
         RepoEntry {
             directory: self.directory.clone(),
             repo_url: self.url.clone(),
-            revision: match (&self.chosen, &self.declared) {
-                (Some(chosen), _) => chosen.revision.clone(),
+            revision: match (&self.topic, &self.chosen, &self.declared) {
+                (Some(topic), _, _) => topic.branch.clone(),
+                (None, Some(chosen), _) => chosen.revision.clone(),
                 // Unresolved: what the root says is the best there is.
-                (None, Some(declared)) if self.unresolved.is_some() => declared.clone(),
+                (None, None, Some(declared)) if self.unresolved.is_some() => declared.clone(),
                 _ => String::new(),
             },
-            mode: self.mode,
+            artefact: self.artefact,
             recursive: self.recursive,
             ..RepoEntry::default()
+        }
+    }
+
+    /// What the slot is held at off the topic: the selected revision, or the
+    /// topic's pin.
+    pub fn pin(&self) -> Option<Pin> {
+        match (&self.topic, &self.chosen) {
+            (Some(topic), _) => topic.pin.clone(),
+            (None, Some(chosen)) => Some(Pin {
+                revision: chosen.revision.clone(),
+                commit: chosen.commit.clone(),
+                by: chosen.by.clone(),
+            }),
+            _ => None,
         }
     }
 
@@ -315,6 +382,40 @@ impl Resolution {
 
     pub fn slot(&self, directory: &str) -> Option<&Slot> {
         self.slots.iter().find(|s| s.directory == directory)
+    }
+
+    /// The slot `name` means: its own directory, or the path of a link a
+    /// repository has to it — how that repository names the dependency.
+    pub fn find(&self, name: &str) -> Option<&Slot> {
+        let name = name.trim_end_matches('/');
+        self.slot(name).or_else(|| {
+            let link = self.links.iter().find(|l| l.link_path == Path::new(name))?;
+            self.slot(&link.target_path.to_string_lossy())
+        })
+    }
+
+    /// The links planted inside the checkout at `directory`, relative to it:
+    /// gitscale's, not the checkout owner's work.
+    pub fn planted_in(&self, directory: &str) -> Vec<String> {
+        let entries = self.entries();
+        self.links
+            .iter()
+            .filter_map(|link| {
+                let owner = crate::resolve::owning_entry(&link.link_path, &entries)?;
+                (owner.directory == directory).then(|| {
+                    link.link_path
+                        .strip_prefix(&owner.directory)
+                        .unwrap_or(&link.link_path)
+                        .to_string_lossy()
+                        .into_owned()
+                })
+            })
+            .collect()
+    }
+
+    /// The slots on the workspace's topic.
+    pub fn topic_slots(&self) -> Vec<&Slot> {
+        self.slots.iter().filter(|s| s.topic.is_some()).collect()
     }
 }
 
@@ -389,6 +490,8 @@ struct Req {
     url: String,
     kind: Kind,
     info: Info,
+    /// The topic's own request: no repository made it.
+    topic: bool,
 }
 
 impl Req {
@@ -426,6 +529,19 @@ struct SlotState {
     commit: Option<String>,
     /// What expanding it found missing, offline.
     unexpanded: Option<String>,
+    /// On the topic: its branch, the commit, whether it is developed here,
+    /// and the request that would have won without it.
+    topic: Option<TopicPick>,
+    /// The slot's branch of the topic, when it may have one.
+    branch: Option<String>,
+    /// The requester that keeps it at its pin, pinning the topic branch.
+    pinned_by: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct TopicPick {
+    developed: bool,
+    pinned: Option<usize>,
 }
 
 impl SlotState {
@@ -481,6 +597,8 @@ pub struct Engine<'a> {
     edges: RefCell<BTreeMap<String, BTreeSet<String>>>,
     /// How each URL was last labelled in a chain, for messages.
     labels: RefCell<BTreeMap<String, String>>,
+    /// The workspace's topic branch, when the root is on one.
+    topic: Option<String>,
 }
 
 /// A config read at a commit, by repository, commit and checkout directory —
@@ -513,7 +631,14 @@ impl<'a> Engine<'a> {
             configs: RefCell::new(HashMap::new()),
             edges: RefCell::new(BTreeMap::new()),
             labels: RefCell::new(BTreeMap::new()),
+            topic: None,
         }
+    }
+
+    /// Resolve for a workspace on the topic `branch`: see [`crate::topic`].
+    pub fn with_topic(mut self, branch: Option<String>) -> Self {
+        self.topic = branch;
+        self
     }
 
     pub fn resolve(&self) -> Result<Resolution> {
@@ -571,9 +696,10 @@ impl<'a> Engine<'a> {
         Req {
             requester,
             url: crate::urls::normalize(&entry.repo_url),
-            kind: Kind::of(entry.mode),
+            kind: Kind::of(entry),
             entry: entry.clone(),
             info: Info::Empty,
+            topic: false,
         }
     }
 
@@ -712,12 +838,16 @@ impl<'a> Engine<'a> {
             return cached.clone().map_err(|e| anyhow!(e));
         }
         let url = &state.requests[0].entry.repo_url;
-        let text = match self
-            .checkouts
-            .config_if_at(&state.directory, key.kind, commit)
-        {
+        // A topic branch is source: its commits need not have an image, and
+        // whatever the checkout holds, its dependencies are the source's.
+        let kind = if state.topic.is_some() {
+            Kind::Source
+        } else {
+            key.kind
+        };
+        let text = match self.checkouts.config_if_at(&state.directory, kind, commit) {
             Some(on_disk) => Ok(on_disk),
-            None => match key.kind {
+            None => match kind {
                 Kind::Source => {
                     self.repos
                         .config_at(url, commit, state.chosen_revision().unwrap_or_default())
@@ -947,6 +1077,9 @@ impl<'a> Engine<'a> {
                     root_entry,
                     commit: None,
                     unexpanded: None,
+                    topic: None,
+                    branch: None,
+                    pinned_by: None,
                 },
             );
         }
@@ -955,6 +1088,7 @@ impl<'a> Engine<'a> {
             dominators,
         };
         self.place(&mut round, previous)?;
+        self.apply_topic(&mut round, previous);
         for (key, state) in round.slots.iter_mut() {
             state.commit = match &state.choice {
                 Choice::Picked { winner, .. } => {
@@ -967,14 +1101,139 @@ impl<'a> Engine<'a> {
         Ok(round)
     }
 
-    /// The commit a slot nobody gives a revision is read at: where its
-    /// checkout is, else the remote's default branch.
-    fn follow_commit(&self, key: &SlotKey, state: &SlotState) -> Option<String> {
-        if key.kind == Kind::Source {
-            if let Some(head) = self.checkouts.head(&state.directory) {
-                return Some(head);
+    /// Put each slot that may be on the topic on its branch: the root
+    /// store's own when there is one — work not pushed yet included — else
+    /// the remote's.
+    ///
+    /// Held at its pin instead: a slot the root overrides, and one a
+    /// requester keeps there by pinning the topic branch in its own config —
+    /// or by being kept at its own pin that way, all the way down. A
+    /// repository on its pinned branch builds its dependencies from pins, and
+    /// the topic must not build it any other way.
+    fn apply_topic(&self, round: &mut Round, previous: Option<&Round>) {
+        let Some(topic) = &self.topic else {
+            return;
+        };
+        let keys: Vec<SlotKey> = round.slots.keys().cloned().collect();
+        for key in &keys {
+            let highest = keys
+                .iter()
+                .filter(|k| k.url == key.url && k.kind == key.kind)
+                .map(|k| k.class)
+                .max()
+                == Some(key.class);
+            let pinned_by = self.pinned_by(round, previous, key, topic);
+            let state = round.slots.get_mut(key).unwrap();
+            if state.root_entry.as_ref().is_some_and(|e| e.is_override) {
+                continue;
+            }
+            if let Some(by) = pinned_by {
+                state.pinned_by = Some(by);
+                continue;
+            }
+            let branch = branch_for(topic, highest, key.class);
+            state.branch = Some(branch.clone());
+            let url = state.requests[0].entry.repo_url.clone();
+            let local = self.repos.local_branch(&url, &branch);
+            let developed = local.is_some();
+            let commit = match local {
+                Some(commit) => commit,
+                None => match self.repos.refs(&url, key.kind) {
+                    Ok(refs) => match refs.branches.get(&branch) {
+                        Some(commit) => commit.clone(),
+                        None => continue,
+                    },
+                    Err(_) => continue,
+                },
+            };
+            let first = &state.requests[0].entry;
+            let entry = RepoEntry {
+                directory: state.directory.clone(),
+                repo_url: state
+                    .root_entry
+                    .as_ref()
+                    .map_or(first.repo_url.clone(), |e| e.repo_url.clone()),
+                revision: branch.clone(),
+                artefact: state
+                    .root_entry
+                    .as_ref()
+                    .map_or(first.artefact, |e| e.artefact),
+                ..RepoEntry::default()
+            };
+            let pinned = match &state.choice {
+                Choice::Picked { winner, .. } => Some(*winner),
+                _ => None,
+            };
+            state.requests.push(Req {
+                requester: Node::Root,
+                url: key.url.clone(),
+                kind: key.kind,
+                entry,
+                info: Info::Known(RevInfo {
+                    commit,
+                    kind: RevKind::Branch,
+                    version: None,
+                    class: None,
+                }),
+                topic: true,
+            });
+            state.choice = Choice::Picked {
+                winner: state.requests.len() - 1,
+                reason: Reason::Topic,
+                resolution: "topic",
+                overruled: Vec::new(),
+                ahead: Vec::new(),
+            };
+            state.topic = Some(TopicPick { developed, pinned });
+        }
+    }
+
+    /// The requester of `key` that keeps it at its pin: one whose own config
+    /// pins `topic`, or one kept at its pin itself. Judged on the previous
+    /// round, whose configs are the ones read; pinned wins between requesters.
+    fn pinned_by(
+        &self,
+        round: &Round,
+        previous: Option<&Round>,
+        key: &SlotKey,
+        topic: &str,
+    ) -> Option<String> {
+        let previous = previous?;
+        for req in &round.slots[key].requests {
+            let Node::Slot(requester) = &req.requester else {
+                continue;
+            };
+            let Some(state) = previous.slots.get(requester) else {
+                continue;
+            };
+            if state.pinned_by.is_some() {
+                return state.pinned_by.clone();
+            }
+            let Some(commit) = &state.commit else {
+                continue;
+            };
+            let pins = self
+                .configs
+                .borrow()
+                .get(&(
+                    requester.url.clone(),
+                    commit.clone(),
+                    state.directory.clone(),
+                ))
+                .and_then(|c| c.as_ref().ok().cloned())
+                .flatten()
+                .and_then(|c| c.develop.pinned)
+                .is_some_and(|patterns| crate::topic::pins(&patterns, topic));
+            if pins {
+                return Some(state.directory.clone());
             }
         }
+        None
+    }
+
+    /// The commit a slot nobody gives a revision is read at and checked out
+    /// at: the remote's default branch.
+    fn follow_commit(&self, key: &SlotKey, state: &SlotState) -> Option<String> {
         let url = &state.requests[0].entry.repo_url;
         let branch = self.repos.default_branch(url, key.kind).ok()??;
         self.repos
@@ -1441,6 +1700,7 @@ impl<'a> Engine<'a> {
                 .requests
                 .iter()
                 .enumerate()
+                .filter(|(_, r)| !r.topic)
                 .map(|(i, r)| {
                     let (selected, overruled, ahead) = match &state.choice {
                         Choice::Picked {
@@ -1461,6 +1721,7 @@ impl<'a> Engine<'a> {
                         directory: r.entry.directory.clone(),
                         revision: r.entry.revision.clone(),
                         revision_kind: r.known().map(|i| i.kind),
+                        commit: r.known().map(|i| i.commit.clone()),
                         is_override: r.entry.is_override,
                         selected,
                         overruled_by: overruled
@@ -1485,7 +1746,11 @@ impl<'a> Engine<'a> {
                         kind: info.kind,
                         reason: *reason,
                         resolution,
-                        by: requester_name(Some(&round), &req.requester),
+                        by: if req.topic {
+                            "topic".to_string()
+                        } else {
+                            requester_name(Some(&round), &req.requester)
+                        },
                     })
                 }
                 _ => None,
@@ -1502,10 +1767,15 @@ impl<'a> Engine<'a> {
                     .root_entry
                     .as_ref()
                     .map_or(first.repo_url.clone(), |e| e.repo_url.clone()),
-                mode: match (&state.root_entry, key.kind) {
-                    (Some(entry), _) => entry.mode,
-                    (None, Kind::Artefact) => RepoMode::Artefact,
-                    (None, Kind::Source) => RepoMode::Readonly,
+                artefact: match (&state.root_entry, key.kind) {
+                    (Some(entry), _) => entry.artefact,
+                    (None, Kind::Artefact) => Some(ArtefactUse::Replace),
+                    // Overlaid when any repository asks for it overlaid.
+                    (None, Kind::Source) => state
+                        .requests
+                        .iter()
+                        .any(|r| r.entry.is_overlay())
+                        .then_some(ArtefactUse::Overlay),
                 },
                 recursive: self.expands(state),
                 kind: key.kind,
@@ -1517,6 +1787,28 @@ impl<'a> Engine<'a> {
                 unread: state.unexpanded.clone(),
                 requests,
                 majors,
+                commit: state.commit.clone(),
+                branch: state.branch.clone(),
+                topic: state.topic.as_ref().and_then(|pick| {
+                    let Choice::Picked { winner, .. } = &state.choice else {
+                        return None;
+                    };
+                    let req = &state.requests[*winner];
+                    Some(SlotTopic {
+                        branch: req.entry.revision.clone(),
+                        commit: req.known()?.commit.clone(),
+                        developed: pick.developed,
+                        pin: pick.pinned.and_then(|p| {
+                            let pinned = &state.requests[p];
+                            Some(Pin {
+                                revision: pinned.entry.revision.clone(),
+                                commit: pinned.known()?.commit.clone(),
+                                by: requester_name(Some(&round), &pinned.requester),
+                            })
+                        }),
+                    })
+                }),
+                pinned_by: state.pinned_by.clone(),
             });
         }
         // Each request a checkout makes is a link inside that checkout, to
@@ -1588,7 +1880,9 @@ fn different_majors(a: &Req, b: &Req) -> bool {
 }
 
 /// What changes between rounds: which slots there are, where, and at what.
-fn fingerprint(round: &Round) -> BTreeMap<SlotKey, (String, String, Option<String>, bool)> {
+type Fingerprint = (String, String, Option<String>, bool, Option<String>);
+
+fn fingerprint(round: &Round) -> BTreeMap<SlotKey, Fingerprint> {
     round
         .slots
         .iter()
@@ -1600,10 +1894,23 @@ fn fingerprint(round: &Round) -> BTreeMap<SlotKey, (String, String, Option<Strin
                     state.chosen_revision().unwrap_or_default().to_string(),
                     state.commit.clone(),
                     matches!(state.choice, Choice::Unresolved(_)),
+                    state.pinned_by.clone(),
                 ),
             )
         })
         .collect()
+}
+
+/// The branch of the topic `topic` a checkout uses: the topic itself for the
+/// highest major its repository is checked out at, `<topic>@v<major>` for the
+/// others — two worktrees of one store cannot share a branch, and a name is
+/// what CI matches on.
+pub fn branch_for(topic: &str, highest: bool, class: Class) -> String {
+    if highest || class == Class::Any {
+        topic.to_string()
+    } else {
+        format!("{}@v{}", topic, class.describe())
+    }
 }
 
 /// `imports/b@v2.1.0`.
@@ -1776,8 +2083,11 @@ mod tests {
     #[derive(Default)]
     struct Fake {
         repos: BTreeMap<String, FakeRepo>,
-        /// Whether history can be read: a developer machine's mirrors.
+        /// Whether history can be read: a developer machine's stores.
         history: bool,
+        /// The workspace's own branches, by repository: where topics are
+        /// developed.
+        local: BTreeMap<String, BTreeMap<String, String>>,
     }
 
     impl Fake {
@@ -1848,6 +2158,9 @@ mod tests {
                 return Err(unavailable("no history"));
             }
             Ok(self.get(url)?.history(b).iter().any(|c| c == a))
+        }
+        fn local_branch(&self, url: &str, branch: &str) -> Option<String> {
+            self.local.get(url)?.get(branch).cloned()
         }
     }
 
@@ -1969,7 +2282,7 @@ mod tests {
         let r = resolve(&fake, &deps(&[("imports/b", B, ", revision = \"v1.0.0\"")])).unwrap();
         let d = slot(&r, "imports/shared");
         assert!(d.implicit);
-        assert_eq!(d.mode, RepoMode::Readonly);
+        assert_eq!(d.artefact, None);
         assert_eq!(d.chosen.as_ref().unwrap().revision, "v1.3.1");
         assert_eq!(r.links[0].target_path, PathBuf::from("imports/shared"));
     }
@@ -2444,5 +2757,232 @@ mod tests {
             .unwrap()
             .slot("imports/x")
             .is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // Topics
+    // -----------------------------------------------------------------------
+
+    /// Checkouts at given heads, some with an edited config on disk.
+    #[derive(Default)]
+    struct AtHeads {
+        heads: BTreeMap<String, String>,
+        configs: BTreeMap<String, String>,
+    }
+
+    impl Checkouts for AtHeads {
+        fn config_if_at(&self, dir: &str, _: Kind, commit: &str) -> Option<Option<String>> {
+            let head = self.heads.get(dir)?;
+            (head == commit).then(|| self.configs.get(dir).cloned())
+        }
+        fn head(&self, dir: &str) -> Option<String> {
+            self.heads.get(dir).cloned()
+        }
+    }
+
+    fn resolve_on(
+        fake: &Fake,
+        checkouts: &AtHeads,
+        config: &str,
+        topic: &str,
+    ) -> Result<Resolution> {
+        let config = root(config);
+        Engine::new(&config, None, fake, checkouts)
+            .with_topic(Some(topic.to_string()))
+            .resolve()
+    }
+
+    /// B v1.0.0 needs D v1.3.1; the root asks for B.
+    fn topic_graph() -> (Fake, String) {
+        let mut fake = Fake::default();
+        d_versions(&mut fake);
+        child(
+            &mut fake,
+            B,
+            "b1",
+            "v1.0.0",
+            &deps(&[("libs/d", D, ", revision = \"v1.3.1\"")]),
+        );
+        (fake, deps(&[("imports/b", B, ", revision = \"v1.0.0\"")]))
+    }
+
+    #[test]
+    fn a_local_topic_branch_beats_every_request_and_keeps_the_pin() {
+        let (mut fake, config) = topic_graph();
+        fake.local
+            .entry(D.to_string())
+            .or_default()
+            .insert("feat/x".into(), "dlocal".into());
+        let r = resolve_on(&fake, &AtHeads::default(), &config, "feat/x").unwrap();
+        let d = slot(&r, "imports/d");
+        let chosen = d.chosen.as_ref().unwrap();
+        assert_eq!(chosen.revision, "feat/x");
+        assert_eq!(chosen.commit, "dlocal");
+        assert_eq!(chosen.reason, Reason::Topic);
+        assert_eq!(chosen.by, "topic");
+        assert_eq!(d.commit.as_deref(), Some("dlocal"));
+        let topic = d.topic.as_ref().unwrap();
+        assert!(topic.developed);
+        let pin = topic.pin.as_ref().unwrap();
+        assert_eq!(
+            (pin.revision.as_str(), pin.by.as_str()),
+            ("v1.3.1", "imports/b")
+        );
+        assert_eq!(d.entry().revision, "feat/x");
+        // The topic's own request is not one a repository made.
+        assert_eq!(d.requests.len(), 1);
+        // B has no branch of the topic: at its pin.
+        assert!(slot(&r, "imports/b").topic.is_none());
+        assert_eq!(slot(&r, "imports/b").branch.as_deref(), Some("feat/x"));
+    }
+
+    #[test]
+    fn a_topic_slots_own_config_is_read_where_it_stands() {
+        let (mut fake, config) = topic_graph();
+        fake.repo(E).commit("e1", None, None).tag("v1.0.0", "e1");
+        fake.local
+            .entry(B.to_string())
+            .or_default()
+            .insert("feat/x".into(), "blocal".into());
+        let mut checkouts = AtHeads::default();
+        checkouts.heads.insert("imports/b".into(), "blocal".into());
+        // B on the branch now also needs E — an edit not yet committed.
+        checkouts.configs.insert(
+            "imports/b".into(),
+            deps(&[
+                ("libs/d", D, ", revision = \"v1.3.1\""),
+                ("libs/e", E, ", revision = \"v1.0.0\""),
+            ]),
+        );
+        let r = resolve_on(&fake, &checkouts, &config, "feat/x").unwrap();
+        assert!(slot(&r, "imports/b").topic.is_some());
+        assert_eq!(
+            slot(&r, "imports/e").chosen.as_ref().unwrap().revision,
+            "v1.0.0"
+        );
+    }
+
+    #[test]
+    fn a_remote_branch_of_the_topics_name_is_followed_unless_the_root_overrides() {
+        let (mut fake, config) = topic_graph();
+        fake.repo(D)
+            .commit("dfeat", Some("d131"), None)
+            .branch("feat/x", "dfeat");
+        let none = AtHeads::default();
+        let r = resolve_on(&fake, &none, &config, "feat/x").unwrap();
+        let d = slot(&r, "imports/d");
+        assert_eq!(d.commit.as_deref(), Some("dfeat"));
+        assert!(!d.topic.as_ref().unwrap().developed);
+
+        let held = format!(
+            "{}\"imports/d\" = {{ url = \"{}\", revision = \"v1.2.0\", override = true }}\n",
+            config, D
+        );
+        let r = resolve_on(&fake, &none, &held, "feat/x").unwrap();
+        let d = slot(&r, "imports/d");
+        assert!(d.topic.is_none());
+        assert!(d.branch.is_none(), "an override can not be developed");
+        assert_eq!(d.chosen.as_ref().unwrap().revision, "v1.2.0");
+
+        // Without a topic, a branch of that name is just a branch.
+        let r = resolve(&fake, &config).unwrap();
+        assert!(slot(&r, "imports/d").topic.is_none());
+        assert!(slot(&r, "imports/d").branch.is_none());
+    }
+
+    #[test]
+    fn each_major_has_a_branch_of_its_own() {
+        let mut fake = Fake::default();
+        d_versions(&mut fake);
+        fake.repo(D)
+            .branch("feat/x", "d200")
+            .branch("feat/x@v1", "d150");
+        child(
+            &mut fake,
+            B,
+            "b1",
+            "v1.0.0",
+            &deps(&[("libs/d", D, ", revision = \"v1.3.1\"")]),
+        );
+        child(
+            &mut fake,
+            C,
+            "c1",
+            "v1.0.0",
+            &deps(&[("libs/d", D, ", revision = \"v2.0.0\"")]),
+        );
+        let config = deps(&[
+            ("imports/b", B, ", revision = \"v1.0.0\""),
+            ("imports/c", C, ", revision = \"v1.0.0\""),
+        ]);
+        let r = resolve_on(&fake, &AtHeads::default(), &config, "feat/x").unwrap();
+        let v1 = slot(&r, "imports/d");
+        let v2 = slot(&r, "imports/d_v2");
+        assert_eq!(v1.topic.as_ref().unwrap().branch, "feat/x@v1");
+        assert_eq!(v1.commit.as_deref(), Some("d150"));
+        assert_eq!(v2.topic.as_ref().unwrap().branch, "feat/x");
+        assert_eq!(v2.commit.as_deref(), Some("d200"));
+    }
+
+    /// A requester whose own config pins the topic branch keeps what it asks
+    /// for at its pins, all the way down; pinned wins over a requester that
+    /// does not pin it.
+    #[test]
+    fn a_requester_that_pins_the_topic_keeps_its_dependencies_at_their_pins() {
+        let mut fake = Fake::default();
+        d_versions(&mut fake);
+        fake.repo(D)
+            .commit("dfeat", Some("d131"), None)
+            .branch("staging", "dfeat");
+        fake.repo(E)
+            .commit("e1", None, None)
+            .tag("v1.0.0", "e1")
+            .commit("efeat", Some("e1"), None)
+            .branch("staging", "efeat");
+        // D's own config asks for E.
+        fake.repo(D).configs.insert(
+            "d131".into(),
+            deps(&[("libs/e", E, ", revision = \"v1.0.0\"")]),
+        );
+        child(
+            &mut fake,
+            B,
+            "b1",
+            "v1.0.0",
+            &format!(
+                "[develop]\npinned = [\"staging\"]\n\n{}",
+                deps(&[("libs/d", D, ", revision = \"v1.3.1\"")])
+            ),
+        );
+        let config = format!(
+            "[resolve]\nallow = [\"github.com/org/*\"]\n\n{}",
+            deps(&[("imports/b", B, ", revision = \"v1.0.0\"")])
+        );
+        let r = resolve_on(&fake, &AtHeads::default(), &config, "staging").unwrap();
+        let d = slot(&r, "imports/d");
+        assert!(d.topic.is_none());
+        assert_eq!(d.pinned_by.as_deref(), Some("imports/b"));
+        assert_eq!(d.commit.as_deref(), Some("d131"));
+        let e = slot(&r, "imports/e");
+        assert!(e.topic.is_none(), "below D too");
+        assert_eq!(e.pinned_by.as_deref(), Some("imports/b"));
+
+        // Another requester that does not pin it: pinned still wins.
+        child(
+            &mut fake,
+            C,
+            "c1",
+            "v1.0.0",
+            &deps(&[("libs/d", D, ", revision = \"v1.3.1\"")]),
+        );
+        let both = format!(
+            "{}\"imports/c\" = {{ url = \"{}\", revision = \"v1.0.0\" }}\n",
+            config, C
+        );
+        let r = resolve_on(&fake, &AtHeads::default(), &both, "staging").unwrap();
+        assert_eq!(
+            slot(&r, "imports/d").pinned_by.as_deref(),
+            Some("imports/b")
+        );
     }
 }

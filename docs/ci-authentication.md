@@ -1,4 +1,4 @@
-# 2.7 CI authentication
+# 2.8 CI authentication
 
 - [The problem](#the-problem)
 - [What GitScale does](#what-gitscale-does)
@@ -40,10 +40,10 @@ Both SSH spellings are recognised — `git@host:group/repo.git` and
 port is dropped, since it says nothing about the HTTPS endpoint. A URL already
 spelled with the CI server's scheme and host is used as-is.
 
-This applies to clones, fetches, pulls, pushes and the [object
-cache](caching.md)'s own entries. An existing clone whose `origin` still points
-at SSH — a workspace restored from a cache, or the runner's own checkout — is
-repointed before the next network operation.
+This applies to checkouts, fetches, pushes and the [CI
+cache](stores.md#the-ci-cache)'s own entries. An existing checkout whose
+`origin` still points at SSH — a workspace restored from a cache, or the
+runner's own checkout — is repointed before the next network operation.
 
 ## Detection
 
@@ -63,7 +63,7 @@ Only `http` and `https` server URLs are accepted; a port in the server URL is
 kept.
 
 Note that this is separate from `CI=1`, which is what switches GitScale to
-[shallow clones and snapshot cache entries](caching.md#what-changes-in-ci).
+[depth-1 checkouts and the CI cache](stores.md#the-ci-cache).
 
 ## What is never touched
 
@@ -167,4 +167,4 @@ credential helper, and offers no job token to any registry.
 
 ---
 
-[← 2.6 Hooks](hooks.md) · [Contents](README.md) · [Next → 2.8 Cleaning](clean.md)
+[← 2.7 Hooks](hooks.md) · [Contents](README.md) · [Next → 2.9 Cleaning](clean.md)

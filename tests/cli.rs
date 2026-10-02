@@ -37,8 +37,8 @@ fn add_entry_artefact() {
         "meta/svc",
         "https://github.com/org/svc.git",
         "main",
-        "--mode",
-        "artefact",
+        "--artefact",
+        "replace",
     ]);
     assert!(out.success, "stderr: {}", out.stderr);
     insta::assert_snapshot!("add_entry_artefact_stdout", out.stdout);
@@ -125,74 +125,101 @@ fn add_refuses_an_entry_the_config_would_reject() {
 }
 
 // ---------------------------------------------------------------------------
-// Clone
+// Pull: a fresh workspace
 // ---------------------------------------------------------------------------
 
+/// Every checkout is a worktree of the root's own store for its repository,
+/// detached at the commit its revision names, every file read-only.
 #[test]
-fn clone_readwrite() {
-    let env = TestEnv::new("clone_readwrite");
+fn pull_makes_each_checkout_a_detached_readonly_worktree_of_the_root_store() {
+    let env = TestEnv::new("pull_fresh");
     let bare = env.create_bare_repo("mylib", "main", &[("README.md", "# mylib\n")]);
+    let url = bare.display().to_string();
 
     env.write_config(&format!(
         r#"[repos]
 "libs/mylib" = {{ url = "{}", revision = "main" }}
 "#,
-        bare.display()
+        url
     ));
 
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "stderr: {}", out.stderr);
-    insta::assert_snapshot!("clone_readwrite_stdout", out.stdout);
+    insta::assert_snapshot!("pull_fresh_stdout", out.stdout);
 
-    // Directory created with file
-    assert!(env.playground.join("libs/mylib/README.md").is_file());
-}
-
-#[test]
-fn clone_readonly() {
-    let env = TestEnv::new("clone_readonly");
-    let bare = env.create_bare_repo("rolib", "main", &[("data.txt", "hello\n")]);
-
-    env.write_config(&format!(
-        r#"[repos]
-"libs/rolib" = {{ url = "{}", revision = "main", mode = "readonly" }}
-"#,
-        bare.display()
-    ));
-
-    let out = env.run(&["clone"]);
-    assert!(out.success, "stderr: {}", out.stderr);
-    insta::assert_snapshot!("clone_readonly_stdout", out.stdout);
-
-    let file = env.playground.join("libs/rolib/data.txt");
+    let checkout = env.playground.join("libs/mylib");
+    let file = checkout.join("README.md");
     assert!(file.is_file());
+    assert!(
+        checkout.join(".git").is_file(),
+        "a worktree has a .git file"
+    );
+    let common = git_stdout(
+        &checkout,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    );
+    assert_eq!(
+        std::path::PathBuf::from(common).canonicalize().unwrap(),
+        env.store(&url).canonicalize().unwrap()
+    );
+    assert_eq!(
+        git_stdout(&checkout, &["rev-parse", "HEAD"]),
+        git_stdout(&bare, &["rev-parse", "main"])
+    );
+    let branch = std::process::Command::new("git")
+        .args(["symbolic-ref", "-q", "HEAD"])
+        .current_dir(&checkout)
+        .output()
+        .unwrap();
+    assert!(!branch.status.success(), "detached, not on a branch");
 
-    // Check readonly permission
     use std::os::unix::fs::PermissionsExt;
     let perms = std::fs::metadata(&file).unwrap().permissions();
     assert_eq!(perms.mode() & 0o222, 0, "file should be readonly");
 }
 
+/// The store keeps the remote's branches apart from its own: a fetch never
+/// touches the branches checkouts are developed on, and no other refs come.
 #[test]
-fn clone_artefact_local() {
-    let env = TestEnv::new("clone_artefact_local");
+fn a_store_maps_the_remote_branches_to_remote_tracking_refs() {
+    let env = TestEnv::new("store_refspec");
+    let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "a")]);
+    let url = bare.display().to_string();
+    git_stdout(&bare, &["update-ref", "refs/merge-requests/1/head", "main"]);
+    env.write_config(&format!(
+        "[repos]\n\"libs/mylib\" = {{ url = \"{}\", revision = \"main\" }}\n",
+        url
+    ));
+    assert!(env.run(&["pull"]).success);
+
+    let store = env.store(&url);
+    let refs = git_stdout(&store, &["for-each-ref", "--format=%(refname)"]);
+    assert!(refs.contains("refs/remotes/origin/main"), "{}", refs);
+    assert!(!refs.contains("refs/heads/main"), "{}", refs);
+    assert!(!refs.contains("merge-requests"), "{}", refs);
+}
+
+#[test]
+fn pull_artefact_replace_installs_the_image() {
+    let env = TestEnv::new("pull_artefact_replace");
     let bare = env.artefact_repo("app", &[("app.bin", "binary-content")]);
 
     env.write_config(&format!(
         r#"{}[repos]
-"meta/app" = {{ url = "{}", revision = "main", mode = "artefact" }}
+"meta/app" = {{ url = "{}", revision = "main", artefact = "replace" }}
 "#,
         env.registries(),
         bare.display(),
     ));
 
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "stderr: {}", out.stderr);
-    insta::assert_snapshot!("clone_artefact_local_stdout", redact_shas(&out.stdout));
+    insta::assert_snapshot!("pull_artefact_replace_stdout", redact_shas(&out.stdout));
 
-    assert!(env.playground.join("meta/app/app.bin").is_file());
-    let content = std::fs::read_to_string(env.playground.join("meta/app/app.bin")).unwrap();
-    assert_eq!(content, "binary-content");
+    // Image paths are the repository's own.
+    let file = env.playground.join("meta/app/dist/app.bin");
+    assert_eq!(std::fs::read_to_string(file).unwrap(), "binary-content");
+    assert!(!env.playground.join("meta/app/.git").exists());
 }
 
 /// A commit is only ever a full SHA. An abbreviated one is taken for a branch
@@ -207,7 +234,7 @@ fn an_abbreviated_sha_fails_with_a_hint() {
         bare.display(),
         short
     ));
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(!out.success);
     assert!(out.stderr.contains("full SHA"), "{}", out.stderr);
     assert!(
@@ -228,7 +255,7 @@ fn an_all_hex_tag_name_is_a_tag() {
         "[repos]\n\"libs/lib\" = {{ url = \"{}\", revision = \"20241001\" }}\n",
         bare.display()
     ));
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "{}", out.stderr);
     let checkout = env.playground.join("libs/lib");
     assert_eq!(git_stdout(&checkout, &["rev-parse", "HEAD"]), tagged);
@@ -239,8 +266,8 @@ fn an_all_hex_tag_name_is_a_tag() {
 }
 
 #[test]
-fn clone_skip_existing() {
-    let env = TestEnv::new("clone_skip_existing");
+fn a_second_pull_leaves_a_checkout_where_it_is() {
+    let env = TestEnv::new("pull_twice");
     let bare = env.create_bare_repo("mylib", "main", &[("README.md", "# mylib\n")]);
 
     env.write_config(&format!(
@@ -250,29 +277,25 @@ fn clone_skip_existing() {
         bare.display()
     ));
 
-    // First clone
-    let out1 = env.run(&["clone"]);
-    assert!(out1.success);
-
-    // Second clone should skip
-    let out2 = env.run(&["clone"]);
-    assert!(out2.success);
-    insta::assert_snapshot!("clone_skip_existing_stdout", out2.stdout);
+    assert!(env.run(&["pull"]).success);
+    let out = env.run(&["pull"]);
+    assert!(out.success);
+    insta::assert_snapshot!("pull_twice_stdout", out.stdout);
 }
 
 #[test]
-fn clone_no_storage() {
-    let env = TestEnv::new("clone_no_storage");
+fn pull_artefact_without_a_registry() {
+    let env = TestEnv::new("pull_no_registry");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
 
     env.write_config(&format!(
         r#"[repos]
-"meta/app" = {{ url = "{}", revision = "main", mode = "artefact" }}
+"meta/app" = {{ url = "{}", revision = "main", artefact = "replace" }}
 "#,
         bare.display()
     ));
 
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(!out.success);
     assert!(
         out.stderr.contains("no registry is known") && out.stderr.contains("[registries]"),
@@ -282,20 +305,20 @@ fn clone_no_storage() {
 }
 
 #[test]
-fn clone_artefact_no_data() {
-    let env = TestEnv::new("clone_artefact_no_data");
+fn pull_artefact_with_nothing_published() {
+    let env = TestEnv::new("pull_artefact_no_data");
     // A repository whose pipeline has published nothing.
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
 
     env.write_config(&format!(
         r#"{}[repos]
-"meta/app" = {{ url = "{}", revision = "main", mode = "artefact" }}
+"meta/app" = {{ url = "{}", revision = "main", artefact = "replace" }}
 "#,
         env.registries(),
         bare.display(),
     ));
 
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(!out.success, "a missing artefact is an error, not a skip");
     assert!(
         out.stderr.contains("no artefact for") && out.stderr.contains("(main)"),
@@ -306,8 +329,8 @@ fn clone_artefact_no_data() {
 }
 
 #[test]
-fn clone_selective() {
-    let env = TestEnv::new("clone_selective");
+fn pull_selective() {
+    let env = TestEnv::new("pull_selective");
     let bare1 = env.create_bare_repo("lib1", "main", &[("a.txt", "a")]);
     let bare2 = env.create_bare_repo("lib2", "main", &[("b.txt", "b")]);
 
@@ -320,7 +343,7 @@ fn clone_selective() {
         bare2.display(),
     ));
 
-    let out = env.run(&["clone", "libs/lib1"]);
+    let out = env.run(&["pull", "libs/lib1"]);
     assert!(out.success, "stderr: {}", out.stderr);
 
     assert!(env.playground.join("libs/lib1/a.txt").is_file());
@@ -328,8 +351,8 @@ fn clone_selective() {
 }
 
 #[test]
-fn clone_unknown_name() {
-    let env = TestEnv::new("clone_unknown_name");
+fn pull_unknown_name() {
+    let env = TestEnv::new("pull_unknown_name");
     let bare = env.create_bare_repo("lib1", "main", &[("a.txt", "a")]);
 
     env.write_config(&format!(
@@ -339,9 +362,25 @@ fn clone_unknown_name() {
         bare.display(),
     ));
 
-    let out = env.run(&["clone", "nonexistent"]);
+    let out = env.run(&["pull", "nonexistent"]);
     assert!(!out.success);
     assert!(out.stderr.contains("Unknown repos"));
+}
+
+/// The workspace is the top of a git repository; anything else is refused.
+#[test]
+fn a_config_outside_a_git_repository_is_refused() {
+    let env = TestEnv::new("not_a_repo");
+    let outside = env.repos_remote.join("plain-dir");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join(".gitscale.toml"), "[repos]\n").unwrap();
+    let out = env.run_in(&outside, &["status"]);
+    assert!(!out.success);
+    assert!(
+        out.stderr.contains("not the top of a git repository"),
+        "{}",
+        out.stderr
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -357,7 +396,7 @@ fn fetch_artefact_local() {
 
     env.write_config(&format!(
         r#"{}[repos]
-"meta/app" = {{ url = "{}", revision = "v1.0", mode = "artefact" }}
+"meta/app" = {{ url = "{}", revision = "v1.0", artefact = "replace" }}
 "#,
         env.registries(),
         bare.display(),
@@ -372,35 +411,35 @@ fn fetch_artefact_local() {
     assert!(!env.playground.join("meta/app").exists());
 }
 
-/// A fetch only looks: an artefact it found in storage is still to be
-/// downloaded by the clone that follows.
+/// A fetch only looks: an artefact it found in the registry is still to be
+/// downloaded by the pull that follows.
 #[test]
-fn clone_after_fetch_still_downloads_the_artefact() {
-    let env = TestEnv::new("clone_after_fetch_artefact");
+fn pull_after_fetch_still_downloads_the_artefact() {
+    let env = TestEnv::new("pull_after_fetch_artefact");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
     run_git_pub(&bare, &["tag", "v1.0", "main"]);
     env.publish(&bare, "v1.0", &[("app.bin", "v1-content")]);
     env.write_config(&format!(
         r#"{}[repos]
-"meta/app" = {{ url = "{}", revision = "v1.0", mode = "artefact" }}
+"meta/app" = {{ url = "{}", revision = "v1.0", artefact = "replace" }}
 "#,
         env.registries(),
         bare.display(),
     ));
 
     assert!(env.run(&["fetch"]).success);
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "stderr: {}", out.stderr);
     assert!(
-        env.playground.join("meta/app/app.bin").is_file(),
-        "the artefact was never downloaded; clone said:\n{}",
+        env.playground.join("meta/app/dist/app.bin").is_file(),
+        "the artefact was never downloaded; pull said:\n{}",
         out.stdout
     );
 }
 
 /// An archive that cannot be unpacked leaves nothing that later passes for
-/// the artefact: running clone or pull again tries again, rather than taking
-/// the half-made directory as done.
+/// the artefact: running pull again tries again, rather than taking the
+/// half-made directory as done.
 #[test]
 fn a_corrupt_artefact_is_not_taken_as_current() {
     let env = TestEnv::new("corrupt_artefact");
@@ -408,34 +447,30 @@ fn a_corrupt_artefact_is_not_taken_as_current() {
     env.registry().corrupt_blobs();
     env.write_config(&format!(
         r#"{}[repos]
-"meta/app" = {{ url = "{}", revision = "main", mode = "artefact" }}
+"meta/app" = {{ url = "{}", revision = "main", artefact = "replace" }}
 "#,
         env.registries(),
         bare.display(),
     ));
 
-    let first = env.run(&["clone"]);
+    let first = env.run(&["pull"]);
     assert!(!first.success, "the blob does not match its digest");
     assert!(
         first.stderr.contains("does not match its digest"),
         "{}",
         first.stderr
     );
-    let again = env.run(&["clone"]);
+    let again = env.run(&["pull"]);
     assert!(
         !again.success,
-        "a second clone passed over the failed one:\n{}",
+        "pull took the failed one as up to date:\n{}",
         again.stdout
     );
-    let pull = env.run(&["pull"]);
-    assert!(
-        !pull.success,
-        "pull took the failed clone as up to date:\n{}",
-        pull.stdout
-    );
-    assert!(!env.playground.join("meta/app/app.bin").exists());
+    assert!(!env.playground.join("meta/app/dist/app.bin").exists());
 }
 
+/// A fetch fills the root's store whether or not the checkout exists yet:
+/// the next pull has nothing left to download.
 #[test]
 fn fetch_git_not_cloned() {
     let env = TestEnv::new("fetch_git_not_cloned");
@@ -451,6 +486,11 @@ fn fetch_git_not_cloned() {
     let out = env.run(&["fetch"]);
     assert!(out.success);
     insta::assert_snapshot!("fetch_git_not_cloned_stdout", out.stdout);
+    assert!(env
+        .store(&bare.display().to_string())
+        .join("HEAD")
+        .is_file());
+    assert!(!env.playground.join("libs/mylib").exists());
 }
 
 #[test]
@@ -465,7 +505,7 @@ fn fetch_git_cloned() {
         bare.display()
     ));
 
-    env.run(&["clone"]);
+    env.run(&["pull"]);
     let out = env.run(&["fetch"]);
     assert!(out.success, "stderr: {}", out.stderr);
     insta::assert_snapshot!("fetch_git_cloned_stdout", out.stdout);
@@ -504,7 +544,7 @@ fn child_with_outer_link(env: &TestEnv) -> (std::path::PathBuf, String) {
         bare_a.display(),
         bare_b.display(),
     ));
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
     assert!(
         env.playground.join("repoA/libs/b").is_symlink(),
         "clone should dedup repoA/libs/b"
@@ -543,15 +583,15 @@ fn pull_inside_a_child_leaves_the_outer_workspace_link_alone() {
     );
 }
 
-/// `clone` and `sync` from inside a child keep the outer links too; naming
-/// the entry is how one dependency is unlinked into a checkout of its own.
+/// `sync` from inside a child keeps the outer links too; naming the entry to
+/// `pull` is how one dependency is unlinked into a checkout of its own.
 #[test]
-fn clone_and_sync_inside_a_child_unlink_only_what_is_named() {
+fn sync_inside_a_child_keeps_the_links_and_a_named_pull_unlinks() {
     let env = TestEnv::new("child_unlink_named");
     let (child, main_tip) = child_with_outer_link(&env);
     let link = child.join("libs/b");
 
-    for subcommand in ["clone", "sync"] {
+    for subcommand in ["pull", "sync"] {
         let out = run_in(&child, subcommand, &[]);
         assert!(out.success, "{}: {}{}", subcommand, out.stdout, out.stderr);
         assert!(link.is_symlink(), "{} must keep the dedup link", subcommand);
@@ -561,9 +601,9 @@ fn clone_and_sync_inside_a_child_unlink_only_what_is_named() {
         main_tip
     );
 
-    let out = run_in(&child, "clone", &["libs/b"]);
+    let out = run_in(&child, "pull", &["libs/b"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
-    assert!(!link.is_symlink(), "a named clone unlinks");
+    assert!(!link.is_symlink(), "a named pull unlinks");
     assert_eq!(
         std::fs::read_to_string(link.join("b.txt")).unwrap(),
         "B develop",
@@ -571,9 +611,9 @@ fn clone_and_sync_inside_a_child_unlink_only_what_is_named() {
     );
 }
 
-/// Any other symlink at an entry path is replaced by a real clone, as `clone`
-/// does: pull lands where a fresh clone would, and the checkout the link
-/// pointed at is left untouched.
+/// Any other symlink at an entry path is replaced by a real checkout: pull
+/// lands where a fresh one would, and the checkout the link pointed at is left
+/// untouched.
 #[test]
 fn pull_replaces_an_in_workspace_symlink_with_a_clone() {
     let env = TestEnv::new("pull_inner_symlink");
@@ -587,7 +627,7 @@ fn pull_replaces_an_in_workspace_symlink_with_a_clone() {
         bare.display(),
         other.display(),
     ));
-    let out = env.run(&["clone", "libs/mylib"]);
+    let out = env.run(&["pull", "libs/mylib"]);
     assert!(out.success, "stderr: {}", out.stderr);
     std::os::unix::fs::symlink("mylib", env.playground.join("libs/alias")).unwrap();
     let before = git_stdout(&env.playground.join("libs/mylib"), &["rev-parse", "HEAD"]);
@@ -623,7 +663,7 @@ fn pull_moves_to_a_revision_a_dependency_starts_asking_for() {
         bare_a.display(),
         bare_b.display(),
     ));
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
     let dest_b = env.playground.join("repoB");
     assert_eq!(
         std::fs::read_to_string(dest_b.join("b.txt")).unwrap(),
@@ -653,15 +693,14 @@ fn pull_artefact_local() {
 
     env.write_config(&format!(
         r#"{}[repos]
-"meta/app" = {{ url = "{}", revision = "main", mode = "artefact" }}
+"meta/app" = {{ url = "{}", revision = "main", artefact = "replace" }}
 "#,
         env.registries(),
         bare.display(),
     ));
 
-    // Clone first
-    let out1 = env.run(&["clone"]);
-    assert!(out1.success, "clone stderr: {}", out1.stderr);
+    let out1 = env.run(&["pull"]);
+    assert!(out1.success, "first pull stderr: {}", out1.stderr);
 
     // A new commit on main, and its pipeline's artefact.
     env.push_commit(&bare, "main", "README.md", "v2");
@@ -672,7 +711,7 @@ fn pull_artefact_local() {
     assert!(out2.success, "pull stderr: {}", out2.stderr);
     insta::assert_snapshot!("pull_artefact_local_stdout", redact_shas(&out2.stdout));
 
-    let content = std::fs::read_to_string(env.playground.join("meta/app/app.bin")).unwrap();
+    let content = std::fs::read_to_string(env.playground.join("meta/app/dist/app.bin")).unwrap();
     assert_eq!(content, "v2-content");
 }
 
@@ -696,15 +735,16 @@ fn artefact_is_readonly_at_every_depth() {
     let bare = env.artefact_repo("app", &files("v1"));
     env.write_config(&format!(
         r#"{}[repos]
-"meta/app" = {{ url = "{}", revision = "main", mode = "artefact" }}
+"meta/app" = {{ url = "{}", revision = "main", artefact = "replace" }}
 "#,
         env.registries(),
         bare.display(),
     ));
-    let dest = env.playground.join("meta/app");
+    let root = env.playground.join("meta/app");
+    let dest = root.join("dist");
 
-    let out = env.run(&["clone"]);
-    assert!(out.success, "clone stderr: {}", out.stderr);
+    let out = env.run(&["pull"]);
+    assert!(out.success, "first pull stderr: {}", out.stderr);
     for (name, _) in files("") {
         assert_eq!(
             mode(&dest.join(name)) & 0o222,
@@ -715,22 +755,19 @@ fn artefact_is_readonly_at_every_depth() {
     }
     // Dot files are the artefact's like any other: nothing of gitscale's is
     // kept in the checkout.
-    let mut names: Vec<String> = std::fs::read_dir(&dest)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
+    let listed = |dir: &std::path::Path| {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
     // The producer's .gitscale.toml arrives with its config layer.
+    assert_eq!(listed(&root), vec![".gitscale.toml", "dist"]);
     assert_eq!(
-        names,
-        vec![
-            ".config",
-            ".env",
-            ".gitscale.toml",
-            "app.bin",
-            "bin",
-            "share"
-        ]
+        listed(&dest),
+        vec![".config", ".env", "app.bin", "bin", "share"]
     );
 
     // An update has to get past the read-only files it replaces.
@@ -757,13 +794,13 @@ fn pull_artefact_up_to_date() {
 
     env.write_config(&format!(
         r#"{}[repos]
-"meta/app" = {{ url = "{}", revision = "main", mode = "artefact" }}
+"meta/app" = {{ url = "{}", revision = "main", artefact = "replace" }}
 "#,
         env.registries(),
         bare.display(),
     ));
 
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
     env.registry().clear_log();
 
     // Pull again: the revision still names the installed commit, so the
@@ -778,44 +815,27 @@ fn pull_artefact_up_to_date() {
     );
 }
 
-#[test]
-fn pull_readwrite() {
-    let env = TestEnv::new("pull_readwrite");
-    let bare = env.create_bare_repo("mylib", "main", &[("README.md", "# v1\n")]);
-
-    env.write_config(&format!(
-        r#"[repos]
-"libs/mylib" = {{ url = "{}", revision = "main" }}
-"#,
-        bare.display()
-    ));
-
-    env.run(&["clone"]);
-    let out = env.run(&["pull"]);
-    assert!(out.success, "stderr: {}", out.stderr);
-    insta::assert_snapshot!("pull_readwrite_stdout", out.stdout);
-}
-
 // ---------------------------------------------------------------------------
 // Push
 // ---------------------------------------------------------------------------
 
+/// Off a topic every checkout sits at its pin: nothing of gitscale's to push.
 #[test]
-fn push_skip_readonly() {
-    let env = TestEnv::new("push_skip_readonly");
+fn push_skips_checkouts_off_the_topic() {
+    let env = TestEnv::new("push_off_topic");
     let bare = env.create_bare_repo("rolib", "main", &[("data.txt", "hello\n")]);
 
     env.write_config(&format!(
         r#"[repos]
-"libs/rolib" = {{ url = "{}", revision = "main", mode = "readonly" }}
+"libs/rolib" = {{ url = "{}", revision = "main" }}
 "#,
         bare.display()
     ));
 
-    env.run(&["clone"]);
+    env.run(&["pull"]);
     let out = env.run(&["push"]);
     assert!(out.success);
-    insta::assert_snapshot!("push_skip_readonly_stdout", out.stdout);
+    insta::assert_snapshot!("push_off_topic_stdout", out.stdout);
 }
 
 #[test]
@@ -825,38 +845,20 @@ fn push_skip_artefact() {
 
     env.write_config(&format!(
         r#"{}[repos]
-"meta/app" = {{ url = "{}", revision = "main", mode = "artefact" }}
+"meta/app" = {{ url = "{}", revision = "main", artefact = "replace" }}
 "#,
         env.registries(),
         bare.display(),
     ));
 
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
     let out = env.run(&["push"]);
     assert!(out.success);
     insta::assert_snapshot!("push_skip_artefact_stdout", out.stdout);
 }
 
-#[test]
-fn push_readwrite() {
-    let env = TestEnv::new("push_readwrite");
-    let bare = env.create_bare_repo("mylib", "main", &[("README.md", "# v1\n")]);
-
-    env.write_config(&format!(
-        r#"[repos]
-"libs/mylib" = {{ url = "{}", revision = "main" }}
-"#,
-        bare.display()
-    ));
-
-    env.run(&["clone"]);
-    let out = env.run(&["push"]);
-    assert!(out.success, "stderr: {}", out.stderr);
-    insta::assert_snapshot!("push_readwrite_stdout", out.stdout);
-}
-
-/// A readwrite repo pinned to a tag is checked out detached. There is no
-/// branch to push, and `git push` failing on that used to fail every sync.
+/// A checkout pinned to a tag is detached. There is no branch to push, and
+/// `git push` failing on that used to fail every sync.
 #[test]
 fn push_skips_a_detached_tag_pin() {
     let env = TestEnv::new("push_skip_detached");
@@ -865,11 +867,11 @@ fn push_skips_a_detached_tag_pin() {
 
     env.write_config(&format!(
         r#"[repos]
-"libs/mylib" = {{ url = "{}", revision = "demo-v1", mode = "readwrite" }}
+"libs/mylib" = {{ url = "{}", revision = "demo-v1" }}
 "#,
         bare.display()
     ));
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
 
     let out = env.run(&["sync"]);
     assert!(
@@ -878,7 +880,7 @@ fn push_skips_a_detached_tag_pin() {
         out.stdout, out.stderr
     );
     assert!(
-        out.stdout.contains("libs/mylib (detached HEAD)"),
+        out.stdout.contains("libs/mylib (not on the topic)"),
         "{}",
         out.stdout
     );
@@ -886,7 +888,7 @@ fn push_skips_a_detached_tag_pin() {
 
 /// git exports `GIT_DIR` to hooks — during `git clone`, the new root's `.git`.
 /// A hook-triggered pull that let its git calls inherit it ran them against
-/// the root: the pinned tag "did not exist", and with a warm cache the mirror
+/// the root: the pinned tag "did not exist", and with an existing store the
 /// fetch rewrote the root's refs and checked the sub-repo's tag out over it.
 #[test]
 fn pull_ignores_an_inherited_git_dir() {
@@ -897,13 +899,9 @@ fn pull_ignores_an_inherited_git_dir() {
     helpers::run_git_pub(&bare, &["tag", "demo-v1", "main"]);
 
     env.write_config(&format!(
-        r#"[cache]
-dir = "{}"
-
-[repos]
-"libs/mylib" = {{ url = "{}", revision = "demo-v1", mode = "readwrite" }}
+        r#"[repos]
+"libs/mylib" = {{ url = "{}", revision = "demo-v1" }}
 "#,
-        env.cache.display(),
         bare.display()
     ));
     let root_git = env.playground.join(".git");
@@ -918,7 +916,8 @@ dir = "{}"
     let root_head = rev(&env.playground, "HEAD");
     let tag = rev(&bare, "demo-v1");
 
-    // Cold cache first, then warm: the second is the one that damaged the root.
+    // No store first, then an existing one: the second is the one that
+    // damaged the root.
     for pass in ["cold", "warm"] {
         let _ = std::fs::remove_dir_all(env.playground.join("libs"));
         let out = env.run_with_env(&[("GIT_DIR", root_git.to_str().unwrap())], &["pull"]);
@@ -950,7 +949,7 @@ dir = "{}"
             "{} pass: the sub-repo's tag was fetched into the root",
             pass
         );
-        // Creating the cache entry ran `init --bare` on the root; updating one
+        // Creating the store ran `init --bare` on the root; updating one
         // repointed the root's origin at the sub-repo.
         assert_eq!(
             rev(&env.playground, "--is-bare-repository"),
@@ -1008,14 +1007,14 @@ fn status_table_ok() {
         bare.display()
     ));
 
-    env.run(&["clone"]);
+    env.run(&["pull"]);
     let out = env.run(&["status"]);
     assert!(out.success, "stderr: {}", out.stderr);
-    let plain = strip_ansi(&out.stdout);
+    let plain = redact_shas(&strip_ansi(&out.stdout));
     insta::assert_snapshot!("status_table_ok_stdout", plain);
 }
 
-/// A tag or a SHA is checked out detached, so REF reads as a commit while
+/// A checkout at its pin is detached, so REF reads as a commit while
 /// EXPECTED reads as the tag. That is not a mismatch, and status must not dress
 /// it as one — the yellow REF and a `ref-mismatch` flag both have to key off
 /// where HEAD actually is.
@@ -1031,12 +1030,18 @@ fn status_tag_pinned_is_not_a_mismatch() {
 "#,
         bare.display()
     ));
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
 
     let out = env.run(&["status"]);
     assert!(out.success, "stderr: {}", out.stderr);
     let plain = strip_ansi(&out.stdout);
-    assert!(plain.contains("detached"), "{}", plain);
+    assert!(
+        plain
+            .lines()
+            .any(|l| l.contains("demo-v1") && l.trim_end().ends_with("ok")),
+        "{}",
+        plain
+    );
     assert!(
         !plain.contains("ref-mismatch"),
         "a checkout at the pinned tag is on the right commit: {}",
@@ -1070,7 +1075,7 @@ fn status_flags_a_pin_the_checkout_has_not_followed() {
 "#,
         bare.display()
     ));
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
 
     // The config moves on to the later tag; the checkout has not.
     env.write_config(&format!(
@@ -1098,7 +1103,7 @@ fn status_fetch_reports_a_fetch_it_could_not_do() {
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
     env.write_config(&format!(
         r#"[repos]
-"meta/app" = {{ url = "{}", revision = "main", mode = "artefact" }}
+"meta/app" = {{ url = "{}", revision = "main", artefact = "replace" }}
 "#,
         bare.display()
     ));
@@ -1124,7 +1129,7 @@ fn status_json() {
         bare.display()
     ));
 
-    env.run(&["clone"]);
+    env.run(&["pull"]);
     let out = env.run(&["status", "--format", "json"]);
     assert!(out.success, "stderr: {}", out.stderr);
 
@@ -1133,9 +1138,8 @@ fn status_json() {
     // Redact dynamic fields for stable snapshots
     insta::assert_json_snapshot!("status_json_output", parsed, {
         "[].current_ref" => "[ref]",
-        "[].cache_dir" => "[cache-dir]",
-        "[].bytes" => "[bytes]",
         "[].resolved_commit" => "[commit]",
+        "[].requests[].commit" => "[commit]",
     });
 }
 
@@ -1147,7 +1151,7 @@ fn status_artefact_missed() {
 
     env.write_config(&format!(
         r#"{}[repos]
-"meta/app" = {{ url = "{}", revision = "main", mode = "artefact" }}
+"meta/app" = {{ url = "{}", revision = "main", artefact = "replace" }}
 "#,
         env.registries(),
         bare.display(),
@@ -1167,13 +1171,13 @@ fn status_artefact_ok() {
 
     env.write_config(&format!(
         r#"{}[repos]
-"meta/app" = {{ url = "{}", revision = "main", mode = "artefact" }}
+"meta/app" = {{ url = "{}", revision = "main", artefact = "replace" }}
 "#,
         env.registries(),
         bare.display(),
     ));
 
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
     let out = env.run(&["status"]);
     assert!(out.success, "stderr: {}", out.stderr);
     let plain = redact_shas(&strip_ansi(&out.stdout));
@@ -1401,9 +1405,9 @@ fn multiple_repos_mixed() {
 
     env.write_config(&format!(
         r#"{}[repos]
-"libs/ro-lib" = {{ url = "{}", revision = "main", mode = "readonly" }}
+"libs/ro-lib" = {{ url = "{}", revision = "main" }}
 "libs/rw-lib" = {{ url = "{}", revision = "main" }}
-"meta/art" = {{ url = "{}", revision = "v1", mode = "artefact" }}
+"meta/art" = {{ url = "{}", revision = "v1", artefact = "replace" }}
 "#,
         env.registries(),
         bare_ro.display(),
@@ -1411,13 +1415,13 @@ fn multiple_repos_mixed() {
         bare_art.display(),
     ));
 
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "stderr: {}", out.stderr);
     insta::assert_snapshot!("multiple_repos_mixed_stdout", redact_shas(&out.stdout));
 
     assert!(env.playground.join("libs/rw-lib/rw.txt").is_file());
     assert!(env.playground.join("libs/ro-lib/ro.txt").is_file());
-    assert!(env.playground.join("meta/art/art.bin").is_file());
+    assert!(env.playground.join("meta/art/dist/art.bin").is_file());
 }
 
 // ---------------------------------------------------------------------------
@@ -1457,7 +1461,7 @@ fn recursive_basic_symlink() {
         bare_b.display(),
     ));
 
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "stderr: {}", out.stderr);
 
     // repoA/libs/b should be a symlink pointing to ../../repoB
@@ -1510,7 +1514,7 @@ fn recursive_missing_dep_errors() {
         bare_a.display(),
     ));
 
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(!out.success, "should fail when child dep is not allowed");
     assert!(
         out.stderr.contains("not on the allowlist"),
@@ -1532,7 +1536,7 @@ allow = ["{}/*"]
         env.repos_remote.display(),
         bare_a.display(),
     ));
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "stderr: {}", out.stderr);
     let implicit = env.playground.join("imports/b");
     assert_eq!(
@@ -1611,7 +1615,7 @@ fn recursive_revision_from_a_dependency() {
         bare_b.display(),
     ));
 
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "stderr: {}", out.stderr);
 
     // B should be checked out on "develop"
@@ -1677,7 +1681,7 @@ fn recursive_revision_conflict() {
 
     // Two branches are not versions, and neither A nor B is above the
     // other: without history to consult, nothing orders them.
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(!out.success, "should fail on conflicting revisions");
     assert!(
         out.stderr.contains("cannot order"),
@@ -1716,7 +1720,7 @@ fn recursive_disabled() {
         bare_a.display(),
     ));
 
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(
         out.success,
         "should succeed because recursion is disabled: stderr: {}",
@@ -1762,7 +1766,7 @@ fn recursive_root_revision_wins() {
         bare_b.display(),
     ));
 
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(
         out.success,
         "root revision wins, no error: stderr: {}",
@@ -1778,19 +1782,18 @@ fn recursive_root_revision_wins() {
     assert!(link.is_symlink());
 }
 
-/// A tag a dependency asks for, for a root entry without a revision, is where a
-/// shallow readonly clone lands — not on the default branch's tip — and its
-/// files are readonly.
+/// A tag a dependency asks for, for a root entry without a revision, is where
+/// the checkout lands — not on the default branch's tip — and its files are
+/// readonly.
 #[test]
-fn a_tag_a_dependency_asks_for_lands_in_a_shallow_readonly_clone() {
+fn a_tag_a_dependency_asks_for_lands_detached_and_readonly() {
     use std::os::unix::fs::PermissionsExt;
-    let env = TestEnv::new("dep_tag_shallow_readonly");
+    let env = TestEnv::new("dep_tag_readonly");
     let bare_b = env.create_bare_repo("repoB", "main", &[("b.txt", "B v1")]);
     let tagged = bare_git_stdout(&bare_b, &["rev-parse", "main"]);
     helpers::run_git_pub(&bare_b, &["tag", "v1", &tagged]);
-    // The tip moves on, so the shallow clone of the default branch lacks v1.
+    // The tip moves on: v1 is not what the default branch has.
     commit_to_bare(&bare_b, "main", "b.txt", "B v2");
-    // file://, not a bare path: git ignores --depth on a local-path clone.
     let url_b = format!("file://{}", bare_b.display());
     let bare_a = env.create_bare_repo(
         "repoA",
@@ -1809,21 +1812,16 @@ fn a_tag_a_dependency_asks_for_lands_in_a_shallow_readonly_clone() {
     env.write_config(&format!(
         r#"[repos]
 "repoA" = {{ url = "{}", revision = "main" }}
-"repoB" = {{ url = "{}", mode = "readonly" }}
+"repoB" = {{ url = "{}" }}
 "#,
         bare_a.display(),
         url_b,
     ));
 
-    let out = env.run(&["clone", "--no-cache"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "stderr: {}", out.stderr);
 
     let dest = env.playground.join("repoB");
-    assert_eq!(
-        git_stdout(&dest, &["rev-parse", "--is-shallow-repository"]),
-        "true",
-        "a readonly --no-cache clone should be shallow"
-    );
     assert_eq!(git_stdout(&dest, &["rev-parse", "HEAD"]), tagged);
     let file = dest.join("b.txt");
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "B v1");
@@ -1858,16 +1856,16 @@ fn a_revision_a_dependency_asks_for_leaves_the_workspace_repo_alone() {
     env.write_config(&format!(
         r#"{}[repos]
 "repoA" = {{ url = "{}", revision = "main" }}
-"meta/art" = {{ url = "{}", mode = "artefact" }}
+"meta/art" = {{ url = "{}", artefact = "replace" }}
 "#,
         env.registries(),
         bare_a.display(),
         bare_art.display(),
     ));
 
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "stderr: {}", out.stderr);
-    assert!(env.playground.join("meta/art/art.bin").is_file());
+    assert!(env.playground.join("meta/art/dist/art.bin").is_file());
     assert_eq!(
         git_stdout(&env.playground, &["rev-parse", "HEAD"]),
         root_head
@@ -1884,7 +1882,7 @@ fn recursive_artefact_with_config() {
     // The producer's own .gitscale.toml declares the dependency; publish
     // ships it as the image's config layer.
     let producer = format!(
-        "[artefact]\nroot = \"dist\"\ninclude = [\"**\"]\n\n[repos]\n\"vendor/dep\" = {{ url = \"{}\", revision = \"main\" }}\n",
+        "[artefact]\ninclude = [\"dist/**\"]\n\n[repos]\n\"vendor/dep\" = {{ url = \"{}\", revision = \"main\" }}\n",
         bare_dep.display()
     );
     let (published, _) =
@@ -1898,7 +1896,7 @@ fn recursive_artefact_with_config() {
     // Root declares both artefact and the dep
     env.write_config(&format!(
         r#"{}[repos]
-"meta/art" = {{ url = "{}", revision = "v1", mode = "artefact" }}
+"meta/art" = {{ url = "{}", revision = "v1", artefact = "replace" }}
 "dep" = {{ url = "{}", revision = "main" }}
 "#,
         env.registries(),
@@ -1906,7 +1904,7 @@ fn recursive_artefact_with_config() {
         bare_dep.display(),
     ));
 
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "stderr: {}", out.stderr);
 
     // Symlink inside artefact dir
@@ -1958,7 +1956,7 @@ fn setup_unlinked_env_at(name: &str, parent: &str) -> (TestEnv, std::path::PathB
     ));
 
     // Clone creates the symlink
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "clone failed: {}", out.stderr);
 
     let link = env.playground.join(parent).join("libs/b");
@@ -2174,7 +2172,7 @@ fn sync_with_names_leaves_other_repos_links_alone() {
         bare_c.display()
     ));
     std::fs::write(&config_path, config).unwrap();
-    assert!(env.run(&["clone", "repoC"]).success);
+    assert!(env.run(&["pull", "repoC"]).success);
 
     std::fs::write(link.join("dirty.txt"), "local change").unwrap();
     helpers::run_git_pub(&link, &["add", "."]);
@@ -2291,7 +2289,7 @@ fn setup_orphan_env(name: &str, valid_target: bool) -> (TestEnv, std::path::Path
         bare_b.display(),
     ));
 
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "clone failed: {}", out.stderr);
 
     // Plant an orphaned gitscale-style symlink for an undeclared dependency.
@@ -2391,16 +2389,23 @@ fn git_stdout(cwd: &std::path::Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-/// Clone a single writable repo and configure a commit identity on it.
+/// A workspace on topic `feat/x` with `libs/mylib` developed on it: the root
+/// on that branch with a remote of its own, the child on its `feat/x`.
 fn setup_commit_env(name: &str) -> (TestEnv, std::path::PathBuf, std::path::PathBuf) {
     let env = TestEnv::new(name);
     let bare = env.create_bare_repo("mylib", "main", &[("README.md", "# v1\n")]);
+    let root_remote = env.create_bare_repo("root", "main", &[("README.md", "root")]);
     env.write_config(&format!(
         "[repos]\n\"libs/mylib\" = {{ url = \"{}\", revision = \"main\" }}\n",
         bare.display()
     ));
-    let out = env.run(&["clone"]);
-    assert!(out.success, "clone failed: {}", out.stderr);
+    env.init_playground_git();
+    env.set_playground_origin(root_remote.to_str().unwrap());
+    let out = env.run(&["pull"]);
+    assert!(out.success, "pull failed: {}", out.stderr);
+    run_git_pub(&env.playground, &["switch", "-q", "-c", "feat/x"]);
+    let out = env.run(&["develop", "libs/mylib"]);
+    assert!(out.success, "develop failed: {}{}", out.stdout, out.stderr);
 
     let clone = env.playground.join("libs/mylib");
     helpers::run_git_pub(&clone, &["config", "user.email", "t@t.com"]);
@@ -2437,6 +2442,33 @@ fn commit_commits_dirty_repo() {
     );
 }
 
+/// A checkout off the topic is at its pin: commit never makes a commit on a
+/// detached HEAD, and says how to bring it in.
+#[test]
+fn commit_skips_a_checkout_off_the_topic_and_says_how_to_bring_it_in() {
+    let env = TestEnv::new("commit_off_topic");
+    let bare = env.create_bare_repo("mylib", "main", &[("README.md", "# v1\n")]);
+    env.write_config(&format!(
+        "[repos]\n\"libs/mylib\" = {{ url = \"{}\", revision = \"main\" }}\n",
+        bare.display()
+    ));
+    env.init_playground_git();
+    assert!(env.run(&["pull"]).success);
+    run_git_pub(&env.playground, &["switch", "-q", "-c", "feat/x"]);
+    let clone = env.playground.join("libs/mylib");
+    helpers::edit(&clone.join("README.md"), "# edited\n");
+
+    let out = env.run(&["commit", "-m", "nope"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(
+        out.stdout
+            .contains("libs/mylib (not on topic feat/x; run gitscale develop libs/mylib)"),
+        "{}",
+        out.stdout
+    );
+    assert!(!git_stdout(&clone, &["status", "--porcelain"]).is_empty());
+}
+
 #[test]
 fn commit_skips_clean_repo() {
     let (env, _bare, _clone) = setup_commit_env("commit_clean");
@@ -2460,6 +2492,8 @@ fn commit_rejects_empty_message() {
     assert!(!out.success, "expected failure on empty commit message");
 }
 
+/// Push sends each checkout's topic branch to its remote under the topic's
+/// name, as its upstream — the root's included.
 #[test]
 fn commit_then_push_propagates() {
     let (env, bare, clone) = setup_commit_env("commit_then_push");
@@ -2469,23 +2503,27 @@ fn commit_then_push_propagates() {
     assert!(out.success, "commit stderr: {}", out.stderr);
 
     let out = env.run(&["push"]);
-    assert!(out.success, "push stderr: {}", out.stderr);
+    assert!(out.success, "push stderr: {}{}", out.stdout, out.stderr);
+    assert!(out.stdout.contains("libs/mylib → feat/x"), "{}", out.stdout);
 
-    // The bare remote's main branch now carries our commit. Name the git dir
-    // explicitly: discovery-based access to a bare repo is refused when the
-    // developer has `safe.bareRepository = explicit` set.
+    // Name the git dir explicitly: discovery-based access to a bare repo is
+    // refused when the developer has `safe.bareRepository = explicit` set.
     let bare_str = bare.to_str().unwrap();
     assert_eq!(
         git_stdout(
             &bare,
-            &["--git-dir", bare_str, "log", "-1", "--pretty=%s", "main"]
+            &["--git-dir", bare_str, "log", "-1", "--pretty=%s", "feat/x"]
         ),
         "propagated"
+    );
+    assert_eq!(
+        git_stdout(&clone, &["rev-parse", "--abbrev-ref", "@{upstream}"]),
+        "origin/feat/x"
     );
 }
 
 // ---------------------------------------------------------------------------
-// Shallow clones (CI forces --depth 1)
+// Moving checkouts
 // ---------------------------------------------------------------------------
 
 /// Run git against a bare repo and return trimmed stdout. Addresses the git
@@ -2535,275 +2573,63 @@ fn commit_to_bare(bare: &std::path::Path, branch: &str, file: &str, content: &st
     sha
 }
 
-/// `git clone --branch` cannot name a commit, so shallow + SHA needs its own
-/// path. Exercised through `git::clone_repo` directly rather than by setting
-/// `CI=true`, which is process-global and would leak across parallel tests.
-#[cfg(test)]
-fn shallow_entry(url: &str, revision: &str) -> gitscale::config::RepoEntry {
-    gitscale::config::RepoEntry {
-        directory: "libs/mylib".to_string(),
-        repo_url: url.to_string(),
-        revision: revision.to_string(),
-        mode: gitscale::config::RepoMode::Readwrite,
-        recursive: false,
-        ..Default::default()
-    }
-}
-
-/// A depth-1 clone straight from the remote — no cache entry, no borrowing.
-#[cfg(test)]
-fn shallow_source() -> gitscale::share::Source {
-    gitscale::share::Source::remote(None, true)
-}
-
-#[test]
-fn shallow_clone_pinned_to_sha() {
-    let env = TestEnv::new("shallow_clone_sha");
-    let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "a")]);
-    // file:// so --depth is honoured; git ignores it for plain local paths.
-    let url = format!("file://{}", bare.display());
-    let sha = bare_git_stdout(&bare, &["rev-parse", "main"]);
-
-    let entry = shallow_entry(&url, &sha);
-    gitscale::git::clone_repo(&entry, &env.playground, false, &shallow_source())
-        .expect("shallow clone of a SHA-pinned revision should succeed");
-
-    let dest = env.playground.join("libs/mylib");
-    assert_eq!(
-        git_stdout(&dest, &["rev-parse", "HEAD"]),
-        sha,
-        "clone should be checked out at the pinned commit"
-    );
-    assert_eq!(
-        git_stdout(&dest, &["rev-parse", "--is-shallow-repository"]),
-        "true",
-        "clone should still be shallow"
-    );
-}
-
-#[test]
-fn shallow_clone_pinned_to_branch_still_works() {
-    let env = TestEnv::new("shallow_clone_branch");
-    let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "a")]);
-    let url = format!("file://{}", bare.display());
-
-    let entry = shallow_entry(&url, "main");
-    gitscale::git::clone_repo(&entry, &env.playground, false, &shallow_source())
-        .expect("shallow clone of a branch revision should succeed");
-
-    let dest = env.playground.join("libs/mylib");
-    assert_eq!(
-        git_stdout(&dest, &["rev-parse", "--abbrev-ref", "HEAD"]),
-        "main",
-        "a branch revision should stay on that branch, not detach"
-    );
-}
-
-#[test]
-fn shallow_pull_pinned_to_sha_moves_to_new_sha() {
-    let env = TestEnv::new("shallow_pull_sha");
-    let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "v1")]);
-    let url = format!("file://{}", bare.display());
-    let first = bare_git_stdout(&bare, &["rev-parse", "main"]);
-
-    let entry = shallow_entry(&url, &first);
-    gitscale::git::clone_repo(&entry, &env.playground, false, &shallow_source()).unwrap();
-
-    // Add a second commit upstream and re-pin the config to it.
-    let second = commit_to_bare(&bare, "main", "a.txt", "v2");
-    assert_ne!(first, second);
-
-    let entry = shallow_entry(&url, &second);
-    gitscale::git::pull_repo(&entry, &env.playground, false, &shallow_source())
-        .expect("shallow pull to a new SHA should succeed");
-
-    let dest = env.playground.join("libs/mylib");
-    assert_eq!(
-        git_stdout(&dest, &["rev-parse", "HEAD"]),
-        second,
-        "pull should move a SHA-pinned shallow clone to the new commit"
-    );
-}
-
-/// Tag `sha` in the bare repo, and push an unrelated branch whose tip must not
-/// be downloaded by a pull that only needs the tag.
-#[cfg(test)]
-fn tag_with_unrelated_branch(bare: &std::path::Path, tag: &str, sha: &str) -> String {
-    helpers::run_git_pub(bare, &["tag", tag, sha]);
-    let tmp = bare.with_extension("unrelated.tmp");
-    let _ = std::fs::remove_dir_all(&tmp);
-    helpers::run_git_pub(
-        bare.parent().unwrap(),
-        &["clone", "-q", bare.to_str().unwrap(), tmp.to_str().unwrap()],
-    );
-    helpers::run_git_pub(&tmp, &["config", "user.email", "test@test.com"]);
-    helpers::run_git_pub(&tmp, &["config", "user.name", "Test"]);
-    helpers::run_git_pub(&tmp, &["checkout", "-q", "--orphan", "unrelated"]);
-    std::fs::write(tmp.join("b.txt"), "b").unwrap();
-    helpers::run_git_pub(&tmp, &["add", "-A"]);
-    helpers::run_git_pub(&tmp, &["commit", "-q", "-m", "unrelated"]);
-    helpers::run_git_pub(&tmp, &["push", "-q", "origin", "unrelated"]);
-    let unrelated = git_stdout(&tmp, &["rev-parse", "HEAD"]);
-    let _ = std::fs::remove_dir_all(&tmp);
-    unrelated
-}
-
-#[cfg(test)]
-fn has_commit(dest: &std::path::Path, sha: &str) -> bool {
-    std::process::Command::new("git")
-        .args(["cat-file", "-e", &format!("{}^{{commit}}", sha)])
-        .current_dir(dest)
-        .status()
-        .unwrap()
-        .success()
-}
-
-#[test]
-fn shallow_pull_from_sha_to_tag_fetches_only_the_tag() {
-    let env = TestEnv::new("shallow_pull_sha_to_tag");
-    let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "v1")]);
-    let url = format!("file://{}", bare.display());
-    let first = bare_git_stdout(&bare, &["rev-parse", "main"]);
-    gitscale::git::clone_repo(
-        &shallow_entry(&url, &first),
-        &env.playground,
-        false,
-        &shallow_source(),
-    )
-    .unwrap();
-
-    let second = commit_to_bare(&bare, "main", "a.txt", "v2");
-    let unrelated = tag_with_unrelated_branch(&bare, "snapshot-1", &second);
-
-    gitscale::git::pull_repo(
-        &shallow_entry(&url, "snapshot-1"),
-        &env.playground,
-        false,
-        &shallow_source(),
-    )
-    .expect("shallow pull from a SHA pin to a tag should succeed");
-
-    let dest = env.playground.join("libs/mylib");
-    assert_eq!(git_stdout(&dest, &["rev-parse", "HEAD"]), second);
-    assert!(
-        !has_commit(&dest, &unrelated),
-        "pull should not download other branches"
-    );
-    assert_eq!(
-        git_stdout(&dest, &["rev-parse", "--is-shallow-repository"]),
-        "true"
-    );
-}
-
-#[test]
-fn shallow_pull_pinned_to_tag_moves_to_new_tag() {
-    let env = TestEnv::new("shallow_pull_tag");
-    let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "v1")]);
-    let url = format!("file://{}", bare.display());
-    let first = bare_git_stdout(&bare, &["rev-parse", "main"]);
-    helpers::run_git_pub(&bare, &["tag", "snapshot-1", &first]);
-    gitscale::git::clone_repo(
-        &shallow_entry(&url, "snapshot-1"),
-        &env.playground,
-        false,
-        &shallow_source(),
-    )
-    .unwrap();
-
-    let second = commit_to_bare(&bare, "main", "a.txt", "v2");
-    let unrelated = tag_with_unrelated_branch(&bare, "snapshot-2", &second);
-
-    gitscale::git::pull_repo(
-        &shallow_entry(&url, "snapshot-2"),
-        &env.playground,
-        false,
-        &shallow_source(),
-    )
-    .expect("shallow pull to a new tag should succeed");
-
-    let dest = env.playground.join("libs/mylib");
-    assert_eq!(git_stdout(&dest, &["rev-parse", "HEAD"]), second);
-    assert!(
-        !has_commit(&dest, &unrelated),
-        "pull should not download other branches"
-    );
-}
-
-/// A full checkout's pull that cannot reach the remote fails, rather than
-/// reporting `ok` for a checkout it never updated.
+/// A pull that cannot reach the remote fails, rather than reporting `ok` for
+/// a checkout it never updated.
 #[test]
 fn pull_fails_when_the_remote_is_unreachable() {
-    for (name, flags) in [
-        ("pull_unreachable_cached", &[][..]),
-        ("pull_unreachable_no_cache", &["--no-cache"][..]),
-    ] {
-        let env = TestEnv::new(name);
-        let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "v1")]);
-        env.write_config(&format!(
-            "[repos]\n\"libs/mylib\" = {{ url = \"{}\", revision = \"main\" }}\n",
-            bare.display()
-        ));
-        let clone = [&["clone"][..], flags].concat();
-        assert!(env.run(&clone).success, "{}: clone failed", name);
-        std::fs::rename(&bare, bare.with_extension("gone")).unwrap();
-
-        let pull = [&["pull"][..], flags].concat();
-        let out = env.run(&pull);
-        assert!(!out.success, "{}: pull should fail: {}", name, out.stdout);
-        let text = format!("{}{}", out.stdout, out.stderr);
-        assert!(text.contains("FAIL  libs/mylib"), "{}: {}", name, text);
-    }
-}
-
-/// The refs come first, then the move: a full checkout pinned to a branch
-/// that did not exist when it was cloned finds it, cache or no cache.
-#[test]
-fn pull_moves_a_full_checkout_to_a_branch_made_after_the_clone() {
-    for (name, flags) in [
-        ("pull_new_branch_cached", &[][..]),
-        ("pull_new_branch_no_cache", &["--no-cache"][..]),
-    ] {
-        let env = TestEnv::new(name);
-        let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "v1")]);
-        let config = |revision: &str| {
-            format!(
-                "[repos]\n\"libs/mylib\" = {{ url = \"{}\", revision = \"{}\" }}\n",
-                bare.display(),
-                revision
-            )
-        };
-        env.write_config(&config("main"));
-        let clone = [&["clone"][..], flags].concat();
-        assert!(env.run(&clone).success, "{}: clone failed", name);
-
-        bare_git_stdout(&bare, &["branch", "feature", "main"]);
-        let tip = commit_to_bare(&bare, "feature", "a.txt", "feature");
-        env.write_config(&config("feature"));
-        let pull = [&["pull"][..], flags].concat();
-        let out = env.run(&pull);
-        assert!(out.success, "{}: {}{}", name, out.stdout, out.stderr);
-        let dest = env.playground.join("libs/mylib");
-        assert_eq!(git_stdout(&dest, &["rev-parse", "HEAD"]), tip, "{}", name);
-        assert_eq!(
-            git_stdout(&dest, &["symbolic-ref", "--short", "HEAD"]),
-            "feature",
-            "{}",
-            name
-        );
-    }
-}
-
-/// Fast-forward only: a branch with commits of its own and new ones upstream
-/// is left where it is, and the pull still succeeds.
-#[test]
-fn pull_leaves_a_diverged_branch_alone() {
-    let env = TestEnv::new("pull_diverged");
+    let env = TestEnv::new("pull_unreachable");
     let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "v1")]);
     env.write_config(&format!(
         "[repos]\n\"libs/mylib\" = {{ url = \"{}\", revision = \"main\" }}\n",
         bare.display()
     ));
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
+    std::fs::rename(&bare, bare.with_extension("gone")).unwrap();
+
+    let out = env.run(&["pull"]);
+    assert!(!out.success, "pull should fail: {}", out.stdout);
+}
+
+/// The refs come first, then the move: a checkout pinned to a branch that did
+/// not exist when it was made finds it, and lands detached at its tip.
+#[test]
+fn pull_moves_a_checkout_to_a_branch_made_after_it() {
+    let env = TestEnv::new("pull_new_branch");
+    let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "v1")]);
+    let config = |revision: &str| {
+        format!(
+            "[repos]\n\"libs/mylib\" = {{ url = \"{}\", revision = \"{}\" }}\n",
+            bare.display(),
+            revision
+        )
+    };
+    env.write_config(&config("main"));
+    assert!(env.run(&["pull"]).success);
+
+    bare_git_stdout(&bare, &["branch", "feature", "main"]);
+    let tip = commit_to_bare(&bare, "feature", "a.txt", "feature");
+    env.write_config(&config("feature"));
+    let out = env.run(&["pull"]);
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    let dest = env.playground.join("libs/mylib");
+    assert_eq!(git_stdout(&dest, &["rev-parse", "HEAD"]), tip);
+    assert_eq!(
+        std::fs::read_to_string(dest.join("a.txt")).unwrap(),
+        "feature"
+    );
+}
+
+/// Commits made on a checkout's detached HEAD are somebody's work no branch
+/// holds: pull will not move away from them.
+#[test]
+fn pull_refuses_to_lose_commits_made_at_a_pin() {
+    let env = TestEnv::new("pull_detached_commits");
+    let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "v1")]);
+    env.write_config(&format!(
+        "[repos]\n\"libs/mylib\" = {{ url = \"{}\", revision = \"main\" }}\n",
+        bare.display()
+    ));
+    assert!(env.run(&["pull"]).success);
     let dest = env.playground.join("libs/mylib");
     helpers::run_git_pub(&dest, &["config", "user.email", "t@t.com"]);
     helpers::run_git_pub(&dest, &["config", "user.name", "T"]);
@@ -2814,138 +2640,54 @@ fn pull_leaves_a_diverged_branch_alone() {
     commit_to_bare(&bare, "main", "a.txt", "v2");
 
     let out = env.run(&["pull"]);
-    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    assert!(!out.success, "{}", out.stdout);
+    let text = format!("{}{}", out.stdout, out.stderr);
+    assert!(text.contains("is on no branch"), "{}", text);
     assert_eq!(git_stdout(&dest, &["rev-parse", "HEAD"]), local);
 }
 
-/// A fast-forward that local changes block fails, and the changes survive.
+/// A move that local changes block fails, and the changes survive.
 #[test]
-fn pull_fails_when_local_changes_block_the_fast_forward() {
+fn pull_fails_when_local_changes_block_the_move() {
     let env = TestEnv::new("pull_blocked_by_changes");
     let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "v1")]);
     env.write_config(&format!(
         "[repos]\n\"libs/mylib\" = {{ url = \"{}\", revision = \"main\" }}\n",
         bare.display()
     ));
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
     let dest = env.playground.join("libs/mylib");
-    std::fs::write(dest.join("a.txt"), "edited").unwrap();
+    helpers::edit(&dest.join("a.txt"), "edited");
     commit_to_bare(&bare, "main", "a.txt", "v2");
 
     let out = env.run(&["pull"]);
     assert!(!out.success, "pull should fail: {}", out.stdout);
     let text = format!("{}{}", out.stdout, out.stderr);
     assert!(text.contains("FAIL  libs/mylib"), "{}", text);
+    assert!(text.contains("uncommitted changes"), "{}", text);
     assert_eq!(
         std::fs::read_to_string(dest.join("a.txt")).unwrap(),
         "edited"
     );
 }
 
-/// No revision means "the branch the clone landed on": pull fast-forwards it
-/// rather than trying to check out an empty name.
+/// No revision means the remote's default branch: pull moves to its new head.
 #[test]
-fn pull_without_a_revision_fast_forwards() {
-    for (name, flags) in [
-        ("pull_no_rev_cached", &[][..]),
-        ("pull_no_rev_no_cache", &["--no-cache"][..]),
-    ] {
-        let env = TestEnv::new(name);
-        // Not `main` or `master`: nothing may assume the default's name.
-        let bare = env.create_bare_repo("mylib", "trunk", &[("a.txt", "v1")]);
-        env.write_config(&format!(
-            "[repos]\n\"libs/mylib\" = {{ url = \"{}\" }}\n",
-            bare.display()
-        ));
-        let clone = [&["clone"][..], flags].concat();
-        assert!(env.run(&clone).success, "{}: clone failed", name);
+fn pull_without_a_revision_follows_the_default_branch() {
+    let env = TestEnv::new("pull_no_rev");
+    // Not `main` or `master`: nothing may assume the default's name.
+    let bare = env.create_bare_repo("mylib", "trunk", &[("a.txt", "v1")]);
+    env.write_config(&format!(
+        "[repos]\n\"libs/mylib\" = {{ url = \"{}\" }}\n",
+        bare.display()
+    ));
+    assert!(env.run(&["pull"]).success);
 
-        let second = commit_to_bare(&bare, "trunk", "a.txt", "v2");
-        let pull = [&["pull"][..], flags].concat();
-        let out = env.run(&pull);
-        assert!(
-            out.success,
-            "{}: pull failed: {}{}",
-            name, out.stdout, out.stderr
-        );
-        let dest = env.playground.join("libs/mylib");
-        assert_eq!(
-            git_stdout(&dest, &["rev-parse", "HEAD"]),
-            second,
-            "{}",
-            name
-        );
-    }
-}
-
-/// A plain shallow `fetch` follows the one ref the clone was made at, so it
-/// never brings a tag the config has since moved to; status would then read
-/// a checkout it cannot compare as fine.
-#[test]
-fn shallow_fetch_brings_a_newly_pinned_tag_only() {
-    let env = TestEnv::new("shallow_fetch_tag");
-    let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "v1")]);
-    let url = format!("file://{}", bare.display());
-    let first = bare_git_stdout(&bare, &["rev-parse", "main"]);
-    helpers::run_git_pub(&bare, &["tag", "snapshot-1", &first]);
-    gitscale::git::clone_repo(
-        &shallow_entry(&url, "snapshot-1"),
-        &env.playground,
-        false,
-        &shallow_source(),
-    )
-    .unwrap();
-
-    let second = commit_to_bare(&bare, "main", "a.txt", "v2");
-    let unrelated = tag_with_unrelated_branch(&bare, "snapshot-2", &second);
-
-    gitscale::git::fetch_repo(
-        &shallow_entry(&url, "snapshot-2"),
-        &env.playground,
-        &shallow_source(),
-    )
-    .expect("shallow fetch of a new tag should succeed");
-
-    let dest = env.playground.join("libs/mylib");
-    assert_eq!(
-        git_stdout(&dest, &["rev-parse", "snapshot-2^{commit}"]),
-        second
-    );
-    assert!(
-        !has_commit(&dest, &unrelated),
-        "fetch should not download other branches"
-    );
-}
-
-#[test]
-fn shallow_pull_pinned_to_branch_moves_to_its_tip() {
-    let env = TestEnv::new("shallow_pull_branch");
-    let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "v1")]);
-    let url = format!("file://{}", bare.display());
-    gitscale::git::clone_repo(
-        &shallow_entry(&url, "main"),
-        &env.playground,
-        false,
-        &shallow_source(),
-    )
-    .unwrap();
-
-    let second = commit_to_bare(&bare, "main", "a.txt", "v2");
-
-    gitscale::git::pull_repo(
-        &shallow_entry(&url, "main"),
-        &env.playground,
-        false,
-        &shallow_source(),
-    )
-    .expect("shallow pull of a branch should succeed");
-
+    let second = commit_to_bare(&bare, "trunk", "a.txt", "v2");
+    let out = env.run(&["pull"]);
+    assert!(out.success, "pull failed: {}{}", out.stdout, out.stderr);
     let dest = env.playground.join("libs/mylib");
     assert_eq!(git_stdout(&dest, &["rev-parse", "HEAD"]), second);
-    assert_eq!(
-        git_stdout(&dest, &["rev-parse", "--abbrev-ref", "HEAD"]),
-        "main"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2961,7 +2703,7 @@ fn clean_env(name: &str) -> TestEnv {
         core.to_str().unwrap()
     ));
     env.init_playground_git();
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "clone failed: {}", out.stderr);
     env
 }
@@ -3058,7 +2800,7 @@ fn subrepo_clean_excludes_come_from_its_own_config() {
         core.to_str().unwrap()
     ));
     env.init_playground_git();
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
 
     std::fs::create_dir_all(env.playground.join("core/envs")).unwrap();
     std::fs::write(env.playground.join("core/envs/dev"), "x").unwrap();
@@ -3093,7 +2835,7 @@ fn recursive_false_is_cleaned_without_its_own_keep_list() {
         core.to_str().unwrap()
     ));
     env.init_playground_git();
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
 
     std::fs::create_dir_all(env.playground.join("core/envs")).unwrap();
     std::fs::write(env.playground.join("core/envs/dev"), "x").unwrap();
@@ -3138,7 +2880,7 @@ fn clean_keeps_managed_symlinks() {
         shared.to_str().unwrap()
     ));
     env.init_playground_git();
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
 
     let link = env.playground.join("core/libs/shared");
     assert!(
@@ -3193,11 +2935,11 @@ fn clean_works_in_a_readonly_repo() {
     let env = TestEnv::new("clean_works_in_a_readonly_repo");
     let core = env.create_bare_repo("core", "main", &[("README.md", "core")]);
     env.write_config(&format!(
-        "[repos]\n\"core\" = {{ url = \"{}\", revision = \"main\", mode = \"readonly\" }}\n",
+        "[repos]\n\"core\" = {{ url = \"{}\", revision = \"main\" }}\n",
         core.to_str().unwrap()
     ));
     env.init_playground_git();
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
 
     // readonly mode clears the write bit on files; unlinking one needs write
     // permission on its directory rather than on the file.
@@ -3218,17 +2960,17 @@ fn clean_skips_artefact_repos() {
     let bare = env.artefact_repo("svc", &[("a.txt", "x")]);
     env.write_config(&format!(
         "{}[repos]\n\
-         \"meta/svc\" = {{ url = \"{}\", revision = \"main\", mode = \"artefact\" }}\n",
+         \"meta/svc\" = {{ url = \"{}\", revision = \"main\", artefact = \"replace\" }}\n",
         env.registries(),
         bare.display()
     ));
     env.init_playground_git();
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
 
     let out = env.run(&["clean", "-f"]);
     assert!(out.success, "stderr: {}", out.stderr);
     assert!(
-        env.playground.join("meta/svc/a.txt").exists(),
+        env.playground.join("meta/svc/dist/a.txt").exists(),
         "an artefact checkout has no working tree to clean"
     );
 }
@@ -3277,21 +3019,21 @@ fn clean_keeps_a_checkout_nested_inside_another_repo() {
     env.write_config(&format!(
         "{}[repos]\n\
          \"core\" = {{ url = \"{}\", revision = \"main\" }}\n\
-         \"core/vendor\" = {{ url = \"{}\", revision = \"main\", mode = \"artefact\" }}\n",
+         \"core/vendor\" = {{ url = \"{}\", revision = \"main\", artefact = \"replace\" }}\n",
         env.registries(),
         core.to_str().unwrap(),
         vendor.display()
     ));
     env.init_playground_git();
-    assert!(env.run(&["clone"]).success);
-    assert!(env.playground.join("core/vendor/v.txt").exists());
+    assert!(env.run(&["pull"]).success);
+    assert!(env.playground.join("core/vendor/dist/v.txt").exists());
 
     std::fs::write(env.playground.join("core/scratch.tmp"), "x").unwrap();
 
     let out = env.run(&["clean", "-f"]);
     assert!(out.success, "stderr: {}", out.stderr);
     assert!(
-        env.playground.join("core/vendor/v.txt").exists(),
+        env.playground.join("core/vendor/dist/v.txt").exists(),
         "cleaning core deleted a checkout declared inside it"
     );
     assert!(!env.playground.join("core/scratch.tmp").exists());
@@ -3443,7 +3185,7 @@ fn clean_leaves_a_stray_directory_holding_another_checkout() {
         vendor.to_str().unwrap()
     ));
     env.init_playground_git();
-    assert!(env.run(&["clone", "libs/core/vendor"]).success);
+    assert!(env.run(&["pull", "libs/core/vendor"]).success);
     assert!(env.playground.join("libs/core/vendor/v.txt").is_file());
 
     let out = env.run(&["clean", "-f"]);

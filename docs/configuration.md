@@ -7,8 +7,7 @@
 - [`singleton`](#singleton)
 - [`[registries]`](#registries)
 - [`[artefact]`](#artefact)
-- [`[cache]`](#cache)
-- [`[share]`](#share)
+- [`[develop]`](#develop)
 - [`[clean]`](#clean)
 - [`[hooks]`](#hooks)
 - [Nested configs](#nested-configs)
@@ -18,46 +17,42 @@
 
 ## Where the file lives
 
-`.gitscale.toml`, at the root of the workspace. Every command searches upward
-from the current directory until it finds one; `-C, --root PATH` starts the
-search from `PATH` instead.
+`.gitscale.toml`, at the top of the workspace's root repository — anywhere
+else, GitScale refuses. Every command searches upward from the current
+directory until it finds one; `-C, --root PATH` starts the search from `PATH`
+instead.
 
 A checked-out sub-repository may carry its own `.gitscale.toml`. Which parts of
 it are read, and when, is covered under [nested configs](#nested-configs).
 
-Unknown keys and unknown tables are ignored on read, except inside
-[`[artefact]`](#artefact) and [`[resolve]`](#resolve), where a misspelt key would quietly publish less than
-meant — but see
+Unknown keys and unknown tables are ignored on read — a dependency's config at
+an old revision may carry keys this version no longer knows — except inside
+[`[artefact]`](#artefact), [`[resolve]`](#resolve) and [`[develop]`](#develop),
+where a misspelt key would quietly do less than meant. But see
 [how `add` and `remove` rewrite the file](#how-add-and-remove-rewrite-the-file).
 
 ## A complete example
 
 ```toml
 [repos]
-"imports/core"  = { url = "git@github.com:org/core.git", revision = "main", mode = "readonly" }
-"imports/utils" = { url = "https://github.com/org/utils.git", revision = "v2.1.0" }
-"meta/frontend" = { url = "https://github.com/org/frontend.git", revision = "main", mode = "artefact" }
+"imports/core"  = { url = "git@github.com:org/core.git", revision = "main" }
+"imports/utils" = { url = "https://github.com/org/utils.git", revision = "v2.1.0", artefact = "overlay" }
+"meta/frontend" = { url = "https://github.com/org/frontend.git", revision = "main", artefact = "replace" }
 "vendor/tools"  = { url = "https://github.com/org/tools.git", recursive = false }
 
 [registries]
 "gitlab.corp.example" = "registry.corp.example"
 
 [artefact]
-root    = "dist"
-include = ["**"]
+include = ["dist/**"]
 exclude = ["**/*.map"]
 
-[cache]
-enabled    = true
-dir        = "~/.local/share/gitscale"
-dissociate = false
-adopt_root = false
-
-[share]
-dissociate = false
+[develop]
+pinned = ["main", "staging", "release/*"]
 
 [clean]
-exclude = [".vscode", ".idea", ".env", "envs/", "tmp"]
+exclude     = [".vscode", ".idea", ".env", "envs/", "tmp"]
+keep_recent = "3months"
 
 [hooks]
 post_sync     = "make install"
@@ -74,14 +69,14 @@ the config.
 
 ```toml
 [repos]
-"imports/core" = { url = "git@github.com:org/core.git", revision = "main", mode = "readonly", recursive = true }
+"imports/core" = { url = "git@github.com:org/core.git", revision = "main", recursive = true }
 ```
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `url` | string | **required** | Repository URL: HTTPS, SSH (`git@host:owner/repo.git` or `ssh://git@host/owner/repo.git`), or a local path |
 | `revision` | string | `""` | Branch, tag or full commit SHA (40 or 64 hex digits). A minimum: [resolution](recursive-dependencies.md#how-a-revision-is-chosen) may raise it to what a dependency asks for. Empty asks for nothing, leaving it to the dependencies — or, when nobody asks, the remote's default branch. See [pinning a revision](dependencies.md#pinning-a-revision) |
-| `mode` | string | `"readwrite"` | `"readwrite"`, `"readonly"` or `"artefact"`. See [checkout modes](dependencies.md#checkout-modes) |
+| `artefact` | string | unset | `"replace"`: the published image instead of a checkout. `"overlay"`: a checkout with the image's build output laid over it. See [artefacts](dependencies.md#artefacts-replace-and-overlay) |
 | `recursive` | bool | `true` | Read this repository's own `.gitscale.toml`: resolve its transitive dependencies, and clean it by its own `[clean]` rules. With `false`, that config is not read at all, and [`clean`](clean.md#per-repo-clean) cleans the repository without its keep-list |
 | `override` | bool | `false` | Exactly this revision, and nothing higher: wins over every request from a repository below this one, and must agree with the rest. Needs a `revision`. See [overrides](recursive-dependencies.md#overrides) |
 | `singleton` | bool | unset | `true`: this repository may be checked out only once, whatever majors are asked for. `false`: relaxes a `true` from repositories below this one. See [singleton](recursive-dependencies.md#singleton) |
@@ -157,61 +152,51 @@ this repository: its build output, as one image layer per group of glob
 patterns.
 
 ```toml
-[artefact]
-root = "dist"
-
 [[artefact.layer]]
 name    = "vendor"
-include = ["vendor/**"]
+include = ["dist/vendor/**"]
 
 [[artefact.layer]]
 name    = "app"
-include = ["**"]
+include = ["dist/**"]
 exclude = ["**/*.map"]
 ```
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `root` | string | `"."` | The directory, relative to the config, that patterns and the archive's paths are relative to. Must stay below the config's directory |
 | `include` | array of strings | — | For a single group: the files to ship |
 | `exclude` | array of strings | `[]` | For a single group: files to leave out of what `include` matched |
 | `layer` | array of tables | — | One table per group, in layer order, each with `name`, `include` and an optional `exclude`. Use either these or `include` directly, not both |
 
 A layer's `name` is letters, digits, `.`, `_` or `-`, unique, and recorded as
 the layer's title. Patterns are [plain globs](artefacts.md#patterns) relative to
-`root`; one that starts with `/`, contains `.` or `..` components, or does not
+the repository, and a file is stored at its repository path; one that starts with `/`, contains `.` or `..` components, or does not
 compile is an error when the config is read. A file goes to the first group
-that matches it, and a group that matches nothing fails the publish.
+that matches it, and a group that matches nothing fails the publish. Every
+file shipped must be tracked and unmodified at the commit, or ignored — the
+[artefact policy](artefacts.md#the-artefact-policy).
 
 This table belongs to the producing repository. A workspace that declares an
 artefact entry never reads it.
 
-## `[cache]`
+## `[develop]`
 
-The [object cache](caching.md).
+Which of this repository's branches are **pinned**: built from pins, never a
+[topic](topics.md).
 
-| Key | Type | Default | Meaning |
-|---|---|---|---|
-| `enabled` | bool | `true` | Use the object cache. `false` makes every clone and fetch talk to the remote directly, as `--no-cache` does per command |
-| `dir` | string | `""` | Where entries live. Empty means the default location — see [where the cache lives](caching.md#where-the-cache-lives). A leading `~/` is expanded |
-| `dissociate` | bool | `false` | Copy objects borrowed from the cache into each workspace and drop the link. Costs the disk saving, keeps the network one — see [dissociate](caching.md#copying-instead-of-borrowing-dissociate) |
-| `adopt_root` | bool | `false` | Relink a workspace root cloned by plain `git clone` to the cache, reclaiming its duplicate objects. Skipped for shallow clones and linked worktrees; [`cache adopt`](caching.md#cache-adopt) does it on demand — see [adopting a root repository](caching.md#adopting-a-root-repository) |
-
-The cache is per-user by design; there is no system-wide scope and no key to
-create one.
-
-## `[share]`
-
-How a clone may reuse a copy of a sub-repository already on this machine.
+```toml
+[develop]
+pinned = ["main", "staging", "release/*"]
+```
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `dissociate` | bool | `false` | Copy objects borrowed from a [source workspace](caching.md#where-objects-come-from) in and drop the link once the clone is made |
+| `pinned` | array of strings | the remote's default branch (`main` and `master` when unknown) | Branch names or globs (`*` matches any run of characters). A written list is exactly what is pinned: the default branch is not implied, and `[]` makes every branch a topic |
 
-Off by default: borrowing is what saves the disk, and the workspace borrowed
-from is normally the long-lived one. Turn it on where the source may be pruned,
-moved or garbage-collected out from under the clones — `git gc` there can delete
-objects only a borrower still needs, and nothing warns when it does.
+In the root, it decides whether the root's branch is a topic. In a dependency,
+read at the revision selected, it holds what that repository asks for at its
+pins when the topic's branch is one it pins — see
+[pinned dependencies](topics.md#inside-a-topic).
 
 ## `[clean]`
 
@@ -220,9 +205,10 @@ Which untracked files [`gitscale clean`](clean.md) keeps in **this** repository.
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `exclude` | array of strings | `[]` | `.gitignore`-syntax patterns, anchored at this repository's root, passed to `git clean -e` unchanged |
+| `keep_recent` | string | `"3months"` | Root only: how recently an image in the root's [image store](stores.md#images) must have been used to survive the daily prune and [`clean --gc`](clean.md#compacting). A number and a unit: `30d`, `2 weeks`, `6months` |
 
-Scoped to the repository whose config it appears in, and nothing below it. A
-pattern may not be empty or start with `-`.
+`exclude` is scoped to the repository whose config it appears in, and nothing
+below it. A pattern may not be empty or start with `-`.
 
 ## `[hooks]`
 
@@ -246,10 +232,11 @@ When a checked-out repository carries its own `.gitscale.toml` and the entry is
   every entry is a request, resolved with the rest of the workspace, checked
   out once and linked instead of nested.
 - **`singleton`** — whether the repository allows only one checkout of itself.
+- **`[develop]`** — which branches it [pins](#develop) for its dependencies.
 - **`[clean]`** — to decide what [`clean`](clean.md) keeps in that repository.
 
 Everything else in a nested config — `[resolve]`, `[registries]`, `[artefact]`,
-`[cache]`, `[share]`, `[hooks]` — is not even parsed by the parent, so nothing
+`[hooks]` — is not even parsed by the parent, so nothing
 in those tables can break it. It belongs to that repository when it is used as a workspace in its own
 right, and is not read by the parent.
 
@@ -265,7 +252,6 @@ command:
 | `url = "ext::sh -c '…'"` and any `helper::` prefix | A remote helper makes git run the rest of the URL as a command — code execution from a repo URL alone, with no `[hooks]` table in sight. A prefix only counts as a helper when it is a bare word, so an IPv6 literal or a URL that merely contains `::` is left alone |
 | A `url` or `revision` starting with `-` | It reaches git as a flag, and flags such as `--upload-pack=` name a program to run |
 | A repo directory that is absolute or contains `..` | A config must not be able to decide to check out over `~/.ssh` |
-| A `cache.dir` starting with `-` | It reaches git as a path argument, where a flag would be a shell in disguise |
 | A `clean.exclude` pattern that is empty or starts with `-` | It reaches `git clean -e` as an argument |
 
 These checks are independent of the [hook allowlist](hooks.md#the-hook-allowlist),
@@ -279,18 +265,17 @@ parsed. Consequences:
 
 - Comments, blank lines, key order and formatting are lost.
 - Any table GitScale does not know about is **deleted**.
-- Defaults are not written back: `mode = "readwrite"`, `recursive = true`, an
-  empty revision, and every default `[cache]` / `[share]` / `[clean]` / `[hooks]`
-  value are simply omitted.
+- Defaults are not written back: `recursive = true`, an empty revision, and
+  every default `[develop]` / `[clean]` / `[hooks]` value are simply omitted.
 - Tables are emitted in a fixed order: a top-level `singleton`, `[resolve]`,
-  `[share]`, `[cache]`, `[registries]`, `[artefact]`, `[hooks]`, `[clean]`,
-  `[repos]`, with
+  `[develop]`, `[registries]`, `[artefact]`, `[hooks]`, `[clean]`, `[repos]`,
+  with
   entries inline and sorted by directory. A single `[artefact]` group named
   `default` is written in the short form, with `include` directly in the table.
 
 If you keep comments in the file, edit it by hand instead.
-[`gitscale resolve --write`](cli.md#gitscale-resolve) is the exception: it changes only
-the revisions it reports, and keeps everything else as it was.
+[`gitscale upgrade`](topics.md#promotion-gitscale-upgrade) is the exception: it
+changes only the revisions it reports, and keeps everything else as it was.
 
 ## Environment variables
 
@@ -298,13 +283,15 @@ the revisions it reports, and keeps everything else as it was.
 
 | Variable | Effect |
 |---|---|
-| `CI` | `1` or `true` switches to [CI behaviour](caching.md#what-changes-in-ci): shallow checkouts, snapshot cache entries, and [`clean -f` on every checkout](hooks.md#git-hooks-in-ci) after a `pull` |
-| `GITSCALE_CACHE_DIR` | Cache location, when `[cache] dir` is unset |
-| `XDG_DATA_HOME` | `$XDG_DATA_HOME/gitscale` is the cache location, when neither of the above is set |
+| `CI` | `1` or `true` switches to [CI behaviour](stores.md#the-ci-cache): depth-1 checkouts from the per-user cache, and [`clean -f` on every checkout](hooks.md#git-hooks-in-ci) after a `pull` |
+| `GITSCALE_CACHE_DIR` | The CI cache's location |
+| `XDG_DATA_HOME` | `$XDG_DATA_HOME/gitscale` is the CI cache's location, when `GITSCALE_CACHE_DIR` is not set |
 | `HOME` | `~/.local/share/gitscale` is the last fallback; also where `--global` hooks are installed |
 | `GITSCALE_NO_CI_AUTH` | Any non-empty value disables [CI authentication](ci-authentication.md) |
 | `GITSCALE_HOOK_ALLOW` | Set by an installed [git hook shim](hooks.md#the-hook-allowlist) to the allowlist it was installed with. Not something to set yourself |
 | `GITSCALE_HOOK` | Set by GitScale on every git call it makes, so an installed hook can tell re-entry from a genuine user operation |
+| `CI_MERGE_REQUEST_SOURCE_BRANCH_NAME`, `CI_COMMIT_BRANCH`, `CI_DEFAULT_BRANCH`, `CI_MERGE_REQUEST_TARGET_BRANCH_NAME` | GitLab — the [topic of a pipeline](topics.md#topics-in-ci), the default branch, and the merge request's target for `check` |
+| `GITHUB_HEAD_REF`, `GITHUB_REF_NAME`, `GITHUB_REF_TYPE`, `GITHUB_BASE_REF`, `GITHUB_EVENT_PATH` | GitHub — the same |
 | `GITLAB_CI` | `true` makes a hook-triggered pull check that the runner's post-checkout clean keeps the declared checkouts, and [fail if it would not](hooks.md#git-hooks-in-ci) |
 | `GIT_CLEAN_FLAGS` | GitLab Runner's own: the flags of the `git clean` it runs after its checkout, default `-ffdx`. Read for that check, never set by GitScale |
 
@@ -343,4 +330,4 @@ these is missing, once for the whole run.
 
 ---
 
-[← 2.9 Artefacts](artefacts.md) · [Contents](README.md) · [Next → 4. Command line reference](cli.md)
+[← 2.10 Artefacts](artefacts.md) · [Contents](README.md) · [Next → 4. Command line reference](cli.md)

@@ -9,14 +9,14 @@
 - [Overrides](#overrides)
 - [Implicit dependencies](#implicit-dependencies)
   - [Where they go](#where-they-go)
-  - [Mode](#mode)
+  - [Source or artefact](#source-or-artefact)
   - [The allowlist](#the-allowlist)
 - [Two majors of one repository](#two-majors-of-one-repository)
   - [singleton](#singleton)
 - [Errors](#errors)
 - [Deduplication by symlink](#deduplication-by-symlink)
 - [Turning it off: `recursive = false`](#turning-it-off-recursive--false)
-- [Unlinked clones](#unlinked-clones)
+- [Unlinked checkouts](#unlinked-checkouts)
 - [Orphaned symlinks](#orphaned-symlinks)
 - [When resolution runs, and what it fetches](#when-resolution-runs-and-what-it-fetches)
 
@@ -63,7 +63,7 @@ Root `.gitscale.toml`:
 "vendor/d" = { url = "git@github.com:org/d.git", revision = "v1.5.0" }
 ```
 
-After `gitscale clone`, `imports/d` is at `v1.5.0`, the highest of the three
+After `gitscale pull`, `imports/d` is at `v1.5.0`, the highest of the three
 requests, and `b` and `c` reach it through links:
 
 ```
@@ -76,8 +76,8 @@ workspace/
 ```
 
 ```
-    REPO        PATH   MODE        REF       EXPECTED   STATUS     RESOLUTION
-◆   imports/d   -      readwrite   3f2a9c1   v1.5.0     detached   raised from v1.2.0 by imports/c, 3 requests
+    REPO        PATH   ARTEFACT   REF       EXPECTED   STATUS   RESOLUTION
+✔   imports/d   -      -          3f2a9c1   v1.5.0     ok       raised from v1.2.0 by imports/c, 3 requests
 hint: gitscale status --why <dir> lists every request behind a revision
 ```
 
@@ -105,10 +105,10 @@ Requests land in checkouts — *slots* — keyed by three things:
   files, and never share a checkout.
 
 An entry with no revision asks for nothing, and follows whatever the others
-ask for. In the root's config it still chooses where the checkout goes and its
-mode; in a dependency's it only names the link inside that dependency. When nobody asks for
-anything, the checkout follows the branch it is on, as an entry without a
-revision always has.
+ask for. In the root's config it still chooses where the checkout goes and
+whether it is an artefact; in a dependency's it only names the link inside
+that dependency. When nobody asks for anything, the checkout follows the
+remote's default branch.
 
 ### Comparing two requests
 
@@ -133,8 +133,8 @@ or set the revision in a repository above both, such as the root
 ```
 
 No git history is read, so a shallow CI checkout resolves exactly as a
-developer machine does. On a developer machine, where the cache mirrors hold
-the history anyway, a winner that turns out to be behind what a losing request
+developer machine does. On a developer machine, where the stores hold the
+history anyway, a winner that turns out to be behind what a losing request
 asked for is flagged in `status` — `behind imports/c's v2026.09.30` — without
 changing the result.
 
@@ -184,7 +184,7 @@ holds below a request it beat.
 ## Implicit dependencies
 
 A dependency the root does not declare is checked out anyway, as an *implicit*
-checkout: cloned, linked and reported like a declared one, but never written
+checkout: checked out, linked and reported like a declared one, but never written
 into the root config.
 
 ```toml
@@ -206,15 +206,17 @@ allow = ["github.com/partner-org/*"]   # see below
 
 Keep `hoist_dir` in the root's `.gitignore`, as with every checkout directory.
 
-### Mode
+### Source or artefact
 
-Implicit checkouts are `readonly`, or `artefact` when that is what was asked
-for: nobody chose to develop in them. To work on one, declare it at the root
-with no revision and the mode you want — the root then chooses its path and
-mode, while the revision still comes from resolution:
+An implicit checkout is a `replace` artefact when that is what was asked for,
+and an `overlay` when any request asks for one; otherwise it is a checkout of
+the source. Like every checkout it is detached and read-only until
+[developed](topics.md#gitscale-develop). To choose for yourself, declare it at
+the root with no revision — the root then chooses its path and whether it is an
+artefact, while the revision still comes from resolution:
 
 ```toml
-"imports/d" = { url = "git@github.com:org/d.git", mode = "readwrite" }
+"imports/d" = { url = "git@github.com:org/d.git", artefact = "overlay" }
 ```
 
 ### The allowlist
@@ -278,7 +280,7 @@ root's entry, any.
 
 ## Errors
 
-Every error is raised by resolution, before anything is cloned, moved or
+Every error is raised by resolution, before anything is checked out, moved or
 linked. `status` prints it above the table and marks the rows `unresolved`.
 
 | Error | When |
@@ -300,10 +302,9 @@ a real file or directory sitting at a link path — that is reported by
 [`status`](status.md) as `unlinked` and fixed by [`sync`](workflow.md#sync).
 
 - Symlinked entries are skipped by `fetch`, `push`, `commit` and
-  [`clean`](clean.md). Run inside a child repository, `clone`, `pull` and
-  `sync` leave them in place too, since the outer workspace decides which
-  revision that checkout is at. Naming the entry (`gitscale clone imports/shared`)
-  is how one is unlinked into a checkout of its own.
+  [`clean`](clean.md). Run inside a child repository, `pull` and `sync` leave
+  them in place too, since the outer workspace decides which revision that
+  checkout is at.
 - `status` shows them as `⤷ symlink`, with the link target in the `PATH` column.
 - An artefact's dependencies come from the `.gitscale.toml` its image carries,
   and are linked inside the extracted artefact — see
@@ -323,16 +324,16 @@ no requests for it, creates no symlinks inside it, and
 would have supplied. An implicit checkout is read unless every request for it
 says `recursive = false`.
 
-## Unlinked clones
+## Unlinked checkouts
 
-If a path that should be a symlink holds a real clone instead — someone cloned
-into it by hand, or it predates the dependency being hoisted — `status` flags
-the **parent repo** as `unlinked`, and `sync` fixes it:
+If a path that should be a symlink holds a real checkout instead — someone
+cloned into it by hand, or it predates the dependency being hoisted — `status`
+flags the **parent repo** as `unlinked`, and `sync` fixes it:
 
-- A clean clone is removed and the symlink restored automatically.
-- A clone with uncommitted changes or unpushed commits is left alone and
+- A clean checkout is removed and the symlink restored automatically.
+- One with uncommitted changes or unpushed commits is left alone and
   reported, and `sync --force` is required to replace it. The check descends
-  into that clone's own nested dependencies, so work in a grandchild counts too.
+  into its own nested dependencies, so work in a grandchild counts too.
 
 ## Orphaned symlinks
 
@@ -358,25 +359,24 @@ never touched.
 
 | Command | Resolves | Implicit checkouts |
 |---|---|---|
-| `clone` | Against the remotes, before cloning anything | cloned |
-| `pull` | Against the remotes, before moving anything | new ones cloned |
-| `sync` | As `clone` and `pull`, then relinks and removes orphans | removed when left behind and clean |
+| `pull` | Against the remotes, before moving anything | new ones checked out |
+| `sync` | As `pull`, then relinks and removes orphans | removed when left behind and clean |
 | `fetch` | Against the remotes, refreshing what `status` reads | fetched |
 | `status` | Offline from what is on disk; `--fetch` refreshes first | shown as rows |
 | `clean` | Offline, for the keep-list | kept |
-| `resolve` | Against the remotes | never written |
+| `upgrade --resolved` | Against the remotes | never written |
 
 Resolution reads, per repository, its branches and tags and the
 `.gitscale.toml` of each selected commit — never history:
 
-- **Developer machine, cache on**: from the [cache](caching.md) mirror, the
-  entry the checkout is built from anyway, updated once per command.
-- **CI, or `--no-cache`**: refs from `git ls-remote`, kept in a small store in
-  the workspace's git directory, and each config from that one commit fetched
-  at depth 1 without files beyond it — in CI with the cache on, from the
-  snapshot the checkout is built from.
-- **Artefacts**: refs the same way, and the config from the image's `gitscale`
-  layer, kept in the cache.
+- **Developer machine**: from the repository's [store](stores.md), the bare
+  clone its checkouts are worktrees of, fetched once per command.
+- **CI**: refs from `git ls-remote`, kept in a small store in the workspace's
+  git directory, and each config from that one commit fetched at depth 1
+  without files beyond it — from the [cache](stores.md#the-ci-cache)'s snapshot
+  when the runner has one.
+- **`replace` artefacts**: refs from `git ls-remote`, and the config from the
+  image's `gitscale` layer, kept with the images.
 
 Offline, a repository nothing has fetched yet is `unresolved`, with a hint to
 run `status --fetch`.

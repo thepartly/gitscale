@@ -69,7 +69,7 @@ fn pin(env: &TestEnv, bare: &Path, revision: &str, cache: bool) {
     env.write_config(&format!(
         // file:// — git ignores `--depth` for a plain-path remote, and these
         // tests are about the shallow checkout CI makes.
-        "{}[repos]\n\"libs/lib\" = {{ url = \"file://{}\", revision = \"{}\", mode = \"readwrite\" }}\n",
+        "{}[repos]\n\"libs/lib\" = {{ url = \"file://{}\", revision = \"{}\" }}\n",
         cache,
         bare.display(),
         revision
@@ -89,13 +89,13 @@ fn a_kept_checkout_follows_every_pin_change_without_the_cache() {
     let bare = tagged_remote(&env);
     let lib = env.playground.join("libs/lib");
 
-    for (revision, expected, branch) in [
-        ("v1", "c1", None),
-        ("v2", "c2", None),
-        ("v1", "c1", None),
-        ("main", "c3", Some("main")),
-        ("v2", "c2", None),
-        ("feature", "feat", Some("feature")),
+    for (revision, expected) in [
+        ("v1", "c1"),
+        ("v2", "c2"),
+        ("v1", "c1"),
+        ("main", "c3"),
+        ("v2", "c2"),
+        ("feature", "feat"),
     ] {
         pin(&env, &bare, revision, false);
         let out = env.run_with_env(&[("CI", "true")], &["pull"]);
@@ -105,19 +105,10 @@ fn a_kept_checkout_follows_every_pin_change_without_the_cache() {
             revision, out.stdout, out.stderr
         );
         assert_eq!(subject(&lib), expected, "pin {}", revision);
+        // Detached at the commit, branch or tag alike: what the workspace
+        // gets, and what the pipeline builds.
         let head = git(&lib, &["rev-parse", "--abbrev-ref", "HEAD"]);
-        match branch {
-            // Where `clone --depth 1 --branch` would have left it: on the
-            // branch, tracking it.
-            Some(name) => {
-                assert_eq!(head, name, "pin {}", revision);
-                assert_eq!(
-                    git(&lib, &["rev-parse", "--abbrev-ref", "@{upstream}"]),
-                    format!("origin/{}", name)
-                );
-            }
-            None => assert_eq!(head, "HEAD", "pin {}: a tag checks out detached", revision),
-        }
+        assert_eq!(head, "HEAD", "pin {}: detached", revision);
     }
 }
 
@@ -190,7 +181,7 @@ fn a_ci_pull_cleans_each_checkout_as_clean_f_does() {
         ],
     );
     env.write_config(&format!(
-        "[repos]\n\"libs/lib\" = {{ url = \"file://{}\", revision = \"main\", mode = \"readwrite\" }}\n",
+        "[repos]\n\"libs/lib\" = {{ url = \"file://{}\", revision = \"main\" }}\n",
         bare.display()
     ));
     assert!(env.run_with_env(&[("CI", "true")], &["pull"]).success);

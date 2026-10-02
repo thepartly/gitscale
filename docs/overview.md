@@ -15,13 +15,13 @@ where each one is checked out, and which revision each one is pinned to:
 
 ```toml
 [repos]
-"imports/core"  = { url = "https://github.com/org/core.git", revision = "main", mode = "readonly" }
+"imports/core"  = { url = "https://github.com/org/core.git", revision = "main" }
 "imports/utils" = { url = "https://github.com/org/utils.git", revision = "v2.1.0" }
 ```
 
-`gitscale clone` materialises all of it; `gitscale status` shows the state of
+`gitscale pull` materialises all of it; `gitscale status` shows the state of
 every checkout in one table; `gitscale sync` brings everything back in line.
-The sub-repositories stay ordinary git clones with their own history — the
+Each checkout is a git worktree with its repository's full history — the
 workspace repository tracks only the *selection*, in `.gitscale.toml`.
 
 It is closest in spirit to git submodules, and is meant to replace them where
@@ -34,11 +34,15 @@ The problems GitScale is built for:
 - **One config, not a mechanism per dependency.** A single human-readable TOML
   file instead of `.gitmodules` plus gitlink entries, an XML manifest, or a
   Python `DEPS` file.
-- **Vendored code that cannot be edited by accident.** `mode = "readonly"`
-  strips the write bit off every checked-out file, so an accidental edit fails
-  loudly instead of drifting silently. See
-  [checkout modes](dependencies.md#checkout-modes).
-- **Large prebuilt payloads.** `mode = "artefact"` installs a repository's
+- **Dependencies that cannot be edited by accident.** Every checkout sits at
+  the exact commit its pin names, with the write bit stripped off every file,
+  so an accidental edit fails loudly instead of drifting silently.
+- **One change across several repositories, with no config edits.** The root's
+  branch is the *topic*: `gitscale develop imports/core` puts that checkout on a
+  branch of the same name, writable, and a CI pipeline on the branch takes every
+  repository's branch of that name too. Once the layers are released,
+  `gitscale upgrade` writes the new tags in. See [topics](topics.md).
+- **Large prebuilt payloads.** `artefact = "replace"` installs a repository's
   build output instead of cloning it — datasets, generated clients, compiled
   assets — published by its own pipeline to an OCI registry (GitLab's, GHCR, or
   any other) as one image per commit, and fetched with the CI job token. No
@@ -52,32 +56,33 @@ The problems GitScale is built for:
 - **A checkout that populates itself.** With GitScale installed as a git hook,
   `git clone`, `git checkout` and `git worktree add` materialise the whole
   workspace — no `--recursive` flag to remember. See [hooks](hooks.md).
-- **Downloads paid for once per machine.** An object cache — on by default —
-  means a second workspace, a second worktree, or the next CI job on the same
-  runner costs nothing over the wire. See [the object cache](caching.md).
+- **Downloads paid for once per workspace.** Every dependency is one bare
+  clone inside the root's own `.git`, and every checkout of it a worktree: a
+  second worktree of the root costs nothing over the wire, and deleting the root
+  leaves nothing behind. In CI, a per-user cache means the next job on the same
+  runner downloads nothing. See [stores](stores.md).
 - **CI that works without pipeline surgery.** Inside a GitLab or GitHub job,
   entries hosted on that same server are fetched over HTTPS with the job token,
   and the token never reaches `.git/config` or a command line. See
   [CI authentication](ci-authentication.md).
 - **One glance at the whole workspace.** `gitscale status` reports ahead/behind,
-  detached, ref mismatch, dirty, stale and broken-link states for every repo in
+  ref mismatch, dirty, stale and broken-link states, and where a topic stands, for every repo in
   one table, with JSON for anything that wants to consume it. See
   [status](status.md).
 
 Deliberate limits: GitScale targets git only (plus its own artefact archives),
-it is a separate binary rather than something shipped with git, and it does not
-try to manage a shared multi-repo branching lifecycle the way Google repo or
-west do. The
+it is a separate binary rather than something shipped with git, and a topic is
+nothing but branches of one name — no manifest of its own, no server. The
 [design choices](related-tools.md#design-choices) section covers the reasoning.
 
 ## What it looks like
 
 ```
 $ gitscale status
-      REPO             PATH   MODE        REF    EXPECTED   STATUS
-✔     imports/core     -      readonly    main   main       ok
-✔     imports/utils    -      readwrite   v2.1   v2.1       ok
-⤷     imports/shared   ../s   readonly    main   main       symlink
+    REPO            PATH   ARTEFACT   REF       EXPECTED   STATUS   RESOLUTION
+✔   imports/core    -      -          3f2a9c1   main       ok
+✔   imports/utils   -      -          8c1d0e2   v2.1.0     ok
+✔   imports/d       -      -          6be5fd3   v1.4.0     ok       implicit via imports/core
 ```
 
 ## Install
@@ -99,21 +104,19 @@ to it — so `git scale status` and `gitscale status` are the same command.
 ## Getting a workspace
 
 Authoring one means writing a `.gitscale.toml`, gitignoring the checkout
-directory, and running `gitscale clone` — see
+directory, and running `gitscale pull` — see
 [declaring dependencies](dependencies.md).
 
 Using one means `git clone`, and nothing else. A `--global` or `--system`
 [git hook](hooks.md#git-hooks), installed once per machine, materialises every
-declared repository at the end of the clone, and
-[`[cache] adopt_root`](caching.md#adopting-a-root-repository) puts the root
-repository on the object cache while it is there. Where no hook applies,
-[`gitscale clone <url>`](workflow.md#cloning-a-workspace-from-a-url) does the
-same work explicitly.
+declared repository at the end of the clone. Where no hook applies, `git clone`
+followed by [`gitscale pull`](workflow.md#pull) does the same work.
 
 ## Where to go next
 
 - Setting up a workspace: [declaring dependencies](dependencies.md)
 - Day-to-day commands: [everyday workflow](workflow.md)
+- A change across repositories: [topics](topics.md)
 - Every key in the config file: [configuration reference](configuration.md)
 
 ---

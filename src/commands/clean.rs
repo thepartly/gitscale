@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::config::{filter_entries, load_config, load_workspace, RepoEntry, CONFIG_FILENAME};
 use crate::git::{clean_repo, is_repo_root};
 use crate::progress::{run_parallel, RepoStatus};
+use crate::store::Sources;
 
 /// How the workspace repo itself is named on the command line.
 const SELF_NAME: &str = ".";
@@ -29,16 +30,28 @@ struct Target {
     stray: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     root: Option<&Path>,
     names: &[String],
     cli_excludes: &[String],
+    gc: bool,
+    keep_recent: Option<&str>,
     force: bool,
     interactive: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
     let (config, config_root) = load_workspace(root)?;
+    let sources = Sources::new(&config_root, false)?;
+    if let Some(stores) = &sources.stores {
+        stores.tidy(&config_root);
+        if gc {
+            return compact(stores, &config, keep_recent, out);
+        }
+    } else if gc {
+        bail!("--gc compacts the root's own stores, and CI keeps none; use gitscale cache compact");
+    }
 
     for pattern in cli_excludes {
         if pattern.is_empty() {
@@ -53,7 +66,7 @@ pub fn run(
         }
     }
 
-    let targets = plan(&config, &config_root, names, cli_excludes)?;
+    let targets = plan(&config, &config_root, &sources, names, cli_excludes)?;
     if targets.is_empty() {
         writeln!(out, "Nothing to clean.")?;
         return Ok(());
@@ -66,10 +79,36 @@ pub fn run(
     }
 }
 
+/// `gitscale clean --gc`: `git gc` in every store of the root, and the images
+/// nothing has used within `keep_recent` dropped now rather than on the next
+/// day's pull.
+fn compact(
+    stores: &crate::store::Stores,
+    config: &crate::config::GitScaleConfig,
+    keep_recent: Option<&str>,
+    out: &mut dyn Write,
+) -> Result<()> {
+    let keep = crate::store::keep_recent(keep_recent.or(config.clean.keep_recent.as_deref()))?;
+    let before = crate::store::dir_size(stores.root());
+    let collected = stores.gc()?;
+    let pruned = stores.images().prune(keep)?;
+    let after = crate::store::dir_size(stores.root());
+    writeln!(
+        out,
+        "Compacted {}: {} collected, {} dropped, {} freed.",
+        stores.root().display(),
+        crate::cache::plural(collected, "store", "stores"),
+        crate::cache::plural(pruned.images + pruned.entries, "image", "images"),
+        crate::cache::human_size(before.saturating_sub(after))
+    )?;
+    Ok(())
+}
+
 /// Work out what to clean and what each repo keeps.
 fn plan(
     config: &crate::config::GitScaleConfig,
     config_root: &Path,
+    sources: &Sources,
     names: &[String],
     cli_excludes: &[String],
 ) -> Result<Vec<Target>> {
@@ -79,14 +118,7 @@ fn plan(
     // and whose implicit checkouts — are unknown, and those are the things
     // standing between a clean and a broken workspace. Refuse rather than
     // guess. Offline: a clean never fetches.
-    let resolution = crate::resolve::workspace(
-        config,
-        config_root,
-        false,
-        crate::cache::Cache::open(&config.cache),
-        None,
-        false,
-    )?;
+    let resolution = crate::resolve::workspace(config, config_root, false, sources, None, false)?;
     // Every checkout, the implicit ones included: each is an untracked
     // directory to whatever repo holds it.
     let all = resolution.entries();
@@ -106,26 +138,20 @@ fn plan(
     let mut targets = Vec::new();
 
     if want_self {
-        if is_repo_root(config_root) {
-            // Every declared checkout is an untracked directory as far as the
-            // workspace repo is concerned, so without these exclusions a clean
-            // at the root would delete the workspace it was run in.
-            let mut excludes = vec![ALWAYS_KEEP.to_string()];
-            excludes.extend(config.clean.exclude.iter().cloned());
-            excludes.extend(cli_excludes.iter().cloned());
-            excludes.extend(nested_checkouts(&all, Path::new("")));
-            targets.push(Target {
-                name: SELF_NAME.to_string(),
-                dir: config_root.to_path_buf(),
-                excludes,
-                skip: None,
-                stray: false,
-            });
-        } else if !names.is_empty() {
-            // Only worth reporting when it was asked for by name: a workspace
-            // that is not itself a repo is an ordinary setup, not a problem.
-            targets.push(skipped(SELF_NAME, config_root, "not a git repository"));
-        }
+        // Every declared checkout is an untracked directory as far as the
+        // workspace repo is concerned, so without these exclusions a clean at
+        // the root would delete the workspace it was run in.
+        let mut excludes = vec![ALWAYS_KEEP.to_string()];
+        excludes.extend(config.clean.exclude.iter().cloned());
+        excludes.extend(cli_excludes.iter().cloned());
+        excludes.extend(nested_checkouts(&all, Path::new("")));
+        targets.push(Target {
+            name: SELF_NAME.to_string(),
+            dir: config_root.to_path_buf(),
+            excludes,
+            skip: None,
+            stray: false,
+        });
     }
 
     for entry in &selected {
@@ -173,6 +199,15 @@ fn plan(
         excludes.extend(nested_checkouts(&all, Path::new(&entry.directory)));
         if let Some(links) = managed_links.get(&entry.directory) {
             excludes.extend(links.iter().cloned());
+        }
+        // An overlay's files are ignored build output, and exactly what the
+        // overlay is for.
+        if entry.is_overlay() {
+            excludes.extend(
+                crate::artefact::overlay_files(config_root, &entry.directory)
+                    .into_iter()
+                    .map(|file| format!("/{}", file)),
+            );
         }
         targets.push(Target {
             name: name.to_string(),
@@ -403,14 +438,12 @@ fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::RepoMode;
 
     fn repo(directory: &str) -> RepoEntry {
         RepoEntry {
             directory: directory.to_string(),
             repo_url: "https://example.com/r.git".to_string(),
             revision: "main".to_string(),
-            mode: RepoMode::Readwrite,
             recursive: true,
             ..Default::default()
         }

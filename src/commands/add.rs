@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::config::{
-    check_entry, find_config, load_config, write_config, GitScaleConfig, RepoEntry, RepoMode,
+    check_entry, find_config, load_config, write_config, ArtefactUse, GitScaleConfig, RepoEntry,
     CONFIG_FILENAME,
 };
 
@@ -11,11 +11,11 @@ pub fn run(
     directory: &str,
     repo_url: &str,
     revision: &str,
-    mode: &str,
+    artefact: Option<&str>,
     root: Option<&Path>,
     out: &mut dyn Write,
 ) -> Result<()> {
-    let mode_enum = RepoMode::from_str_checked(mode)?;
+    let artefact = artefact.map(ArtefactUse::from_str_checked).transpose()?;
 
     // The whole config is carried through, not just the repo list: writing it
     // back replaces the file, so anything dropped here is deleted from disk.
@@ -48,16 +48,19 @@ pub fn run(
         directory: directory.to_string(),
         repo_url: repo_url.to_string(),
         revision: revision.to_string(),
-        mode: mode_enum,
+        artefact,
         recursive: true,
         ..Default::default()
     });
 
     write_config(&config_path, &config)?;
-    writeln!(
-        out,
-        "Added {} → {} @ {} [{}]",
-        directory, repo_url, revision, mode
-    )?;
+    match artefact {
+        Some(artefact) => writeln!(
+            out,
+            "Added {} → {} @ {} [artefact {}]",
+            directory, repo_url, revision, artefact
+        )?,
+        None => writeln!(out, "Added {} → {} @ {}", directory, repo_url, revision)?,
+    }
     Ok(())
 }

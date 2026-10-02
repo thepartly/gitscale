@@ -3,9 +3,9 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use crate::artefact::Artefacts;
-use crate::cache::Cache;
 use crate::config::{GitScaleConfig, RepoEntry};
 use crate::resolution::{Engine, Resolution};
+use crate::store::Sources;
 use crate::stores::{GitStores, WorkspaceCheckouts};
 
 /// A symlink to create after cloning.
@@ -28,29 +28,28 @@ pub fn owning_entry<'a>(link_path: &Path, entries: &'a [RepoEntry]) -> Option<&'
 }
 
 /// Resolve the workspace at `config_root`: every checkout it needs, at the
-/// revision each one gets, and the links between them. See
-/// [`crate::resolution`].
+/// revision each one gets, and the links between them — on the root's topic,
+/// when it is on one. See [`crate::resolution`].
 ///
 /// `online` fetches what resolution reads first — once per repository per
-/// command, and through the cache entry the checkout itself is built from
-/// when there is one. Offline, it works from what this machine already has,
-/// and what that cannot answer comes back as an unresolved slot.
+/// command, into the store the checkout itself is a worktree of. Offline, it
+/// works from what this machine already has, and what that cannot answer
+/// comes back as an unresolved slot.
 pub fn workspace(
     config: &GitScaleConfig,
     config_root: &Path,
     online: bool,
-    cache: Option<Cache>,
+    sources: &Sources,
     artefacts: Option<&Artefacts>,
     verbose: bool,
 ) -> Result<Resolution> {
-    let root_url = if crate::git::is_repo_root(config_root) {
-        crate::git::origin_url(config_root)
-    } else {
-        None
-    };
-    let stores = GitStores::new(config_root, cache, online, artefacts, verbose);
+    let root_url = crate::git::origin_url(config_root);
+    let stores = GitStores::new(config_root, sources, online, artefacts, verbose);
     let checkouts = WorkspaceCheckouts::new(config_root);
-    Engine::new(config, root_url.as_deref(), &stores, &checkouts).resolve()
+    let topic = crate::topic::root(config, config_root, online);
+    Engine::new(config, root_url.as_deref(), &stores, &checkouts)
+        .with_topic(topic.topic().map(str::to_string))
+        .resolve()
 }
 
 /// Create symlinks on disk. Skips entries whose target doesn't exist yet.

@@ -1,14 +1,15 @@
 pub mod add;
 pub mod artefact;
 pub mod cache;
+pub mod check;
 pub mod clean;
-pub mod clone;
 pub mod commit;
+pub mod develop;
 pub mod fetch;
 pub mod hook;
 pub mod pull;
 pub mod push;
 pub mod remove;
-pub mod resolve;
 pub mod status;
 pub mod sync;
+pub mod upgrade;

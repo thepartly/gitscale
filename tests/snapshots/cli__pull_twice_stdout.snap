@@ -1,6 +1,7 @@
 ---
 source: tests/cli.rs
+assertion_line: 280
 expression: out.stdout
 ---
-Cloning missing repos...
+Pulling latest changes...
   ok    libs/mylib

@@ -1,5 +1,6 @@
 pub mod artefact;
 pub mod cache;
+pub mod checkout;
 pub mod ci;
 pub mod commands;
 pub mod config;
@@ -9,12 +10,14 @@ pub mod hooks;
 pub mod ledger;
 pub mod oci_layout;
 pub mod progress;
+pub mod promote;
 pub mod registry;
 pub mod resolution;
 pub mod resolve;
-pub mod share;
 mod ssh;
+pub mod store;
 pub mod stores;
+pub mod topic;
 pub mod trust;
 pub mod urls;
 pub mod version;
@@ -33,7 +36,7 @@ struct Cli {
     #[arg(short, long, global = true)]
     verbose: bool,
 
-    /// Talk to remotes directly instead of through the object cache
+    /// In CI, talk to remotes directly instead of through the cache
     #[arg(long, global = true)]
     no_cache: bool,
 
@@ -43,23 +46,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Clone sub-repositories from .gitscale config, or bootstrap a whole
-    /// workspace from a repository URL
-    Clone {
-        #[arg(short = 'C', long)]
-        root: Option<PathBuf>,
-        /// A repository URL to bootstrap a workspace from, optionally
-        /// followed by the directory to create; or the names of declared
-        /// sub-repositories to clone.
-        names: Vec<String>,
-    },
     /// Fetch latest remote state for sub-repositories
     Fetch {
         #[arg(short = 'C', long)]
         root: Option<PathBuf>,
         names: Vec<String>,
     },
-    /// Pull latest changes for sub-repositories
+    /// Put every sub-repository where resolution says, cloning what is missing
     Pull {
         #[arg(short = 'C', long)]
         root: Option<PathBuf>,
@@ -71,7 +64,7 @@ enum Commands {
         root: Option<PathBuf>,
         names: Vec<String>,
     },
-    /// Full sync: clone + pull + push
+    /// Full sync: pull, relink, push
     Sync {
         #[arg(short = 'C', long)]
         root: Option<PathBuf>,
@@ -99,6 +92,14 @@ enum Commands {
         /// one repo go in that repo's own [clean] exclude instead.
         #[arg(short = 'e', long = "exclude", value_name = "PATTERN")]
         exclude: Vec<String>,
+        /// Compact instead: git gc in every store of the root, and drop the
+        /// images nothing has used lately
+        #[arg(long, conflicts_with_all = ["force", "exclude", "names"])]
+        gc: bool,
+        /// With --gc: how recently an image must have been used to be kept,
+        /// e.g. '6months' (default: [clean] keep_recent, else 3months)
+        #[arg(long, value_name = "PERIOD", requires = "gc")]
+        keep_recent: Option<String>,
         names: Vec<String>,
     },
     /// Show status of repos declared in .gitscale.toml
@@ -115,22 +116,61 @@ enum Commands {
         #[arg(long, num_args = 0.., value_name = "DIR")]
         why: Option<Vec<String>>,
     },
-    /// Show where resolution moved the root's own revisions, and with
-    /// --write record them in .gitscale.toml
-    Resolve {
+    /// Put checkouts on the workspace's topic — the root's current branch —
+    /// from the commit each is at, writable
+    Develop {
         #[arg(short = 'C', long)]
         root: Option<PathBuf>,
-        /// Write each resolved revision into the root's entry for it
+        /// Take the checkouts off the topic instead: back at their pins,
+        /// their topic branches deleted
         #[arg(long)]
-        write: bool,
+        stop: bool,
+        /// Checkouts to develop: their directory, or the path of a link a
+        /// repository has to one
+        dirs: Vec<String>,
+    },
+    /// Raise pins: promote a topic's released repositories, raise named
+    /// dependencies to their newest release, or write what resolution
+    /// selected into the root config
+    Upgrade {
+        #[arg(short = 'C', long)]
+        root: Option<PathBuf>,
+        /// Write the revision resolution selected into the root's own
+        /// entries, with no tag lookup
+        #[arg(long)]
+        resolved: bool,
+        /// Let a raise cross a semver major
+        #[arg(long)]
+        major: bool,
+        /// Commit each edited .gitscale.toml, that file alone
+        #[arg(long)]
+        commit: bool,
+        /// Print the plan and change nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// The topic to create when none is active and a repository other
+        /// than the root has to be edited
+        #[arg(short = 'c', long = "create", value_name = "BRANCH")]
+        create: Option<String>,
+        /// Dependencies to raise to their newest release, in every config
+        /// that asks for them
+        dirs: Vec<String>,
+    },
+    /// The merge gate: fail while any checkout comes from a topic branch
+    /// rather than a pinned revision
+    Check {
+        #[arg(short = 'C', long)]
+        root: Option<PathBuf>,
     },
     /// Add a sub-repository entry to .gitscale config
     Add {
         directory: String,
         repo_url: String,
         revision: String,
-        #[arg(long, value_parser = ["readonly", "readwrite", "artefact"], default_value = "readwrite")]
-        mode: String,
+        /// Use the repository's published artefact: instead of a checkout
+        /// (replace), or laid over one (overlay)
+        #[arg(long, value_parser = ["replace", "overlay"])]
+        artefact: Option<String>,
         #[arg(short = 'C', long)]
         root: Option<PathBuf>,
     },
@@ -139,7 +179,7 @@ enum Commands {
         #[command(subcommand)]
         action: ArtefactAction,
     },
-    /// Inspect and maintain the object cache
+    /// Inspect and maintain the CI cache
     Cache {
         #[command(subcommand)]
         action: CacheAction,
@@ -193,34 +233,19 @@ enum ArtefactAction {
 
 #[derive(Subcommand)]
 enum CacheAction {
-    /// Show what the cache holds: one line per entry, and every revision a
-    /// snapshot entry is keeping
+    /// Show what the cache holds: one line per repository, and every pin and
+    /// image it is keeping
     Status {
         #[arg(short = 'C', long)]
         root: Option<PathBuf>,
     },
-    /// Bring cache entries up to date, warming repos nobody has pulled yet
+    /// Add the pins and images a CI job of this workspace would take
     Update {
         #[arg(short = 'C', long)]
         root: Option<PathBuf>,
         names: Vec<String>,
     },
-    /// Relink the workspace root to the cache, reclaiming its own objects
-    Adopt {
-        #[arg(short = 'C', long)]
-        root: Option<PathBuf>,
-        /// Adopt from a linked worktree, relinking the object store it shares
-        /// with its main worktree and every sibling
-        #[arg(long)]
-        shared: bool,
-    },
-    /// Re-create entries this workspace borrows from but that are gone
-    Repair {
-        #[arg(short = 'C', long)]
-        root: Option<PathBuf>,
-        names: Vec<String>,
-    },
-    /// Repack entries and evict the ones nothing has used lately
+    /// Evict what nothing has used lately
     Compact {
         #[arg(short = 'C', long)]
         root: Option<PathBuf>,
@@ -351,15 +376,6 @@ fn run_cli_inner(
     let no_cache = cli.no_cache;
 
     match cli.command {
-        Commands::Clone { root, names } => commands::clone::run(
-            root.as_deref(),
-            &names,
-            verbose,
-            no_cache,
-            interactive,
-            out,
-            err,
-        ),
         Commands::Fetch { root, names } => commands::fetch::run(
             root.as_deref(),
             &names,
@@ -379,7 +395,7 @@ fn run_cli_inner(
             err,
         ),
         Commands::Push { root, names } => {
-            commands::push::run(root.as_deref(), &names, verbose, interactive, out, err)
+            commands::push::run(root.as_deref(), &names, interactive, out, err)
         }
         Commands::Sync { root, force, names } => commands::sync::run(
             root.as_deref(),
@@ -400,11 +416,15 @@ fn run_cli_inner(
             root,
             force,
             exclude,
+            gc,
+            keep_recent,
             names,
         } => commands::clean::run(
             root.as_deref(),
             &names,
             &exclude,
+            gc,
+            keep_recent.as_deref(),
             force,
             interactive,
             out,
@@ -425,20 +445,43 @@ fn run_cli_inner(
             out,
             err,
         ),
-        Commands::Resolve { root, write } => {
-            commands::resolve::run(root.as_deref(), write, verbose, no_cache, out)
+        Commands::Develop { root, stop, dirs } => {
+            commands::develop::run(root.as_deref(), &dirs, stop, verbose, out)
         }
+        Commands::Upgrade {
+            root,
+            resolved,
+            major,
+            commit,
+            dry_run,
+            create,
+            dirs,
+        } => commands::upgrade::run(
+            root.as_deref(),
+            &commands::upgrade::Options {
+                dirs: &dirs,
+                resolved,
+                major,
+                commit,
+                dry_run,
+                create: create.as_deref(),
+            },
+            verbose,
+            no_cache,
+            out,
+        ),
+        Commands::Check { root } => commands::check::run(root.as_deref(), verbose, no_cache, out),
         Commands::Add {
             directory,
             repo_url,
             revision,
-            mode,
+            artefact,
             root,
         } => commands::add::run(
             &directory,
             &repo_url,
             &revision,
-            &mode,
+            artefact.as_deref(),
             root.as_deref(),
             out,
         ),
@@ -462,27 +505,16 @@ fn run_cli_inner(
             }
         },
         Commands::Cache { action } => match action {
-            CacheAction::Status { root } => {
-                commands::cache::status(root.as_deref(), verbose, no_cache, out)
+            CacheAction::Status { root } => commands::cache::status(root.as_deref(), out),
+            CacheAction::Update { root, names } => {
+                commands::cache::update(root.as_deref(), &names, verbose, interactive, out, err)
             }
-            CacheAction::Update { root, names } => commands::cache::update(
-                root.as_deref(),
-                &names,
-                verbose,
-                no_cache,
-                interactive,
-                out,
-                err,
-            ),
-            CacheAction::Adopt { root, shared } => {
-                commands::cache::adopt(root.as_deref(), shared, no_cache, out)
-            }
-            CacheAction::Repair { root, names } => {
-                commands::cache::repair(root.as_deref(), &names, no_cache, out)
-            }
-            CacheAction::Compact { root, keep_recent } => {
-                commands::cache::compact(root.as_deref(), &keep_recent, no_cache, out)
-            }
+            // The cache belongs to the user, not to a workspace: -C is accepted
+            // for symmetry with the other cache commands and changes nothing.
+            CacheAction::Compact {
+                root: _,
+                keep_recent,
+            } => commands::cache::compact(&keep_recent, out),
         },
         Commands::Hook { action } => match action {
             HookAction::Install {

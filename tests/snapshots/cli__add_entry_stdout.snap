@@ -1,5 +1,6 @@
 ---
 source: tests/cli.rs
+assertion_line: 22
 expression: out.stdout
 ---
-Added libs/core → https://github.com/org/core.git @ main [readwrite]
+Added libs/core → https://github.com/org/core.git @ main

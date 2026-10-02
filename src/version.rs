@@ -212,6 +212,14 @@ impl Version {
         matches!(self.scheme, Scheme::Semver(_))
     }
 
+    /// A pre-release: semver's `-rc.1`, a calendar version's text modifier.
+    pub fn is_prerelease(&self) -> bool {
+        match &self.scheme {
+            Scheme::Semver(v) => !v.pre.is_empty(),
+            Scheme::Calver(v) => matches!(v.modifier, Modifier::Pre(_)),
+        }
+    }
+
     /// How `self` and `other` order, or `None` when they are not versions of
     /// one stream and one kind and so cannot be compared as versions at all.
     pub fn compare(&self, other: &Version) -> Option<Ordering> {

@@ -23,7 +23,7 @@ a Windows target at all:
 | `src/hooks.rs`, `run_post_sync` | `[hooks] post_sync` | `Command::new("sh")` |
 | `src/commands/hook.rs` | Installed git hook shim | `#!/bin/sh` script; `make_executable` is already `cfg(unix)`-gated |
 | `src/commands/hook.rs`, `Scope::System` | `hook install --system` | `/etc/gitscale` |
-| `src/cache.rs`, `resolve_dir` | Default cache location | `XDG_DATA_HOME`, then `HOME/.local/share` — on Windows `HOME` is usually unset, so the cache silently turns off |
+| `src/cache.rs`, `resolve_dir` | Default CI cache location | `XDG_DATA_HOME`, then `HOME/.local/share` — on Windows `HOME` is usually unset, so the cache silently turns off |
 | `src/registry.rs`, stored credentials | `docker login` / Podman credentials | `HOME/.docker/config.json`, `XDG_RUNTIME_DIR`, `HOME/.config/containers/auth.json` |
 | Unit tests in `src/artefact.rs` and others | Fixtures | `std::os::unix::fs::symlink`, `#!/bin/sh` scripts |
 
@@ -62,7 +62,7 @@ Developer Mode for relative links`). Consequences to handle:
   reads as dirty.
 - **Removal.** Removing a junction must never recurse into its target:
   `remove_dir` on the junction, never `remove_dir_all`. Audit every removal of
-  a link (`sync` relink and orphan removal, `pull`/`clone` replacing a symlink).
+  a link (`sync` relink and orphan removal, `pull` replacing a symlink).
 
 ## Everything else
 

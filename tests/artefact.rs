@@ -1,6 +1,6 @@
-//! Artefact mode end to end: `artefact publish` into a fake registry, and
-//! every consumer command against it — what each one downloads, what it
-//! refuses, and what it asks the registry for.
+//! Artefacts end to end: `artefact publish` into a fake registry, and every
+//! consumer command against it — what each one downloads, what it refuses,
+//! and what it asks the registry for.
 
 #[allow(dead_code)]
 mod helpers;
@@ -10,12 +10,12 @@ use std::path::{Path, PathBuf};
 
 /// Two groups: a `vendor` layer that rarely changes and an `app` layer that
 /// changes with every build.
-const LAYERED: &str = "[artefact]\nroot = \"dist\"\n\n[[artefact.layer]]\nname = \"vendor\"\ninclude = [\"vendor/**\"]\n\n\
-                       [[artefact.layer]]\nname = \"app\"\ninclude = [\"**\"]\n";
+const LAYERED: &str = "[[artefact.layer]]\nname = \"vendor\"\ninclude = [\"dist/vendor/**\"]\n\n\
+                       [[artefact.layer]]\nname = \"app\"\ninclude = [\"dist/**\"]\n";
 
 fn entry_config(env: &TestEnv, bare: &Path, revision: &str) -> String {
     format!(
-        "{}[repos]\n\"meta/app\" = {{ url = \"{}\", revision = \"{}\", mode = \"artefact\" }}\n",
+        "{}[repos]\n\"meta/app\" = {{ url = \"{}\", revision = \"{}\", artefact = \"replace\" }}\n",
         env.registries(),
         bare.display(),
         revision
@@ -153,7 +153,7 @@ fn a_dry_run_lists_the_layers_and_sends_nothing() {
     assert!(text.contains("Would publish"), "{}", text);
     assert!(text.contains("layer vendor: 1 file"), "{}", text);
     assert!(text.contains("layer app: 2 files"), "{}", text);
-    assert!(text.contains("    css/site.css"), "{}", text);
+    assert!(text.contains("    dist/css/site.css"), "{}", text);
     assert!(
         env.registry().log().is_empty(),
         "{:?}",
@@ -173,9 +173,10 @@ fn a_dry_run_lists_files_without_a_registry() {
     std::fs::write(producer.join("dist/.well-known/security.txt"), "s").unwrap();
     std::fs::write(
         producer.join(".gitscale.toml"),
-        "[artefact]\nroot = \"dist\"\ninclude = [\"**\"]\n",
+        "[artefact]\ninclude = [\"dist/**\"]\n",
     )
     .unwrap();
+    std::fs::write(producer.join(".git/info/exclude"), "/dist/\n").unwrap();
     let out = env.run_in(&producer, &["artefact", "publish", "--dry-run"]);
     assert!(out.success, "{}", out.stderr);
     assert!(
@@ -183,9 +184,9 @@ fn a_dry_run_lists_files_without_a_registry() {
         "{}",
         out.stdout
     );
-    assert!(out.stdout.contains("    index.html"), "{}", out.stdout);
+    assert!(out.stdout.contains("    dist/index.html"), "{}", out.stdout);
     assert!(
-        out.stdout.contains("    .well-known/security.txt"),
+        out.stdout.contains("    dist/.well-known/security.txt"),
         "{}",
         out.stdout
     );
@@ -219,6 +220,62 @@ fn publishing_needs_an_artefact_table() {
     assert!(out.stderr.contains("no [artefact] table"), "{}", out.stderr);
 }
 
+/// Every file an image ships is either the commit's own, unmodified, or
+/// ignored build output: anything else could not be laid over a checkout of
+/// that commit, and `publish` refuses it — a dry run too.
+#[test]
+fn publish_refuses_files_that_break_the_artefact_policy() {
+    let env = TestEnv::new("art_policy");
+    let bare = env.create_bare_repo(
+        "app",
+        "main",
+        &[("README.md", "app"), ("src/lib.rs", "lib")],
+    );
+    let producer = env.producer(&bare, "main");
+    std::fs::write(producer.join("src/lib.rs"), "changed").unwrap();
+    std::fs::create_dir_all(producer.join("out")).unwrap();
+    std::fs::write(producer.join("out/app.bin"), "built").unwrap();
+    std::fs::write(
+        producer.join(".gitscale.toml"),
+        format!(
+            "{}[artefact]\ninclude = [\"src/**\", \"out/**\", \"README.md\"]\n",
+            env.registries()
+        ),
+    )
+    .unwrap();
+    for args in [
+        &["artefact", "publish"][..],
+        &["artefact", "publish", "--dry-run"],
+    ] {
+        let out = env.run_in(&producer, args);
+        assert!(!out.success, "{:?}: {}", args, out.stdout);
+        assert!(
+            out.stderr.contains("2 files break the artefact policy"),
+            "{}",
+            out.stderr
+        );
+        assert!(
+            out.stderr.contains("src/lib.rs") && out.stderr.contains("tracked, modified"),
+            "{}",
+            out.stderr
+        );
+        assert!(
+            out.stderr.contains("out/app.bin")
+                && out
+                    .stderr
+                    .contains("untracked, not ignored — add out/ to .gitignore"),
+            "{}",
+            out.stderr
+        );
+    }
+    assert!(env.registry().tags(&env.image(&bare)).is_empty());
+    // A tracked file shipped as it is, and ignored build output, pass.
+    helpers::run_git_pub(&producer, &["checkout", "--", "src/lib.rs"]);
+    std::fs::write(producer.join(".git/info/exclude"), "/out/\n").unwrap();
+    let out = env.run_in(&producer, &["artefact", "publish"]);
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+}
+
 // ---------------------------------------------------------------------------
 // Resolving a revision
 // ---------------------------------------------------------------------------
@@ -245,9 +302,9 @@ fn an_annotated_tag_resolves_to_its_commit() {
     let commit = env.publish(&bare, "v2.0", &[("app.bin", "tagged")]);
     env.write_config(&entry_config(&env, &bare, "v2.0"));
 
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "{}", out.stderr);
-    assert_eq!(read(&env, "meta/app/app.bin"), "tagged");
+    assert_eq!(read(&env, "meta/app/dist/app.bin"), "tagged");
     assert_eq!(installed_commit(&env), commit);
 }
 
@@ -260,9 +317,9 @@ fn a_full_sha_is_used_as_given() {
     env.push_commit(&bare, "main", "README.md", "later");
     env.write_config(&entry_config(&env, &bare, &commit));
 
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "{}", out.stderr);
-    assert_eq!(read(&env, "meta/app/app.bin"), "pinned");
+    assert_eq!(read(&env, "meta/app/dist/app.bin"), "pinned");
 }
 
 /// An abbreviated commit is taken for a name the remote does not have, and
@@ -274,7 +331,7 @@ fn an_abbreviated_sha_is_refused_with_directions() {
     let short = &git_stdout(&bare, &["rev-parse", "main"])[..9];
     env.write_config(&entry_config(&env, &bare, short));
 
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(!out.success);
     assert!(out.stderr.contains("full SHA"), "{}", out.stderr);
     assert!(
@@ -291,9 +348,9 @@ fn an_all_hex_tag_name_is_a_tag() {
     run_git_pub(&bare, &["tag", "20241001", "main"]);
     env.publish(&bare, "20241001", &[("app.bin", "dated")]);
     env.write_config(&entry_config(&env, &bare, "20241001"));
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "{}", out.stderr);
-    assert_eq!(read(&env, "meta/app/app.bin"), "dated");
+    assert_eq!(read(&env, "meta/app/dist/app.bin"), "dated");
 }
 
 #[test]
@@ -302,14 +359,14 @@ fn no_revision_follows_the_default_branch() {
     let bare = env.create_bare_repo("app", "trunk", &[("README.md", "app")]);
     env.publish(&bare, "trunk", &[("app.bin", "from trunk")]);
     env.write_config(&format!(
-        "{}[repos]\n\"meta/app\" = {{ url = \"{}\", mode = \"artefact\" }}\n",
+        "{}[repos]\n\"meta/app\" = {{ url = \"{}\", artefact = \"replace\" }}\n",
         env.registries(),
         bare.display()
     ));
 
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "{}", out.stderr);
-    assert_eq!(read(&env, "meta/app/app.bin"), "from trunk");
+    assert_eq!(read(&env, "meta/app/dist/app.bin"), "from trunk");
 }
 
 #[test]
@@ -321,9 +378,9 @@ fn a_branch_name_matches_exactly() {
     env.push_commit(&bare, "feature/main", "README.md", "f");
     env.write_config(&entry_config(&env, &bare, "main"));
 
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(out.success, "{}", out.stderr);
-    assert_eq!(read(&env, "meta/app/app.bin"), "main");
+    assert_eq!(read(&env, "meta/app/dist/app.bin"), "main");
 }
 
 // ---------------------------------------------------------------------------
@@ -336,7 +393,7 @@ fn a_pull_downloads_only_the_layer_that_changed() {
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
     layered(&env, &bare, "app v1");
     env.write_config(&entry_config(&env, &bare, "main"));
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
     // The config layer, read by resolution and kept, then vendor and app.
     assert_eq!(blob_downloads(&env), 3);
 
@@ -345,82 +402,99 @@ fn a_pull_downloads_only_the_layer_that_changed() {
     env.registry().clear_log();
     let out = env.run(&["pull"]);
     assert!(out.success, "{}", out.stderr);
-    assert_eq!(read(&env, "meta/app/app.js"), "app v2");
-    assert_eq!(read(&env, "meta/app/vendor/lib.js"), "vendor v1");
+    assert_eq!(read(&env, "meta/app/dist/app.js"), "app v2");
+    assert_eq!(read(&env, "meta/app/dist/vendor/lib.js"), "vendor v1");
     assert_eq!(blob_downloads(&env), 1, "{:?}", env.registry().log());
 }
 
+/// The root's image store is shared by its worktrees: a second one of the
+/// root installs from it, downloading nothing.
 #[test]
-fn a_second_workspace_downloads_nothing() {
-    let env = TestEnv::new("art_second_ws");
+fn a_second_root_worktree_downloads_nothing() {
+    let env = TestEnv::new("art_second_worktree");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
     layered(&env, &bare, "app v1");
     env.write_config(&entry_config(&env, &bare, "main"));
-    assert!(env.run(&["clone"]).success);
+    env.init_playground_git();
+    run_git_pub(&env.playground, &["add", ".gitscale.toml"]);
+    run_git_pub(&env.playground, &["commit", "-q", "-m", "config"]);
+    assert!(env.run(&["pull"]).success);
 
-    // Another workspace on the same machine, same cache.
-    std::fs::remove_dir_all(env.playground.join("meta")).unwrap();
+    let other = env.repos_remote.join("second-worktree");
+    run_git_pub(
+        &env.playground,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "other",
+            other.to_str().unwrap(),
+        ],
+    );
     env.registry().clear_log();
-    let out = env.run(&["clone"]);
+    let out = env.run_in(&other, &["pull"]);
     assert!(out.success, "{}", out.stderr);
-    assert_eq!(read(&env, "meta/app/app.js"), "app v1");
+    assert_eq!(
+        std::fs::read_to_string(other.join("meta/app/dist/app.js")).unwrap(),
+        "app v1"
+    );
     assert_eq!(blob_downloads(&env), 0, "{:?}", env.registry().log());
     assert_eq!(env.registry().count("GET", "/manifests/"), 0);
 }
 
+/// A CI job without the cache keeps nothing: the config layer resolution
+/// reads is downloaded again by the install, four blobs a pull.
 #[test]
-fn without_the_cache_every_layer_is_downloaded() {
-    let env = TestEnv::new("art_no_cache");
+fn in_ci_without_the_cache_every_layer_is_downloaded() {
+    let env = TestEnv::new("art_ci_no_cache");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
     layered(&env, &bare, "app v1");
-    env.write_config(&format!(
-        "[cache]\nenabled = false\n\n{}",
-        entry_config(&env, &bare, "main")
-    ));
+    env.write_config(&entry_config(&env, &bare, "main"));
     for _ in 0..2 {
         let _ = std::fs::remove_dir_all(env.playground.join("meta"));
-        assert!(env.run(&["clone"]).success);
+        let out = env.run_with_env(&[("CI", "true")], &["pull", "--no-cache"]);
+        assert!(out.success, "{}{}", out.stdout, out.stderr);
     }
-    // Without a cache to keep it, the config layer resolution reads is
-    // downloaded again by the install: four blobs a clone.
     assert_eq!(blob_downloads(&env), 8);
-    assert!(env.cache_entries("artefacts").is_empty());
+    assert!(env.cache_entries("images").is_empty());
 }
 
+/// N cold CI jobs on one runner, sharing its cache, download each blob once.
 #[test]
-fn parallel_cold_clones_download_each_blob_once() {
+fn parallel_cold_ci_jobs_download_each_blob_once() {
     let env = TestEnv::new("art_parallel");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
     layered(&env, &bare, "app v1");
     let workspaces: Vec<PathBuf> = (0..4)
-        .map(|i| env.playground.join(format!("ws{}", i)))
+        .map(|i| env.repos_remote.join(format!("ws{}", i)))
         .collect();
     for ws in &workspaces {
         std::fs::create_dir_all(ws).unwrap();
-        std::fs::write(
-            ws.join(".gitscale.toml"),
-            format!(
-                "[cache]\ndir = \"{}\"\n\n{}",
-                env.cache.display(),
-                entry_config(&env, &bare, "main")
-            ),
-        )
-        .unwrap();
+        run_git_pub(ws, &["init", "-q"]);
+        std::fs::write(ws.join(".gitscale.toml"), entry_config(&env, &bare, "main")).unwrap();
     }
     std::thread::scope(|scope| {
         for ws in &workspaces {
+            let cache = env.cache.clone();
             scope.spawn(move || {
-                let out = gitscale::run_cli_with(
-                    &["gitscale", "clone", "-C", ws.to_str().unwrap()],
-                    false,
+                let out = std::process::Command::new(env!("CARGO_BIN_EXE_gitscale"))
+                    .args(["pull", "-C", ws.to_str().unwrap()])
+                    .env("CI", "true")
+                    .env("GITSCALE_CACHE_DIR", &cache)
+                    .output()
+                    .unwrap();
+                assert!(
+                    out.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&out.stderr)
                 );
-                assert!(out.success, "{}", out.stderr);
             });
         }
     });
     for ws in &workspaces {
         assert_eq!(
-            std::fs::read_to_string(ws.join("meta/app/app.js")).unwrap(),
+            std::fs::read_to_string(ws.join("meta/app/dist/app.js")).unwrap(),
             "app v1"
         );
     }
@@ -446,7 +520,7 @@ fn status_says_behind_and_missing_after_a_fetch() {
     let env = TestEnv::new("art_status_behind");
     let bare = env.artefact_repo("app", &[("app.bin", "v1")]);
     env.write_config(&entry_config(&env, &bare, "main"));
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
     assert!(status_line(&env).ends_with("ok"), "{}", status_line(&env));
 
     // A new commit whose pipeline has not published yet.
@@ -474,7 +548,7 @@ fn status_says_behind_and_missing_after_a_fetch() {
     );
     assert!(env.run(&["pull"]).success);
     assert!(status_line(&env).ends_with("ok"), "{}", status_line(&env));
-    assert_eq!(read(&env, "meta/app/app.bin"), "v2");
+    assert_eq!(read(&env, "meta/app/dist/app.bin"), "v2");
 }
 
 #[test]
@@ -482,9 +556,9 @@ fn a_republished_commit_shows_as_changed_and_pull_takes_it() {
     let env = TestEnv::new("art_status_changed");
     let bare = env.artefact_repo("app", &[("app.bin", "first build")]);
     env.write_config(&entry_config(&env, &bare, "main"));
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
 
-    let artefact = "[artefact]\nroot = \"dist\"\ninclude = [\"**\"]\n";
+    let artefact = "[artefact]\ninclude = [\"dist/**\"]\n";
     let (out, _) = env.publish_with(
         &bare,
         "main",
@@ -495,7 +569,7 @@ fn a_republished_commit_shows_as_changed_and_pull_takes_it() {
     assert!(out.success, "{}", out.stderr);
     // A pull alone asks the registry nothing: the commit has not moved.
     assert!(env.run(&["pull"]).success);
-    assert_eq!(read(&env, "meta/app/app.bin"), "first build");
+    assert_eq!(read(&env, "meta/app/dist/app.bin"), "first build");
 
     assert!(env.run(&["fetch"]).success);
     assert!(
@@ -504,7 +578,7 @@ fn a_republished_commit_shows_as_changed_and_pull_takes_it() {
         status_line(&env)
     );
     assert!(env.run(&["pull"]).success);
-    assert_eq!(read(&env, "meta/app/app.bin"), "second build");
+    assert_eq!(read(&env, "meta/app/dist/app.bin"), "second build");
     assert!(status_line(&env).ends_with("ok"), "{}", status_line(&env));
 }
 
@@ -514,7 +588,7 @@ fn status_json_carries_the_installed_commit_and_digest() {
     let bare = env.artefact_repo("app", &[("app.bin", "v1")]);
     let commit = git_stdout(&bare, &["rev-parse", "main"]);
     env.write_config(&entry_config(&env, &bare, "main"));
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
 
     let out = env.run(&["status", "--format", "json"]);
     let rows: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
@@ -537,7 +611,7 @@ fn changing_the_configured_revision_is_a_ref_mismatch() {
     let bare = env.artefact_repo("app", &[("app.bin", "v1")]);
     run_git_pub(&bare, &["tag", "v1", "main"]);
     env.write_config(&entry_config(&env, &bare, "main"));
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
     env.write_config(&entry_config(&env, &bare, "v1"));
     assert!(
         status_line(&env).ends_with("ref-mismatch"),
@@ -562,7 +636,7 @@ fn an_old_style_checkout_is_replaced_on_pull() {
 
     let out = env.run(&["pull"]);
     assert!(out.success, "{}", out.stderr);
-    assert_eq!(read(&env, "meta/app/app.bin"), "new");
+    assert_eq!(read(&env, "meta/app/dist/app.bin"), "new");
     assert!(!dest.join("stale.bin").exists());
     assert!(!dest.join(".etag").exists());
 }
@@ -575,37 +649,33 @@ fn records_live_in_the_git_directory_not_the_checkout() {
     env.init_playground_git();
     let bare = env.artefact_repo("app", &[("app.bin", "x"), (".env", "y")]);
     env.write_config(&entry_config(&env, &bare, "main"));
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
 
-    let mut names: Vec<String> = std::fs::read_dir(env.playground.join("meta/app"))
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
+    let listed = |dir: PathBuf| {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
     // The producer's .gitscale.toml arrives with its config layer.
-    assert_eq!(names, vec![".env", ".gitscale.toml", "app.bin"]);
+    assert_eq!(
+        listed(env.playground.join("meta/app")),
+        vec![".gitscale.toml", "dist"]
+    );
+    assert_eq!(
+        listed(env.playground.join("meta/app/dist")),
+        vec![".env", "app.bin"]
+    );
     let records = env.playground.join(".git/gitscale/artefacts");
     assert_eq!(
         std::fs::read_dir(&records).unwrap().count(),
         2,
         "installed and remote"
     );
-    assert!(!env.playground.join(".gitscale").exists());
-}
-
-/// A workspace that is not the top of a git repository keeps them beside its
-/// config instead.
-#[test]
-fn without_a_repository_records_live_beside_the_config() {
-    let env = TestEnv::new("art_records_plain");
-    let bare = env.artefact_repo("app", &[("app.bin", "x")]);
-    env.write_config(&entry_config(&env, &bare, "main"));
-    assert!(env.run(&["clone"]).success);
-    assert!(env.playground.join(".gitscale/artefacts").is_dir());
-    assert_eq!(
-        installed_commit(&env),
-        git_stdout(&bare, &["rev-parse", "main"])
-    );
+    // The images themselves are the root's: shared by every worktree of it.
+    assert!(env.playground.join(".git/gitscale/images").is_dir());
 }
 
 /// Deleting a checkout by hand is noticed: it is not installed any more,
@@ -615,7 +685,7 @@ fn a_deleted_checkout_is_cloned_again() {
     let env = TestEnv::new("art_deleted");
     let bare = env.artefact_repo("app", &[("app.bin", "x")]);
     env.write_config(&entry_config(&env, &bare, "main"));
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
     std::fs::remove_dir_all(env.playground.join("meta/app")).unwrap();
     assert!(
         status_line(&env).ends_with("missed"),
@@ -625,7 +695,7 @@ fn a_deleted_checkout_is_cloned_again() {
     let out = env.run(&["pull"]);
     assert!(out.success, "{}", out.stderr);
     assert!(!out.stdout.contains("up to date"), "{}", out.stdout);
-    assert_eq!(read(&env, "meta/app/app.bin"), "x");
+    assert_eq!(read(&env, "meta/app/dist/app.bin"), "x");
 }
 
 // ---------------------------------------------------------------------------
@@ -666,7 +736,7 @@ fn show_says_what_the_registry_and_the_checkout_hold() {
     assert_eq!(shown(&out.stdout, "installed"), "nothing");
     assert_eq!(shown(&out.stdout, "status"), "not installed");
 
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
     let out = env.run(&["artefact", "show", "meta/app"]);
     assert!(
         shown(&out.stdout, "installed").starts_with(&first),
@@ -699,7 +769,7 @@ fn show_reports_an_entry_it_cannot_look_up_and_fails() {
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
     // No [registries]: nothing maps this repository to a registry.
     env.write_config(&format!(
-        "[repos]\n\"meta/app\" = {{ url = \"{}\", revision = \"main\", mode = \"artefact\" }}\n",
+        "[repos]\n\"meta/app\" = {{ url = \"{}\", revision = \"main\", artefact = \"replace\" }}\n",
         bare.display()
     ));
     let out = env.run(&["artefact", "show"]);
@@ -758,7 +828,7 @@ fn list_shows_every_published_commit_with_its_refs() {
     run_git_pub(&bare, &["branch", "-D", "topic"]);
 
     env.write_config(&entry_config(&env, &bare, "main"));
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
 
     let out = env.run(&["artefact", "list"]);
     assert!(out.success, "{}", out.stderr);
@@ -813,7 +883,7 @@ fn a_refusal_says_how_to_get_access() {
     let bare = env.artefact_repo("app", &[("app.bin", "x")]);
     env.registry().refuse_with(403);
     env.write_config(&entry_config(&env, &bare, "main"));
-    let out = env.run(&["clone"]);
+    let out = env.run(&["pull"]);
     assert!(!out.success);
     assert!(out.stderr.contains("refused"), "{}", out.stderr);
     assert!(out.stderr.contains("docker login"), "{}", out.stderr);
@@ -842,9 +912,9 @@ fn a_ci_job_logs_in_with_its_job_token() {
 
     let vars = gitlab_job(&env);
     let vars: Vec<(&str, &str)> = vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    let out = env.run_with_env(&vars, &["clone"]);
+    let out = env.run_with_env(&vars, &["pull"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
-    assert_eq!(read(&env, "meta/app/app.bin"), "from ci");
+    assert_eq!(read(&env, "meta/app/dist/app.bin"), "from ci");
     assert!(
         env.registry().count("GET", "/token [auth]") > 0,
         "{:?}",
@@ -866,7 +936,7 @@ fn the_job_token_never_goes_to_a_token_service_elsewhere() {
 
     let vars = gitlab_job(&env);
     let vars: Vec<(&str, &str)> = vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    let out = env.run_with_env(&vars, &["clone"]);
+    let out = env.run_with_env(&vars, &["pull"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(
         out.stderr.contains("Job token permissions"),
@@ -908,70 +978,58 @@ fn a_docker_login_is_used_outside_ci() {
     )
     .unwrap();
 
-    let without = env.run_with_env(&[], &["clone"]);
+    let without = env.run_with_env(&[], &["pull"]);
     assert!(!without.success, "no login, no access");
-    let out = env.run_with_env(&[("DOCKER_CONFIG", docker.to_str().unwrap())], &["clone"]);
+    let out = env.run_with_env(&[("DOCKER_CONFIG", docker.to_str().unwrap())], &["pull"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
-    assert_eq!(read(&env, "meta/app/app.bin"), "logged in");
+    assert_eq!(read(&env, "meta/app/dist/app.bin"), "logged in");
 }
 
 // ---------------------------------------------------------------------------
-// The cache commands
+// Where images are kept
 // ---------------------------------------------------------------------------
 
-fn artefact_entry(env: &TestEnv) -> PathBuf {
-    let entries = env.cache_entries("artefacts");
+/// The root's image store for `meta/app`.
+fn image_store(env: &TestEnv) -> PathBuf {
+    let dir = env.playground.join(".git/gitscale/images");
+    let entries: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
     assert_eq!(entries.len(), 1, "{:?}", entries);
-    env.cache.join("artefacts").join(&entries[0])
+    entries[0].clone()
 }
 
-#[test]
-fn cache_status_has_an_artefacts_column() {
-    let env = TestEnv::new("art_cache_status");
-    let bare = env.artefact_repo("app", &[("app.bin", "x")]);
-    env.write_config(&entry_config(&env, &bare, "main"));
-    assert!(env.run(&["clone"]).success);
-
-    let out = env.run_in(&env.playground, &["cache", "status"]);
-    assert!(out.success, "{}", out.stderr);
-    assert!(out.stdout.contains("ARTEFACTS"), "{}", out.stdout);
-    let row = out.stdout.lines().find(|l| l.contains("meta/app")).unwrap();
-    let fields: Vec<&str> = row.split_whitespace().collect();
-    // REPO, MIRROR, SNAPSHOTS, ARTEFACTS (two words), …
-    assert_eq!((fields[1], fields[2]), ("-", "-"), "{}", row);
-    assert_ne!(fields[3], "-", "{}", row);
-    // The commit is listed under the row.
-    assert!(
-        redact_shas(&out.stdout).contains("      [sha]"),
-        "{}",
-        out.stdout
-    );
+/// The CI cache's image entry for `meta/app`.
+fn cached_images(env: &TestEnv) -> PathBuf {
+    let entries = env.cache_entries("images");
+    assert_eq!(entries.len(), 1, "{:?}", entries);
+    env.cache.join("images").join(&entries[0])
 }
 
-#[test]
-fn cache_update_warms_without_a_checkout() {
-    let env = TestEnv::new("art_cache_update");
-    let bare = env.artefact_repo("app", &[("app.bin", "x")]);
-    env.write_config(&entry_config(&env, &bare, "main"));
-
-    let out = env.run_in(&env.playground, &["cache", "update"]);
-    assert!(out.success, "{}{}", out.stdout, out.stderr);
-    assert!(!env.playground.join("meta/app").exists());
-    artefact_entry(&env);
-
-    env.registry().clear_log();
-    assert!(env.run(&["clone"]).success);
-    assert_eq!(blob_downloads(&env), 0);
+/// Make the image of `commit` look unused since 2000.
+fn age(entry: &Path, commit: &str) {
+    let marker = entry.join("gitscale-pins").join(commit);
+    assert!(marker.is_file(), "{}", marker.display());
+    let touched = std::process::Command::new("touch")
+        .args(["-d", "2000-01-01", marker.to_str().unwrap()])
+        .status()
+        .unwrap();
+    assert!(touched.success());
 }
 
+/// A blob that no longer matches its digest is never used: it is deleted and
+/// downloaded again.
 #[test]
-fn cache_repair_drops_a_damaged_blob_and_the_next_clone_heals_it() {
-    let env = TestEnv::new("art_cache_repair");
+fn a_damaged_blob_is_downloaded_again() {
+    let env = TestEnv::new("art_damaged_blob");
     let bare = env.artefact_repo("app", &[("app.bin", "intact")]);
     env.write_config(&entry_config(&env, &bare, "main"));
-    assert!(env.run(&["clone"]).success);
+    assert!(env.run(&["pull"]).success);
 
-    let blobs = artefact_entry(&env).join("blobs/sha256");
+    let blobs = image_store(&env).join("blobs/sha256");
     let biggest = std::fs::read_dir(&blobs)
         .unwrap()
         .flatten()
@@ -982,18 +1040,129 @@ fn cache_repair_drops_a_damaged_blob_and_the_next_clone_heals_it() {
     std::fs::set_permissions(&biggest, std::fs::Permissions::from_mode(0o644)).unwrap();
     std::fs::write(&biggest, "rot").unwrap();
 
-    let out = env.run_in(&env.playground, &["cache", "repair"]);
+    std::fs::remove_dir_all(env.playground.join("meta")).unwrap();
+    env.registry().clear_log();
+    assert!(env.run(&["pull"]).success);
+    assert_eq!(read(&env, "meta/app/dist/app.bin"), "intact");
+    // The damaged one, and only that — manifest or layer, whichever it was.
+    let gets = env.registry().count("GET", "");
+    assert_eq!(gets, 1, "{:?}", env.registry().log());
+}
+
+/// `clean --gc` drops the images nothing has used within the period, and the
+/// layers no remaining image needs.
+#[test]
+fn clean_gc_drops_cold_images_and_their_blobs() {
+    let env = TestEnv::new("art_clean_gc");
+    let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
+    let old = layered(&env, &bare, "app v1");
+    env.write_config(&entry_config(&env, &bare, "main"));
+    assert!(env.run(&["pull"]).success);
+    env.push_commit(&bare, "main", "README.md", "v2");
+    let new = layered(&env, &bare, "app v2");
+    assert!(env.run(&["pull"]).success);
+
+    let entry = image_store(&env);
+    let blobs = || {
+        std::fs::read_dir(entry.join("blobs/sha256"))
+            .unwrap()
+            .count()
+    };
+    let before = blobs();
+    age(&entry, &old);
+
+    let out = env.run(&["clean", "--gc", "--keep-recent", "30d"]);
     assert!(out.success, "{}", out.stderr);
+    assert!(out.stdout.contains("1 image dropped"), "{}", out.stdout);
+    let index = std::fs::read_to_string(entry.join("index.json")).unwrap();
+    assert!(!index.contains(&old) && index.contains(&new), "{}", index);
+    // The old manifest and its app layer go; the shared vendor layer stays.
+    assert_eq!(blobs(), before - 2);
+}
+
+/// `pull` prunes the image store by itself — at most once a day, so the cost
+/// on every other pull is one stat.
+#[test]
+fn pull_prunes_cold_images_once_a_day() {
+    let env = TestEnv::new("art_daily_prune");
+    let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
+    let old = layered(&env, &bare, "app v1");
+    env.write_config(&format!(
+        "[clean]\nkeep_recent = \"30d\"\n\n{}",
+        entry_config(&env, &bare, "main")
+    ));
+    assert!(env.run(&["pull"]).success);
+    env.push_commit(&bare, "main", "README.md", "v2");
+    layered(&env, &bare, "app v2");
+    let entry = image_store(&env);
+    let held = || std::fs::read_to_string(entry.join("index.json")).unwrap();
+
+    // Pruned today already: nothing goes.
+    age(&entry, &old);
+    assert!(env.run(&["pull"]).success);
+    assert!(held().contains(&old));
+
+    // A day later, it does.
+    let marker = env.playground.join(".git/gitscale/images/gitscale-pruned");
+    let touched = std::process::Command::new("touch")
+        .args(["-d", "2000-01-01", marker.to_str().unwrap()])
+        .status()
+        .unwrap();
+    assert!(touched.success());
+    assert!(env.run(&["pull"]).success);
+    assert!(!held().contains(&old), "{}", held());
+}
+
+// ---------------------------------------------------------------------------
+// The CI cache
+// ---------------------------------------------------------------------------
+
+/// A pull in a CI job: the images go to the per-user cache, not the root.
+fn ci_pull(env: &TestEnv) {
+    let out = env.run_with_env(&[("CI", "true")], &["pull"]);
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+}
+
+#[test]
+fn cache_status_has_an_images_column() {
+    let env = TestEnv::new("art_cache_status");
+    let bare = env.artefact_repo("app", &[("app.bin", "x")]);
+    env.write_config(&entry_config(&env, &bare, "main"));
+    ci_pull(&env);
+    assert!(!env.playground.join(".git/gitscale/images").exists());
+
+    let out = env.run_with_env(&[], &["cache", "status"]);
+    assert!(out.success, "{}", out.stderr);
+    assert!(out.stdout.contains("IMAGES"), "{}", out.stdout);
+    let row = out.stdout.lines().find(|l| l.contains("meta/app")).unwrap();
+    let fields: Vec<&str> = row.split_whitespace().collect();
+    // REPO, SNAPSHOTS, IMAGES (two words), …
+    assert_eq!(fields[1], "-", "{}", row);
+    assert_ne!(fields[2], "-", "{}", row);
+    // The commit is listed under the row.
     assert!(
-        out.stdout
-            .contains("repair meta/app (1 damaged blob removed)"),
+        redact_shas(&out.stdout).contains("      [sha]"),
         "{}",
         out.stdout
     );
+}
 
-    std::fs::remove_dir_all(env.playground.join("meta")).unwrap();
-    assert!(env.run(&["clone"]).success);
-    assert_eq!(read(&env, "meta/app/app.bin"), "intact");
+/// `cache update` works anywhere, CI or not: it adds what a job would take,
+/// so a runner image can be warmed ahead of time.
+#[test]
+fn cache_update_warms_without_a_checkout() {
+    let env = TestEnv::new("art_cache_update");
+    let bare = env.artefact_repo("app", &[("app.bin", "x")]);
+    env.write_config(&entry_config(&env, &bare, "main"));
+
+    let out = env.run_with_env(&[], &["cache", "update"]);
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    assert!(!env.playground.join("meta/app").exists());
+    cached_images(&env);
+
+    env.registry().clear_log();
+    ci_pull(&env);
+    assert_eq!(blob_downloads(&env), 0);
 }
 
 #[test]
@@ -1002,47 +1171,30 @@ fn cache_compact_drops_cold_commits_and_their_blobs() {
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
     let old = layered(&env, &bare, "app v1");
     env.write_config(&entry_config(&env, &bare, "main"));
-    assert!(env.run(&["clone"]).success);
+    ci_pull(&env);
     env.push_commit(&bare, "main", "README.md", "v2");
     let new = layered(&env, &bare, "app v2");
-    assert!(env.run(&["pull"]).success);
+    ci_pull(&env);
 
-    let entry = artefact_entry(&env);
+    let entry = cached_images(&env);
     let blobs = || {
         std::fs::read_dir(entry.join("blobs/sha256"))
             .unwrap()
             .count()
     };
     let before = blobs();
-    // The old commit has not been wanted for a long time.
-    let marker = entry.join("gitscale-pins").join(&old);
-    assert!(marker.is_file());
-    let touched = std::process::Command::new("touch")
-        .args(["-d", "2000-01-01", marker.to_str().unwrap()])
-        .status()
-        .unwrap();
-    assert!(touched.success());
+    age(&entry, &old);
 
-    let out = env.run_in(
-        &env.playground,
-        &["cache", "compact", "--keep-recent", "30d"],
-    );
+    let out = env.run_with_env(&[], &["cache", "compact", "--keep-recent", "30d"]);
     assert!(out.success, "{}", out.stderr);
     assert!(out.stdout.contains("1 pin dropped"), "{}", out.stdout);
     let index = std::fs::read_to_string(entry.join("index.json")).unwrap();
     assert!(!index.contains(&old) && index.contains(&new), "{}", index);
     // The old manifest and its app layer go; the shared vendor layer stays.
-    assert_eq!(
-        blobs(),
-        before - 2,
-        "{:?}",
-        std::fs::read_dir(entry.join("blobs/sha256"))
-            .unwrap()
-            .count()
-    );
+    assert_eq!(blobs(), before - 2);
 
     std::fs::remove_dir_all(env.playground.join("meta")).unwrap();
     env.registry().clear_log();
-    assert!(env.run(&["clone"]).success);
+    ci_pull(&env);
     assert_eq!(blob_downloads(&env), 0);
 }

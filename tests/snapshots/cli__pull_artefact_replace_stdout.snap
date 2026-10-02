@@ -1,6 +1,7 @@
 ---
 source: tests/cli.rs
+assertion_line: 214
 expression: redact_shas(&out.stdout)
 ---
-Cloning missing repos...
+Pulling latest changes...
   ok    meta/app (artefact [sha])

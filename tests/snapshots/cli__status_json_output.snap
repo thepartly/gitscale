@@ -1,29 +1,32 @@
 ---
 source: tests/cli.rs
+assertion_line: 1127
 expression: parsed
 ---
 [
   {
     "ahead": 0,
+    "artefact_use": "-",
     "behind": 0,
-    "cache": "mirror",
     "class": "any",
     "clean": true,
     "current_ref": "[ref]",
     "declared_ref": "main",
-    "detached": false,
+    "detached": true,
     "directory": "libs/mylib",
     "exists": true,
     "expected_ref": "main",
+    "foreign": false,
     "implicit": false,
     "kind": "source",
-    "mode": "readwrite",
     "notes": [],
+    "pinned_by": null,
     "reason": "only",
     "requests": [
       {
         "ahead": false,
         "chain": [],
+        "commit": "[commit]",
         "directory": "libs/mylib",
         "from": "root",
         "missing": false,
@@ -41,13 +44,9 @@ expression: parsed
     "stale": false,
     "symlink": false,
     "symlink_target": "",
+    "topic": null,
     "unread": null,
     "unresolved": null,
     "untracked_links": []
-  },
-  {
-    "bytes": "[bytes]",
-    "cache_dir": "[cache-dir]",
-    "entries": 1
   }
 ]

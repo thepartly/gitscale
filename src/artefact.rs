@@ -1,14 +1,18 @@
-//! Artefact mode: prebuilt files published to an OCI registry by the source
+//! Artefacts: prebuilt files published to an OCI registry by the source
 //! repository's pipeline, one image per commit, and unpacked read-only into
 //! the workspace instead of a git checkout.
 //!
 //! Two halves. The producer runs `gitscale artefact publish`: the globs in its
 //! own `[artefact]` table pick the files, each group becomes one reproducible
 //! gzip tar layer, and the image is tagged with the full commit it was built
-//! from. The consumer declares an entry with `mode = "artefact"`: its revision
-//! is resolved to a commit with `git ls-remote`, exactly as a git entry's
-//! would be, and that commit's image is what gets installed. Git decides which
-//! commit a revision means; the registry only stores one image per commit.
+//! from. Every file keeps its repository path, and every one is either
+//! tracked at that commit with the same content or ignored: the artefact
+//! policy, which `publish` enforces. The consumer declares an entry with
+//! `artefact = "replace"` — the image instead of a checkout — or `"overlay"`
+//! — a source checkout with the image's untracked files laid over it. Its
+//! revision is resolved to a commit exactly as a git entry's would be, and
+//! that commit's image is what gets installed. Git decides which commit a
+//! revision means; the registry only stores one image per commit.
 
 use anyhow::{bail, Context, Result};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
@@ -18,7 +22,6 @@ use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
-use crate::cache::Cache;
 use crate::config::{
     find_config, load_config, ArtefactSpec, GitScaleConfig, RepoEntry, CONFIG_FILENAME,
 };
@@ -27,6 +30,7 @@ use crate::registry::{
     image_for, Access, Client, HashingWriter, Image, CONFIG_MEDIA_TYPE, LAYER_MEDIA_TYPE,
     MANIFEST_MEDIA_TYPE,
 };
+use crate::store::ImageStore;
 
 const TITLE: &str = "org.opencontainers.image.title";
 
@@ -42,14 +46,14 @@ const SOURCE: &str = "org.opencontainers.image.source";
 // Patterns
 // ---------------------------------------------------------------------------
 
-/// Whether `pattern` is a glob `[artefact]` accepts: relative to `root`,
-/// staying below it, and one `globset` compiles.
+/// Whether `pattern` is a glob `[artefact]` accepts: relative to the
+/// repository, staying inside it, and one `globset` compiles.
 pub fn check_pattern(pattern: &str) -> Result<()> {
     if pattern.is_empty() {
         bail!("an empty pattern matches nothing");
     }
     if pattern.starts_with('/') {
-        bail!("\"{}\" must be relative to the artefact root", pattern);
+        bail!("\"{}\" must be relative to the repository root", pattern);
     }
     if pattern.split('/').any(|part| part == ".." || part == ".") {
         bail!(
@@ -118,12 +122,29 @@ pub struct PackedLayer {
 /// leaves `root` is refused.
 pub fn collect_files(root: &Path) -> Result<Vec<String>> {
     let mut files = Vec::new();
-    walk(root, root, &mut files)?;
+    walk(root, root, &mut files, None)?;
     files.sort();
     Ok(files)
 }
 
-fn walk(root: &Path, dir: &Path, files: &mut Vec<String>) -> Result<()> {
+/// [`collect_files`], without refusing a symlink that leaves `root`: those
+/// come back on their own, with their targets. A repository holds such links
+/// that no artefact ships — the ones gitscale plants for its dependencies —
+/// so only one a pattern selects is an error.
+fn collect_candidates(root: &Path) -> Result<(Vec<String>, BTreeMap<String, PathBuf>)> {
+    let mut files = Vec::new();
+    let mut escaping = BTreeMap::new();
+    walk(root, root, &mut files, Some(&mut escaping))?;
+    files.sort();
+    Ok((files, escaping))
+}
+
+fn walk(
+    root: &Path,
+    dir: &Path,
+    files: &mut Vec<String>,
+    mut escaping: Option<&mut BTreeMap<String, PathBuf>>,
+) -> Result<()> {
     let listing = fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))?;
     for found in listing {
         let found = found?;
@@ -141,18 +162,23 @@ fn walk(root: &Path, dir: &Path, files: &mut Vec<String>) -> Result<()> {
         if kind.is_symlink() {
             let target = fs::read_link(&path)?;
             if !link_stays_inside(Path::new(&rel), &target) {
-                bail!(
-                    "{} is a symlink to {}, outside the artefact root",
-                    rel,
-                    target.display()
-                );
+                match escaping.as_deref_mut() {
+                    Some(escaping) => {
+                        escaping.insert(rel.clone(), target);
+                    }
+                    None => bail!(
+                        "{} is a symlink to {}, outside the repository",
+                        rel,
+                        target.display()
+                    ),
+                }
             }
             files.push(rel);
         } else if kind.is_dir() {
-            walk(root, &path, files)?;
+            walk(root, &path, files, escaping.as_deref_mut())?;
         } else if kind.is_file() {
             files.push(rel);
-        } else {
+        } else if escaping.is_none() {
             bail!("{} is neither a file, a directory nor a symlink", rel);
         }
     }
@@ -205,11 +231,7 @@ pub fn assign(spec: &ArtefactSpec, files: &[String]) -> Result<Vec<(String, Vec<
     }
     for (layer, files) in spec.layers.iter().zip(&assigned) {
         if files.is_empty() {
-            bail!(
-                "layer \"{}\" matches no files under {}",
-                layer.name,
-                spec.root
-            );
+            bail!("layer \"{}\" matches no files", layer.name);
         }
     }
     Ok(spec
@@ -220,31 +242,32 @@ pub fn assign(spec: &ArtefactSpec, files: &[String]) -> Result<Vec<(String, Vec<
         .collect())
 }
 
-/// Pack the files `spec` selects under `base` into one layer per group,
-/// written to `work`.
+/// Pack the files `spec` selects in the repository at `base` into one layer
+/// per group, written to `work`. Every path is the repository's own, so the
+/// image unpacks to where a checkout of the commit plus its build put each
+/// file.
 pub fn pack(spec: &ArtefactSpec, base: &Path, work: &Path) -> Result<Vec<PackedLayer>> {
-    let root = base.join(&spec.root);
-    if !root.is_dir() {
-        bail!(
-            "the artefact root {} does not exist — has the build run?",
-            root.display()
-        );
-    }
     // The top-level `.gitscale.toml` of every image is the repository's own,
-    // carried by the config layer; one under the artefact root would clash
-    // with it, and is not shipped.
-    let files: Vec<String> = collect_files(&root)?
-        .into_iter()
-        .filter(|f| f != CONFIG_FILENAME)
-        .collect();
+    // carried by the config layer, and is not shipped twice.
+    let (files, escaping) = collect_candidates(base)?;
+    let files: Vec<String> = files.into_iter().filter(|f| f != CONFIG_FILENAME).collect();
     let groups = assign(spec, &files)?;
+    for file in groups.iter().flat_map(|(_, files)| files) {
+        if let Some(target) = escaping.get(file) {
+            bail!(
+                "{} is a symlink to {}, outside the repository",
+                file,
+                target.display()
+            );
+        }
+    }
     fs::create_dir_all(work)?;
     groups
         .into_iter()
         .enumerate()
         .map(|(i, (name, files))| {
             let path = work.join(format!("layer-{}.tar.gz", i));
-            let (digest, size, diff_id) = write_layer(&root, &files, &path)
+            let (digest, size, diff_id) = write_layer(base, &files, &path)
                 .with_context(|| format!("cannot pack layer \"{}\"", name))?;
             Ok(PackedLayer {
                 name,
@@ -414,6 +437,10 @@ pub struct Marker {
     /// `None` in a fetch's marker when the commit has no image yet.
     pub digest: Option<String>,
     pub image: String,
+    /// For an overlay: the paths it wrote into the source checkout, which
+    /// the next overlay removes before laying its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
 }
 
 fn read_marker(path: &Path) -> Option<Marker> {
@@ -436,9 +463,8 @@ fn write_marker(path: &Path, marker: &Marker) -> Result<()> {
 /// Never inside the checkout: every file there belongs to the artefact, dot
 /// files included, and a name gitscale reserved there would be one an
 /// artefact could not ship. The records live in the workspace repository's
-/// git directory — per worktree, since each has checkouts of its own — or,
-/// for a workspace that is not the top of a repository, in `.gitscale/`
-/// beside its config.
+/// git directory, per worktree, since each has checkouts of its own — and git
+/// deletes them with the worktree.
 pub struct Markers {
     installed: PathBuf,
     remote: PathBuf,
@@ -446,12 +472,8 @@ pub struct Markers {
 
 impl Markers {
     pub fn new(config_root: &Path, directory: &str) -> Markers {
-        let dir = if crate::git::is_repo_root(config_root) {
-            crate::git::git_path(config_root, "gitscale/artefacts")
-        } else {
-            None
-        }
-        .unwrap_or_else(|| config_root.join(".gitscale/artefacts"));
+        let dir = crate::git::git_path(config_root, "gitscale/artefacts")
+            .unwrap_or_else(|| config_root.join(".git/gitscale/artefacts"));
         // Readable, and unique: two workspaces in one repository may declare
         // the same directory.
         let absolute = fs::canonicalize(config_root)
@@ -474,13 +496,6 @@ impl Markers {
             remote: dir.join(format!("{}.remote.json", key)),
         }
     }
-}
-
-/// Whether an artefact has been installed into `dest`: the record says so,
-/// and the files are there. A checkout somebody deleted is not installed,
-/// whatever the record remembers.
-pub fn is_downloaded(markers: &Markers, dest: &Path) -> bool {
-    !is_empty_dir(dest) && read_marker(&markers.installed).is_some()
 }
 
 /// The commit installed into the artefact checkout at `directory`, if any.
@@ -638,15 +653,7 @@ fn set_write_bits(dest: &Path, writable: bool) -> Result<()> {
         if kind.is_dir() {
             set_write_bits(&path, writable)?;
         } else if kind.is_file() {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&path)?.permissions();
-            let mode = perms.mode();
-            perms.set_mode(if writable {
-                mode | 0o200
-            } else {
-                mode & !0o222
-            });
-            fs::set_permissions(&path, perms)?;
+            set_write_bits_file(&path, writable)?;
         }
     }
     Ok(())
@@ -654,6 +661,48 @@ fn set_write_bits(dest: &Path, writable: bool) -> Result<()> {
 
 fn apply_readonly(dest: &Path) -> Result<()> {
     set_write_bits(dest, false)
+}
+
+/// Clear or restore the owner's write bit on one file.
+fn set_write_bits_file(path: &Path, writable: bool) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(path)?.permissions();
+    let mode = perms.mode();
+    perms.set_mode(if writable {
+        mode | 0o200
+    } else {
+        mode & !0o222
+    });
+    fs::set_permissions(path, perms)?;
+    Ok(())
+}
+
+/// Best effort: a file about to be replaced may be one an earlier overlay
+/// made read-only.
+fn make_writable(path: &Path) {
+    if !path.is_symlink() {
+        let _ = set_write_bits_file(path, true);
+    }
+}
+
+/// Empty the artefact checkout at `dest` and drop its install record: what
+/// becomes of an image whose directory is about to hold a source checkout.
+pub fn uninstall(config_root: &Path, directory: &str) -> Result<()> {
+    let dest = config_root.join(directory);
+    if dest.is_dir() {
+        restore_writable(&dest)?;
+        clean_files(&dest)?;
+        fs::remove_dir(&dest).with_context(|| format!("cannot remove {}", dest.display()))?;
+    }
+    forget_install(config_root, directory);
+    Ok(())
+}
+
+/// The files the overlay of the checkout at `directory` wrote, relative to it.
+pub fn overlay_files(config_root: &Path, directory: &str) -> Vec<String> {
+    read_marker(&Markers::new(config_root, directory).installed)
+        .map(|m| m.files)
+        .unwrap_or_default()
 }
 
 fn restore_writable(dest: &Path) -> Result<()> {
@@ -679,13 +728,13 @@ fn clean_files(dest: &Path) -> Result<()> {
 // Consumer operations
 // ---------------------------------------------------------------------------
 
-/// What one command needs to work with artefacts: where images live, a
-/// registry client, and the cache, if it is on.
+/// What one command needs to work with artefacts: where checkouts live, a
+/// registry client, and the image store, when there is one to keep images in.
 pub struct Artefacts {
     config_root: PathBuf,
     registries: BTreeMap<String, String>,
     client: Client,
-    cache: Option<Cache>,
+    images: Option<ImageStore>,
 }
 
 /// What [`Artefacts::describe`] found.
@@ -716,11 +765,11 @@ pub enum Pulled {
 }
 
 /// The blobs an install unpacks, and whatever has to stay alive while it
-/// does: the cache entry's lock, or the temporary directory the layers were
+/// does: the image entry's lock, or the temporary directory the layers were
 /// downloaded to.
 struct Obtained {
     layers: Vec<(PathBuf, bool)>,
-    _lock: Option<crate::cache::Lock>,
+    _lock: Option<crate::store::Lock>,
     temp: Option<PathBuf>,
 }
 
@@ -733,12 +782,12 @@ impl Drop for Obtained {
 }
 
 impl Artefacts {
-    pub fn new(config: &GitScaleConfig, config_root: &Path, cache: Option<Cache>) -> Self {
+    pub fn new(config: &GitScaleConfig, config_root: &Path, images: Option<ImageStore>) -> Self {
         Artefacts {
             config_root: config_root.to_path_buf(),
             registries: config.registries.clone(),
             client: Client::new(),
-            cache,
+            images,
         }
     }
 
@@ -762,29 +811,112 @@ impl Artefacts {
             .ok_or_else(|| missing(entry, image, commit))
     }
 
-    /// Install the image of the commit `entry`'s revision names into `dest`.
-    pub fn clone(&self, entry: &RepoEntry, dest: &Path) -> Result<String> {
-        let (image, commit) = self.locate(entry)?;
-        let digest = self.require(entry, &image, &commit)?;
-        self.install(entry, dest, &image, &commit, &digest)?;
-        Ok(commit)
-    }
-
-    /// Bring `dest` to the commit `entry`'s revision names now. Nothing to do,
-    /// and nothing asked of the registry, when it is already there — unless a
-    /// fetch saw that commit's image re-published since.
-    pub fn pull(&self, entry: &RepoEntry, dest: &Path) -> Result<Pulled> {
-        let (image, commit) = self.locate(entry)?;
+    /// Bring `dest` to the image of `commit`, which resolution chose for
+    /// `entry`. Nothing to do, and nothing asked of the registry, when it is
+    /// already there — unless a fetch saw that commit's image re-published
+    /// since.
+    pub fn pull(&self, entry: &RepoEntry, dest: &Path, commit: &str) -> Result<Pulled> {
+        let image = image_for(&entry.repo_url, &self.registries)?;
         let state = state_at(entry, dest, &self.markers(entry));
         if let Some(installed) = &state.installed {
             let republished = state.flags.iter().any(|f| f == "changed");
             if installed.commit == commit && installed.revision == entry.revision && !republished {
-                return Ok(Pulled::Current(commit));
+                return Ok(Pulled::Current(commit.to_string()));
             }
         }
-        let digest = self.require(entry, &image, &commit)?;
-        self.install(entry, dest, &image, &commit, &digest)?;
-        Ok(Pulled::Updated(commit))
+        let digest = self.require(entry, &image, commit)?;
+        self.install(entry, dest, &image, commit, &digest)?;
+        Ok(Pulled::Updated(commit.to_string()))
+    }
+
+    /// Lay the image of `commit` over the source checkout at `dest`: every
+    /// file it ships that the checkout does not track. Under the artefact
+    /// policy those are the ignored files a build of that commit would have
+    /// left there; a tracked file is the commit's own, and a modified one the
+    /// user's. The previous overlay's files go first, so nothing a later
+    /// build no longer makes is left behind. `writable` leaves the files
+    /// writable, for a checkout somebody develops in.
+    pub fn overlay(
+        &self,
+        entry: &RepoEntry,
+        dest: &Path,
+        commit: &str,
+        writable: bool,
+    ) -> Result<Pulled> {
+        let markers = self.markers(entry);
+        let previous = read_marker(&markers.installed);
+        if previous.as_ref().is_some_and(|m| m.commit == commit) {
+            return Ok(Pulled::Current(commit.to_string()));
+        }
+        let image = image_for(&entry.repo_url, &self.registries)?;
+        let digest = self.require(entry, &image, commit)?;
+        let obtained = self.obtain(entry, &image, commit, &digest)?;
+        let temp = WorkDir(unique_temp("overlay"));
+        fs::create_dir_all(&temp.0)?;
+        for (blob, gzip) in &obtained.layers {
+            extract_layer(blob, &temp.0, *gzip)?;
+        }
+        let listed = crate::git::run_git(&["ls-files", "-z"], Some(dest), true)?;
+        let tracked: std::collections::HashSet<String> = String::from_utf8_lossy(&listed.stdout)
+            .split('\0')
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect();
+        // Gone until the new files are all in, so a failure part way is not
+        // taken for an overlay installed.
+        let _ = fs::remove_file(&markers.installed);
+        for rel in previous.iter().flat_map(|m| &m.files) {
+            let path = dest.join(rel);
+            if !tracked.contains(rel) && (path.is_file() || path.is_symlink()) {
+                make_writable(&path);
+                let _ = fs::remove_file(&path);
+            }
+        }
+        let mut written = Vec::new();
+        for rel in collect_files(&temp.0)? {
+            // The config layer's `.gitscale.toml` is for consumers to read;
+            // a source checkout has its own.
+            if tracked.contains(&rel) || rel == CONFIG_FILENAME {
+                continue;
+            }
+            let from = temp.0.join(&rel);
+            let to = dest.join(&rel);
+            if to.is_dir() && !to.is_symlink() {
+                continue;
+            }
+            if let Some(parent) = to.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("cannot create {}", parent.display()))?;
+            }
+            if to.is_symlink() || to.is_file() {
+                make_writable(&to);
+                fs::remove_file(&to).with_context(|| format!("cannot replace {}", to.display()))?;
+            }
+            if from.is_symlink() {
+                std::os::unix::fs::symlink(fs::read_link(&from)?, &to)?;
+            } else {
+                fs::copy(&from, &to).with_context(|| format!("cannot write {}", to.display()))?;
+                if !writable {
+                    set_write_bits_file(&to, false)?;
+                }
+            }
+            written.push(rel);
+        }
+        let marker = Marker {
+            revision: entry.revision.clone(),
+            commit: commit.to_string(),
+            digest: Some(digest),
+            image: image.reference(),
+            files: written,
+        };
+        write_marker(&markers.installed, &marker)?;
+        Ok(Pulled::Updated(commit.to_string()))
+    }
+
+    /// Whether the repository at `url` has an image published for `commit`.
+    pub fn has_image(&self, url: &str, commit: &str) -> Result<bool> {
+        let image = image_for(url, &self.registries)?;
+        Ok(self.client.manifest_digest(&image, commit)?.is_some())
     }
 
     /// Record what the remote has for `entry` now, without downloading it:
@@ -799,6 +931,7 @@ impl Artefacts {
                 commit: commit.clone(),
                 digest: digest.clone(),
                 image: image.reference(),
+                files: Vec::new(),
             },
         )?;
         if digest.is_none() {
@@ -834,6 +967,7 @@ impl Artefacts {
             commit: commit.clone(),
             digest: digest.clone(),
             image: image.reference(),
+            files: Vec::new(),
         };
         let flags = flags(entry, installed.as_ref(), Some(&now));
         Ok(Description {
@@ -860,30 +994,16 @@ impl Artefacts {
         read_marker(&self.markers(entry).installed).filter(|_| !is_empty_dir(&dest))
     }
 
-    /// Download the image `entry`'s revision names into the cache, touching
-    /// no checkout. `Ok(None)` when the cache is off.
+    /// Download the image `entry`'s revision names into the image store,
+    /// touching no checkout. `Ok(None)` when there is no store.
     pub fn warm(&self, entry: &RepoEntry) -> Result<Option<String>> {
-        if self.cache.is_none() {
+        if self.images.is_none() {
             return Ok(None);
         }
         let (image, commit) = self.locate(entry)?;
         let digest = self.require(entry, &image, &commit)?;
         self.obtain(entry, &image, &commit, &digest)?;
         Ok(Some(commit))
-    }
-
-    /// Re-check every blob `entry`'s cache entry holds, deleting the damaged
-    /// ones. `None` when there is no entry.
-    pub fn repair(&self, entry: &RepoEntry) -> Result<Option<usize>> {
-        let Some(cache) = &self.cache else {
-            return Ok(None);
-        };
-        let path = cache.artefact_path(&crate::git::remote_url(entry));
-        if !crate::oci_layout::Layout::exists(&path) {
-            return Ok(None);
-        }
-        let _lock = cache.lock(&path)?;
-        crate::oci_layout::Layout::new(path).verify().map(Some)
     }
 
     /// The `.gitscale.toml` the image of `commit` carries in its config
@@ -899,11 +1019,11 @@ impl Artefacts {
         };
         let image = image_for(url, &self.registries)?;
         let entry = self
-            .cache
+            .images
             .as_ref()
-            .map(|cache| (cache, cache.artefact_path(&crate::ci::remote_url(url))));
+            .map(|images| (images, images.path(&crate::ci::remote_url(url))));
         let _lock = match &entry {
-            Some((cache, path)) => Some(cache.lock(path)?),
+            Some((images, path)) => Some(images.lock(path)?),
             None => None,
         };
         let layout = entry
@@ -1004,6 +1124,7 @@ impl Artefacts {
             commit: commit.to_string(),
             digest: Some(digest.to_string()),
             image: image.reference(),
+            files: Vec::new(),
         };
         write_marker(&markers.remote, &marker)?;
         // Last: it is what says the artefact is here.
@@ -1011,8 +1132,8 @@ impl Artefacts {
     }
 
     /// The layers of the image `digest`, on local disk and checked: from the
-    /// cache, downloading into it whatever it does not hold, or — with the
-    /// cache off — downloaded to a temporary directory beside the checkout.
+    /// image store, downloading into it whatever it does not hold, or — with
+    /// no store — downloaded to a temporary directory.
     fn obtain(
         &self,
         entry: &RepoEntry,
@@ -1020,7 +1141,7 @@ impl Artefacts {
         commit: &str,
         digest: &str,
     ) -> Result<Obtained> {
-        let Some(cache) = &self.cache else {
+        let Some(images) = &self.images else {
             let temp = unique_temp("download");
             fs::create_dir_all(&temp)
                 .with_context(|| format!("cannot create {}", temp.display()))?;
@@ -1039,11 +1160,11 @@ impl Artefacts {
             return Ok(obtained);
         };
 
-        let path = cache.artefact_path(&crate::git::remote_url(entry));
-        // Held until the install has unpacked everything: a compaction must
-        // not delete a blob between the download and the extraction, and N
-        // cold jobs at once download each blob once.
-        let lock = cache.lock(&path)?;
+        let path = images.path(&crate::git::remote_url(entry));
+        // Held until the install has unpacked everything: a prune must not
+        // delete a blob between the download and the extraction, and N cold
+        // jobs at once download each blob once.
+        let lock = images.lock(&path)?;
         let layout = crate::oci_layout::Layout::new(path.clone());
         layout.ensure()?;
         let manifest_path = match layout.verified_blob(digest) {
@@ -1073,7 +1194,7 @@ impl Artefacts {
             layers.push((blob, gzip));
         }
         layout.record(commit, digest, bytes.len() as u64)?;
-        cache.touch_artefact(&path, commit);
+        images.touch(&path, commit);
         Ok(Obtained {
             layers,
             _lock: Some(lock),
@@ -1185,6 +1306,26 @@ pub fn publish(
     let work = WorkDir(unique_temp("publish"));
     let mut layers = vec![pack_config(base, &work.0)?];
     layers.extend(pack(spec, base, &work.0)?);
+
+    // Every file the image ships must be what a checkout of the commit, plus
+    // its build, holds at that path — or an overlay of it, and a consumer
+    // that develops it, end up with files that are neither.
+    match &commit {
+        Ok(commit) => {
+            // The config layer is the repository's own `.gitscale.toml`,
+            // which a consumer reads rather than unpacks over anything.
+            let shipped: Vec<String> = layers
+                .iter()
+                .filter(|l| l.name != CONFIG_LAYER)
+                .flat_map(|l| l.files.clone())
+                .collect();
+            let broken = policy_violations(base, commit, &shipped)?;
+            if !broken.is_empty() {
+                bail!("{}", describe_violations(&broken, commit));
+            }
+        }
+        Err(e) => writeln!(out, "  policy: not checked ({})", e)?,
+    }
     let config_blob = image_config(&layers);
     let config_digest = crate::registry::sha256_digest(&config_blob);
 
@@ -1285,6 +1426,115 @@ pub fn publish(
     Ok(())
 }
 
+/// Why a shipped file breaks the artefact policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Violation {
+    /// Tracked at the commit, but the file published differs from it.
+    Modified,
+    /// Not in the commit, and not ignored either.
+    Untracked,
+}
+
+/// The files among `files` (paths relative to `base`) that break the artefact
+/// policy: each must be tracked at `commit` with the same content, or ignored
+/// by the repository's `.gitignore` rules.
+pub fn policy_violations(
+    base: &Path,
+    commit: &str,
+    files: &[String],
+) -> Result<Vec<(String, Violation)>> {
+    let git = |args: &[&str]| -> Result<String> {
+        let output = crate::git::run_git(args, Some(base), true)?;
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    let tracked: std::collections::HashSet<String> =
+        git(&["ls-tree", "-r", "-z", "--name-only", commit])?
+            .split('\0')
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect();
+    let changed: std::collections::HashSet<String> = git(&[
+        "diff",
+        "--name-only",
+        "--relative",
+        "--no-renames",
+        "-z",
+        commit,
+    ])?
+    .split('\0')
+    .filter(|p| !p.is_empty())
+    .map(str::to_string)
+    .collect();
+    let untracked: Vec<&String> = files.iter().filter(|f| !tracked.contains(*f)).collect();
+    let mut ignored = std::collections::HashSet::new();
+    if !untracked.is_empty() {
+        let list = untracked
+            .iter()
+            .map(|f| f.as_str())
+            .collect::<Vec<_>>()
+            .join("\0");
+        let output = crate::git::run_git_input(
+            &["check-ignore", "--no-index", "-z", "--stdin"],
+            Some(base),
+            list.as_bytes(),
+        )?;
+        // 1 is "nothing ignored", anything above an error.
+        if output.status.code().is_some_and(|c| c > 1) {
+            bail!(
+                "git check-ignore failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        ignored.extend(
+            String::from_utf8_lossy(&output.stdout)
+                .split('\0')
+                .filter(|p| !p.is_empty())
+                .map(str::to_string),
+        );
+    }
+    let mut broken = Vec::new();
+    for file in files {
+        if tracked.contains(file) {
+            if changed.contains(file) {
+                broken.push((file.clone(), Violation::Modified));
+            }
+        } else if !ignored.contains(file) {
+            broken.push((file.clone(), Violation::Untracked));
+        }
+    }
+    Ok(broken)
+}
+
+/// The error for files that break the policy, each with its fix.
+fn describe_violations(broken: &[(String, Violation)], commit: &str) -> String {
+    let width = broken
+        .iter()
+        .map(|(f, _)| f.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut text = format!(
+        "{} break the artefact policy (each must be tracked and unmodified, or ignored):",
+        crate::cache::plural(broken.len(), "file", "files")
+    );
+    for (file, why) in broken {
+        let reason = match why {
+            Violation::Modified => format!(
+                "tracked, modified since {} — commit it, or leave it out of [artefact]",
+                short_sha(commit)
+            ),
+            Violation::Untracked => {
+                let ignore = match file.split_once('/') {
+                    Some((top, _)) => format!("{}/", top),
+                    None => file.clone(),
+                };
+                format!("untracked, not ignored — add {} to .gitignore", ignore)
+            }
+        };
+        text.push_str(&format!("\n  {:<width$}   {}", file, reason, width = width));
+    }
+    text
+}
+
 fn ci_var(marker: &str, value: &str) -> Option<String> {
     let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
     let in_ci = match marker {
@@ -1382,7 +1632,6 @@ mod tests {
 
     fn spec(layers: &[(&str, &[&str], &[&str])]) -> ArtefactSpec {
         ArtefactSpec {
-            root: ".".into(),
             layers: layers
                 .iter()
                 .map(|(name, include, exclude)| LayerSpec {
@@ -1601,7 +1850,7 @@ mod tests {
             directory: "meta/app".into(),
             repo_url: "https://github.com/org/app.git".into(),
             revision: revision.into(),
-            mode: crate::config::RepoMode::Artefact,
+            artefact: Some(crate::config::ArtefactUse::Replace),
             recursive: true,
             ..Default::default()
         }
@@ -1613,6 +1862,7 @@ mod tests {
             commit: commit.into(),
             digest: digest.map(str::to_string),
             image: "ghcr.io/org/app/gitscale".into(),
+            files: Vec::new(),
         }
     }
 
@@ -1670,7 +1920,6 @@ mod tests {
         assert!(state_at(&entry("main"), &dest, &markers)
             .installed
             .is_none());
-        assert!(!is_downloaded(&markers, &dest));
         let _ = fs::remove_dir_all(&root);
     }
 

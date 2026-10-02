@@ -1,4 +1,4 @@
-# 2.9 Artefacts
+# 2.10 Artefacts
 
 - [How it works](#how-it-works)
 - [Declaring an artefact entry](#declaring-an-artefact-entry)
@@ -7,6 +7,7 @@
   - [What gets published](#what-gets-published)
   - [Patterns](#patterns)
   - [Groups and layers](#groups-and-layers)
+  - [The artefact policy](#the-artefact-policy)
   - [artefact publish](#artefact-publish)
 - [Looking at what is published](#looking-at-what-is-published)
   - [artefact show](#artefact-show)
@@ -18,14 +19,20 @@
   - [GitLab](#gitlab)
   - [GitHub](#github)
 - [The checkout](#the-checkout)
+- [Overlay: the build laid over its source](#overlay-the-build-laid-over-its-source)
+- [An artefact on a topic](#an-artefact-on-a-topic)
 - [Status](#status)
-- [Caching](#caching)
+- [Where images are kept](#where-images-are-kept)
 
-`mode = "artefact"` puts a repository's **build output** in the workspace
-instead of a git checkout: the files its own pipeline produced, read-only. The
-source repository publishes them to an OCI registry — GitLab's, GHCR, or any
-other — as one image per commit, and every workspace that declares the entry
-installs the image of the commit its revision names.
+An artefact entry puts a repository's **build output** in the workspace: the
+files its own pipeline produced. The source repository publishes them to an
+OCI registry — GitLab's, GHCR, or any other — as one image per commit, and every
+workspace that declares the entry installs the image of the commit its revision
+names:
+
+- `artefact = "replace"`: the image **instead of** a git checkout, read-only.
+- `artefact = "overlay"`: a git checkout of the commit, with the image's build
+  output **laid over** it — see [overlay](#overlay-the-build-laid-over-its-source).
 
 ## How it works
 
@@ -39,15 +46,18 @@ passed off as current.
 
 ## Declaring an artefact entry
 
-Nothing beyond what a git entry has. The image's location follows from `url`:
+Nothing beyond what a git entry has, and `artefact`. The image's location
+follows from `url`:
 
 ```toml
 [repos]
-"meta/frontend" = { url = "git@gitlab.com:org/frontend.git", revision = "main", mode = "artefact" }
-"meta/tools"    = { url = "https://github.com/org/tools.git", revision = "v2.1.0", mode = "artefact" }
-"meta/app"      = { url = "https://github.com/org/app.git", mode = "artefact" }   # default branch
-"meta/pinned"   = { url = "https://github.com/org/lib.git", revision = "9fceb02d0ae598e95dc970b74767f19372d61af8", mode = "artefact" }
+"meta/frontend" = { url = "git@gitlab.com:org/frontend.git", revision = "main", artefact = "replace" }
+"meta/tools"    = { url = "https://github.com/org/tools.git", revision = "v2.1.0", artefact = "replace" }
+"meta/app"      = { url = "https://github.com/org/app.git", artefact = "replace" }   # default branch
+"imports/core"  = { url = "https://github.com/org/core.git", revision = "v2.0.0", artefact = "overlay" }
 ```
+
+`gitscale add <dir> <url> <revision> --artefact replace` writes one.
 
 ## Which commit an entry gets
 
@@ -83,16 +93,13 @@ groups of glob patterns. Each group becomes one layer of the image; nobody
 builds or handles an archive by hand.
 
 ```toml
-[artefact]
-root = "dist"            # optional; patterns and archive paths are relative to it
-
 [[artefact.layer]]
 name    = "vendor"
-include = ["vendor/**"]
+include = ["dist/vendor/**"]
 
 [[artefact.layer]]
 name    = "app"
-include = ["**/*.js", "**/*.css", "index.html"]
+include = ["dist/**/*.js", "dist/**/*.css", "dist/index.html"]
 exclude = ["**/*.map"]
 ```
 
@@ -100,14 +107,19 @@ With one group, the layer tables can be left out:
 
 ```toml
 [artefact]
-root    = "dist"
-include = ["**"]
+include = ["dist/**"]
 exclude = ["**/*.map"]
 ```
 
-`root` defaults to the directory the config is in. Every key of `[artefact]` is
-checked when the config is read: an unknown key, a pattern that leaves `root`,
-or a group with nothing to include is an error, not a quietly smaller artefact.
+**Every path is the repository's own.** Patterns are relative to the
+repository, and a file is stored in the image at the path it has there:
+`dist/app.js` unpacks to `dist/app.js`, where a build of that commit would have
+put it. That is what lets an image be [laid over](#overlay-the-build-laid-over-its-source)
+a checkout of its source.
+
+Every key of `[artefact]` is checked when the config is read: an unknown key, a
+pattern that leaves the repository, or a group with nothing to include is an
+error, not a quietly smaller artefact.
 
 ### Patterns
 
@@ -118,18 +130,18 @@ less than meant.
 
 | Pattern | Matches |
 |---|---|
-| `**` | every file under `root` |
+| `**` | every file in the repository |
 | `vendor/**` | everything under `vendor/`, at any depth |
 | `vendor` | the same: naming a directory includes its contents |
-| `*.html` | `.html` files directly in `root` only |
+| `*.html` | `.html` files at the top of the repository only |
 | `**/*.js` | `.js` files at any depth |
 | `assets/*.png` | `.png` files directly in `assets/`, not in subdirectories |
 | `{img,fonts}/**` | everything under `img/` or `fonts/` |
 | `report-?.pdf` | `?` is exactly one character |
 
 - `*` stops at `/`; `**` crosses it.
-- Patterns are relative to `root`, and may not start with `/` or contain `.` or
-  `..` components.
+- Patterns are relative to the repository, and may not start with `/` or
+  contain `.` or `..` components.
 - Files are found by walking the filesystem, not git: build output is usually
   ignored. `.git` is never shipped.
 
@@ -138,7 +150,7 @@ less than meant.
 - **One layer per group, in the order listed.** The group's name is the
   layer's `org.opencontainers.image.title`.
 - **First match wins.** A file matching several groups goes to the earliest,
-  so a catch-all last group (`include = ["**"]`) is safe, and no file is in two
+  so a catch-all last group (`include = ["dist/**"]`) is safe, and no file is in two
   layers.
 - **Unmatched files are not shipped.**
 - **A group that matches nothing fails the publish**, so a broken build or a
@@ -146,8 +158,8 @@ less than meant.
 - **Layers are reproducible gzip tars**: entries sorted, ownership and times
   fixed, modes reduced to 0644 or 0755, a gzip header with no time or name. The
   same files give the same digests, build after build.
-- **Executable bits are kept.** Symlinks are kept when they point inside
-  `root`; one that points outside fails the publish.
+- **Executable bits are kept.** Symlinks are kept when they point inside the
+  repository; a selected one that points outside fails the publish.
 - **Consumers download only the layers they do not already hold**: when only
   `app` changes, `vendor` is not fetched again.
 
@@ -155,14 +167,37 @@ Split along how often things change: a large dependency layer that changes
 once a month, and a small application layer that changes every commit.
 
 **The repository's own `.gitscale.toml` is always shipped**, as a first layer
-of its own named `gitscale`, at the top of the artefact — even when `root` is a
-subdirectory that does not contain it. It is how a consumer learns the
-artefact's [dependencies](recursive-dependencies.md): resolution downloads just
-that layer, a few hundred bytes, before deciding anything else, and keeps it in
-the cache, where every commit that left the file alone shares it. A
-`.gitscale.toml` at the top of `root` is not shipped, since it would clash with
-it; and a group may not be named `gitscale`. The dependencies are linked inside
-the extracted artefact like any checkout's.
+of its own named `gitscale`, at the top of the artefact. It is how a consumer
+learns the artefact's [dependencies](recursive-dependencies.md): resolution
+downloads just that layer, a few hundred bytes, before deciding anything else,
+and keeps it with the images, where every commit that left the file alone
+shares it. A group never ships it a second time, and may not be named
+`gitscale`. The dependencies are linked inside the extracted artefact like any
+checkout's.
+
+### The artefact policy
+
+**Every file in an image is either tracked at its commit with the same
+content, or ignored by the repository's `.gitignore` rules.** Images hold two
+kinds of file: sources shared as they are — generated clients, schemas — and
+build output in its usual place (`dist/`, `target/`), which a repository
+ignores. Both sit at their repository paths, so an image laid over a checkout
+of its commit adds the build and changes nothing else.
+
+`artefact publish` enforces it, and fails before anything is pushed — a dry
+run too, since what it lists would never ship:
+
+```
+Error: 2 files break the artefact policy (each must be tracked and unmodified, or ignored):
+  src/client.ts   tracked, modified since 4f2a9c1 — commit it, or leave it out of [artefact]
+  dist/app.js     untracked, not ignored — add dist/ to .gitignore
+```
+
+The check compares the files with the commit being published — `--commit`, the
+job's own, or `HEAD` — and applies the ignore rules git would. The `gitscale`
+layer is exempt: it is the config the consumer resolves with, whatever state it
+is in. A dry run with no commit to compare with says `policy: not checked` and
+goes on.
 
 ### artefact publish
 
@@ -172,7 +207,8 @@ gitscale artefact publish [-C DIR] [--commit SHA] [--force] [--dry-run]
 
 Run in the source repository's pipeline, after the build:
 
-1. **Pack the groups** as described above.
+1. **Pack the groups** as described above, and check them against the
+   [artefact policy](#the-artefact-policy).
 2. **Identify the source.** The commit is `--commit`, else the job's own
    (`CI_COMMIT_SHA` in a GitLab job, `GITHUB_SHA` in GitHub Actions), else
    `git rev-parse HEAD`. The repository is the job's project (`CI_PROJECT_URL`;
@@ -375,7 +411,7 @@ A refusal names whichever of these is missing.
    GitHub's *Manage Actions access*.
 3. **GitLab producer**: exempt `*/gitscale` from the registry's cleanup policy,
    or pinned commits lose their images.
-4. **Consumer**: declare the entry with `mode = "artefact"`.
+4. **Consumer**: declare the entry with `artefact = "replace"` or `"overlay"`.
 
 ### GitLab
 
@@ -397,7 +433,7 @@ variables:
 
 test:
   script:
-    - gitscale clone
+    - gitscale pull
     - make test
 ```
 
@@ -432,7 +468,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: gitscale clone
+      - run: gitscale pull
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: make test
@@ -443,16 +479,17 @@ commit no branch will ever name.
 
 ## The checkout
 
-- **`clone`** resolves the revision, downloads every layer, checks each
+A `replace` entry's directory holds the image and nothing else.
+
+- **`pull`** resolves the revision, downloads every layer, checks each
   against its digest, unpacks them in order, and strips the write bits of every
-  file at any depth.
+  file at any depth. Once installed, it does nothing — and asks the registry
+  nothing — while the revision still names the installed commit. Otherwise it
+  downloads the new image first and only then replaces the files, so a
+  registry that fails part way leaves the installed version alone.
 - **`fetch`** resolves the revision and asks the registry whether that commit
   has an image, and records both. Nothing is downloaded, and no directory is
   created. A commit with no image is an error.
-- **`pull`** does nothing — and asks the registry nothing — when the revision
-  still names the installed commit. Otherwise it downloads the new image first
-  and only then replaces the files, so a registry that fails part way leaves
-  the installed version alone.
 - **`push`** and **`commit`** skip artefact entries; [`clean`](clean.md) keeps
   them whole.
 
@@ -460,10 +497,8 @@ The directory holds the artefact's files and nothing else — dot files
 included, all of them read-only, all of them replaced on update. GitScale
 assumes nothing about their names. What it records about a checkout — the
 revision, commit and image digest installed, and what the last fetch saw — is
-kept outside it, in the workspace repository's git directory
-(`.git/gitscale/artefacts/`, per worktree), or in `.gitscale/artefacts/` beside
-the config when the workspace is not the top of a git repository. A checkout
-deleted by hand is noticed as not installed, whatever was recorded.
+kept outside it, in the root worktree's git directory (`gitscale/artefacts/`).
+A checkout deleted by hand is noticed as not installed, whatever was recorded.
 
 An archive may not contain a path that leaves the directory, a symlink
 pointing out of it, or anything but files, directories and symlinks.
@@ -471,9 +506,45 @@ pointing out of it, or anything but files, directories and symlinks.
 Files are unpacked with the time of the download, not the archive's, so build
 tools never take them for older than their own outputs.
 
+## Overlay: the build laid over its source
+
+An `overlay` entry is a git checkout like any other — detached at its commit,
+read-only, a worktree of its [store](stores.md) — with the image of that commit
+laid over it: every file the image ships that the checkout does not track.
+Under the [policy](#the-artefact-policy) those are the ignored files a build of
+that commit would have left, so the checkout is the source tree with a correct
+build already in place, and nothing is rebuilt.
+
+- The image's `.gitscale.toml` is never laid: the checkout has its own.
+- When the checkout moves to another commit, the previous overlay's files are
+  removed and the new commit's laid.
+- The commit must have an image: off a topic, an overlay entry without one
+  fails, rather than handing over sources without their build.
+- [`clean`](clean.md) keeps the overlay's files, which are ignored, and
+  exactly what the overlay is for.
+
+Build tools may rebuild once anyway: an image carries no build fingerprints.
+
+## An artefact on a topic
+
+On a [topic](topics.md), an artefact entry follows the topic branch like any
+other:
+
+| Entry | Developed here | Following a remote branch |
+|---|---|---|
+| `replace` | A worktree of its source on the topic branch, writable: [`gitscale develop`](topics.md#gitscale-develop) takes the image away and checks the same commit out in its place | The image of the branch tip; with none — the producer does not publish on branches, or its pipeline has not finished — the source of the tip, detached and read-only |
+| `overlay` | On the topic branch, writable, the overlay of its commit laid over it while there is one | On the branch, with the tip's overlay; with none, no overlay is laid, and the previous one's files stay |
+
+It never falls back to the pinned tag, which would test without the change, and
+never uses an older commit's image. A topic artefact's dependencies are read
+from its source. Taken off the topic — by [`develop --stop`](topics.md#gitscale-develop)
+or by [promotion](topics.md#promotion-gitscale-upgrade) — a `replace` entry gets
+its image back.
+
 ## Status
 
-`REF` shows the installed commit. The flags:
+The `ARTEFACT` column says `replace` or `overlay`. For a `replace` entry, `REF`
+shows the installed commit. The flags:
 
 | Flag | Meaning |
 |---|---|
@@ -486,16 +557,16 @@ tools never take them for older than their own outputs.
 `--format json` adds an `artefact` object to the row, with the commit and
 digest installed and the ones the last fetch saw.
 
-## Caching
+## Where images are kept
 
-Images are kept per user in the [object cache](caching.md), beside the git
-mirrors and snapshots: a second workspace, worktree or CI job on the same
-machine downloads nothing, and a layer shared by several commits is stored
-once. Refs still come from the remote — the commit from `ls-remote`, the image
+On a developer machine, in the root's own [image store](stores.md#images):
+every worktree of the root shares it, and a layer shared by several commits is
+stored once. In CI, in the per-user [cache](stores.md#the-ci-cache), so the
+next job on the runner downloads nothing. Refs still come from the remote — the commit from `ls-remote`, the image
 digest from the registry — and every blob is checked against its digest when
 it is read, so a stale or damaged cache changes how many bytes cross the wire,
 never which files a checkout gets.
 
 ---
 
-[← 2.8 Cleaning](clean.md) · [Contents](README.md) · [Next → 3. Configuration file reference](configuration.md)
+[← 2.9 Cleaning](clean.md) · [Contents](README.md) · [Next → 3. Configuration file reference](configuration.md)

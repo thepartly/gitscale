@@ -1,6 +1,0 @@
----
-source: tests/cli.rs
-expression: out.stdout
----
-Pulling latest changes...
-  ok    libs/mylib

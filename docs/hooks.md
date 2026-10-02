@@ -1,4 +1,4 @@
-# 2.6 Hooks
+# 2.7 Hooks
 
 Two different things share the word "hook", and it is worth separating them up
 front:
@@ -40,7 +40,7 @@ executed via `sh -c` with the config root as the working directory. A non-zero
 exit fails the GitScale command. `sync` runs it once, not twice, even though it
 performs a pull internally.
 
-It does not run after `clone`, `fetch`, `push`, `commit`, `status` or `clean`.
+It does not run after `fetch`, `push`, `commit`, `status` or `clean`.
 
 When a [git hook](#git-hooks) triggered the pull, `post_sync` runs only if the
 repository is on that hook's [allowlist](#the-hook-allowlist); otherwise GitScale
@@ -69,17 +69,12 @@ gitscale hook install --local
 ```
 
 registers GitScale with git so that `gitscale pull` runs whenever a checkout or
-merge changes the working tree. A fresh clone, a `git checkout` that moves the
-declared revisions, or a `git worktree add` then materialises the
-sub-repositories without anyone remembering to run anything.
+merge changes the working tree. A fresh clone, a `git switch` onto or off a
+[topic](topics.md), a `git checkout` that moves the declared revisions, or a
+`git worktree add` then puts every checkout where it goes without anyone
+remembering to run anything.
 
-This is how a workspace is normally set up: `git clone` and nothing else. The
-pull the hook fires also honours
-[`[cache] adopt_root`](caching.md#adopting-a-root-repository), so the root
-repository joins the [object cache](caching.md) on the way — something plain
-`git clone` cannot do for itself. The pull a `git worktree add` fires leaves
-adoption alone: a linked worktree shares the main worktree's object store, so
-only a pull in the main worktree adopts it.
+This is how a workspace is normally set up: `git clone` and nothing else.
 
 ### Scopes
 
@@ -318,4 +313,4 @@ command to re-install with this repository added.
 
 ---
 
-[← 2.5 The object cache](caching.md) · [Contents](README.md) · [Next → 2.7 CI authentication](ci-authentication.md)
+[← 2.6 Topics](topics.md) · [Contents](README.md) · [Next → 2.8 CI authentication](ci-authentication.md)

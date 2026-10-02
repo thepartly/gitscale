@@ -6,31 +6,33 @@ use std::path::{Component, Path, PathBuf};
 
 pub const CONFIG_FILENAME: &str = ".gitscale.toml";
 
+/// How an entry uses the image its repository's pipeline published for a
+/// commit: instead of a checkout of the source, or laid over one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RepoMode {
-    Readonly,
-    Readwrite,
-    Artefact,
+pub enum ArtefactUse {
+    /// The image's files, all of them, and no checkout.
+    Replace,
+    /// A source checkout with every image file it does not track laid over
+    /// it.
+    Overlay,
 }
 
-impl fmt::Display for RepoMode {
+impl fmt::Display for ArtefactUse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RepoMode::Readonly => write!(f, "readonly"),
-            RepoMode::Readwrite => write!(f, "readwrite"),
-            RepoMode::Artefact => write!(f, "artefact"),
+            ArtefactUse::Replace => write!(f, "replace"),
+            ArtefactUse::Overlay => write!(f, "overlay"),
         }
     }
 }
 
-impl RepoMode {
+impl ArtefactUse {
     pub fn from_str_checked(s: &str) -> Result<Self> {
         match s {
-            "readonly" => Ok(RepoMode::Readonly),
-            "readwrite" => Ok(RepoMode::Readwrite),
-            "artefact" => Ok(RepoMode::Artefact),
+            "replace" => Ok(ArtefactUse::Replace),
+            "overlay" => Ok(ArtefactUse::Overlay),
             _ => bail!(
-                "invalid mode '{}', expected one of: readonly, readwrite, artefact",
+                "invalid artefact '{}', expected \"replace\" or \"overlay\"",
                 s
             ),
         }
@@ -42,7 +44,8 @@ pub struct RepoEntry {
     pub directory: String,
     pub repo_url: String,
     pub revision: String,
-    pub mode: RepoMode,
+    /// `None` for a plain source checkout.
+    pub artefact: Option<ArtefactUse>,
     pub recursive: bool,
     /// `override = true`: exactly this revision and nothing higher. It wins
     /// over every request from a repository the declaring one dominates, and
@@ -59,7 +62,7 @@ impl Default for RepoEntry {
             directory: String::new(),
             repo_url: String::new(),
             revision: String::new(),
-            mode: RepoMode::Readwrite,
+            artefact: None,
             recursive: true,
             is_override: false,
             singleton: None,
@@ -68,12 +71,19 @@ impl Default for RepoEntry {
 }
 
 impl RepoEntry {
-    pub fn is_readonly(&self) -> bool {
-        matches!(self.mode, RepoMode::Readonly | RepoMode::Artefact)
+    /// The image instead of a checkout: there is no git repository here.
+    pub fn is_artefact(&self) -> bool {
+        self.artefact == Some(ArtefactUse::Replace)
     }
 
-    pub fn is_artefact(&self) -> bool {
-        matches!(self.mode, RepoMode::Artefact)
+    pub fn is_overlay(&self) -> bool {
+        self.artefact == Some(ArtefactUse::Overlay)
+    }
+
+    /// As `status` shows it: `replace`, `overlay` or `-`.
+    pub fn artefact_label(&self) -> String {
+        self.artefact
+            .map_or_else(|| "-".to_string(), |a| a.to_string())
     }
 }
 
@@ -113,53 +123,13 @@ pub struct Hooks {
     pub on_pull_error: Option<OnHookError>,
 }
 
-/// How a clone may reuse a copy of a sub-repository already on this machine.
-#[derive(Debug, Clone, Default)]
-pub struct Share {
-    /// Copy borrowed objects in and drop the link once the clone is made.
-    ///
-    /// Off by default: borrowing is what saves the disk, and the workspace
-    /// borrowed from is normally the long-lived one. Turn it on where the
-    /// source may be pruned, moved or garbage-collected out from under the
-    /// clones — `git gc` there can delete objects only a borrower still
-    /// needs, and nothing warns when it does.
-    pub dissociate: bool,
-}
-
-/// The object cache: whether to use one, where it lives, and what it may do.
-///
-/// Per-user only, deliberately. `dir` defaults to this user's own data
-/// directory and there is no system-wide scope: a cache several users write
-/// through would give anything that poisons one entry a machine-wide reach —
-/// the blast radius `hook install --system` gets only after an explicit
-/// `--allow`, and something on by default can never ask for.
-#[derive(Debug, Clone)]
-pub struct CacheSettings {
-    /// On by default. `--no-cache` and `enabled = false` opt out, leaving
-    /// every clone and fetch to talk to the remote directly.
-    pub enabled: bool,
-    /// Where entries live. Empty means the default location — see
-    /// [`crate::cache::resolve_dir`].
-    pub dir: String,
-    /// Copy borrowed objects into each workspace and drop the link, as
-    /// `[share] dissociate` does for a source workspace. Costs the disk
-    /// saving, keeps the network one.
-    pub dissociate: bool,
-    /// Relink a root repository that was cloned by plain `git clone` to the
-    /// cache, reclaiming its duplicate objects. Off by default: it converts a
-    /// repository that stood on its own into one that depends on the cache.
-    pub adopt_root: bool,
-}
-
-impl Default for CacheSettings {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            dir: String::new(),
-            dissociate: false,
-            adopt_root: false,
-        }
-    }
+/// `[develop]`: which of the root's branches are built from pins rather than
+/// followed as a topic.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Develop {
+    /// Branch names or globs (`release/*`). Unset, the root pins only its
+    /// default branch; below the root an unset list says nothing.
+    pub pinned: Option<Vec<String>>,
 }
 
 /// Which untracked files `gitscale clean` keeps.
@@ -174,20 +144,25 @@ pub struct Clean {
     /// `git clean -e` unchanged, so a pattern means exactly what the same
     /// text on a `.gitignore` line would.
     pub exclude: Vec<String>,
+    /// How long an artefact image nothing has used is kept in the root's
+    /// image store, as written (`3months`). Unset means the default.
+    pub keep_recent: Option<String>,
 }
 
+/// How long an unused image stays in the root's store when `[clean]
+/// keep_recent` does not say.
+pub const DEFAULT_KEEP_RECENT: &str = "3months";
+
 /// What `gitscale artefact publish` ships from the repository this config
-/// belongs to: the files under `root` that each group's globs select, one
-/// image layer per group.
+/// belongs to: the files each group's globs select, one image layer per group.
+/// Paths are the repository's own, so an image laid over a checkout of its
+/// commit puts every file where the build would have.
 ///
-/// The producer's half of artefact mode. A consumer declares an entry with
-/// `mode = "artefact"` and never reads this table; it lives in the source
-/// repository, next to the build that makes the files.
+/// The producer's half of artefacts. A consumer declares an entry with
+/// `artefact = "replace"` or `"overlay"` and never reads this table; it lives
+/// in the source repository, next to the build that makes the files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtefactSpec {
-    /// Relative to the config's directory; patterns and the paths inside the
-    /// archive are relative to it. `"."` when not set.
-    pub root: String,
     /// In the order layers are written. A file goes to the first group that
     /// matches it.
     pub layers: Vec<LayerSpec>,
@@ -241,9 +216,8 @@ pub struct GitScaleConfig {
     pub registries: BTreeMap<String, String>,
     pub artefact: Option<ArtefactSpec>,
     pub hooks: Hooks,
-    pub share: Share,
     pub clean: Clean,
-    pub cache: CacheSettings,
+    pub develop: Develop,
 }
 
 #[derive(Deserialize)]
@@ -255,9 +229,8 @@ struct RawConfig {
     artefact: Option<RawArtefact>,
     repos: Option<BTreeMap<String, RawRepo>>,
     hooks: Option<RawHooks>,
-    share: Option<RawShare>,
     clean: Option<RawClean>,
-    cache: Option<RawCache>,
+    develop: Option<RawDevelop>,
 }
 
 // Unknown keys are errors here, unlike the older tables: a misspelt
@@ -266,7 +239,6 @@ struct RawConfig {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawArtefact {
-    root: Option<String>,
     include: Option<Vec<String>>,
     exclude: Option<Vec<String>>,
     layer: Option<Vec<RawLayer>>,
@@ -288,21 +260,15 @@ struct RawResolve {
 }
 
 #[derive(Deserialize)]
-struct RawCache {
-    enabled: Option<bool>,
-    dir: Option<String>,
-    dissociate: Option<bool>,
-    adopt_root: Option<bool>,
-}
-
-#[derive(Deserialize)]
 struct RawClean {
     exclude: Option<Vec<String>>,
+    keep_recent: Option<String>,
 }
 
 #[derive(Deserialize)]
-struct RawShare {
-    dissociate: Option<bool>,
+#[serde(deny_unknown_fields)]
+struct RawDevelop {
+    pinned: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -315,7 +281,7 @@ struct RawHooks {
 struct RawRepo {
     url: Option<String>,
     revision: Option<String>,
-    mode: Option<String>,
+    artefact: Option<String>,
     recursive: Option<bool>,
     #[serde(rename = "override")]
     is_override: Option<bool>,
@@ -352,24 +318,18 @@ pub fn load_config(config_path: &Path) -> Result<GitScaleConfig> {
 /// Read a config from its text. `config_path` names where it came from in
 /// every message: a file on disk, or a revision of a dependency's repository.
 pub fn parse_config(text: &str, config_path: &Path) -> Result<GitScaleConfig> {
-    let raw: RawConfig =
-        toml::from_str(text).with_context(|| format!("{}: invalid TOML", config_path.display()))?;
+    // The parser's own words, in this message: the CLI prints the outermost
+    // error only, and "invalid TOML" alone does not say which key.
+    let raw: RawConfig = toml::from_str(text)
+        .map_err(|e| anyhow::anyhow!("{}: invalid TOML: {}", config_path.display(), e))?;
 
     let registries = parse_registries(raw.storage.as_ref(), raw.registries.as_ref(), config_path)?;
     let artefact = parse_artefact(raw.artefact.as_ref(), config_path)?;
     let repos = parse_repos(raw.repos.as_ref(), config_path)?;
     let hooks = parse_hooks(raw.hooks.as_ref(), config_path)?;
-    let share = Share {
-        dissociate: raw
-            .share
-            .as_ref()
-            .and_then(|s| s.dissociate)
-            .unwrap_or(false),
-    };
-
     let clean = parse_clean(raw.clean.as_ref(), config_path)?;
-    let cache = parse_cache(raw.cache.as_ref(), config_path)?;
     let resolve = parse_resolve(raw.resolve.as_ref(), config_path)?;
+    let develop = parse_develop(raw.develop.as_ref(), config_path)?;
 
     Ok(GitScaleConfig {
         repos,
@@ -378,28 +338,29 @@ pub fn parse_config(text: &str, config_path: &Path) -> Result<GitScaleConfig> {
         registries,
         artefact,
         hooks,
-        share,
         clean,
-        cache,
+        develop,
     })
 }
 
-/// What a parent reads from a dependency's config: its `[repos]` and whether
-/// it is a singleton — validated, since they decide what gets cloned — and
-/// nothing else. The rest of that file belongs to the dependency used as a
-/// workspace of its own, and a table a parent never reads must not be able to
-/// break it.
+/// What a parent reads from a dependency's config: its `[repos]`, whether it
+/// is a singleton, and the branches it pins — validated, since they decide
+/// what gets cloned — and nothing else. The rest of that file belongs to the
+/// dependency used as a workspace of its own, and a table a parent never reads
+/// must not be able to break it.
 pub fn parse_dependency_config(text: &str, config_path: &Path) -> Result<GitScaleConfig> {
     #[derive(Deserialize)]
     struct Dependency {
         singleton: Option<bool>,
         repos: Option<BTreeMap<String, RawRepo>>,
+        develop: Option<RawDevelop>,
     }
-    let raw: Dependency =
-        toml::from_str(text).with_context(|| format!("{}: invalid TOML", config_path.display()))?;
+    let raw: Dependency = toml::from_str(text)
+        .map_err(|e| anyhow::anyhow!("{}: invalid TOML: {}", config_path.display(), e))?;
     Ok(GitScaleConfig {
         repos: parse_repos(raw.repos.as_ref(), config_path)?,
         singleton: raw.singleton.unwrap_or(false),
+        develop: parse_develop(raw.develop.as_ref(), config_path)?,
         ..GitScaleConfig::default()
     })
 }
@@ -414,6 +375,9 @@ pub fn load_config_optional(config_path: &Path) -> Option<GitScaleConfig> {
 /// The config governing `root` (found by searching upward from it, or from the
 /// current directory), and the workspace directory it lives in — what every
 /// multi-repo command starts from.
+///
+/// The workspace must be the top of a git repository: every store, record and
+/// checkout gitscale keeps lives in that repository's git directory.
 pub fn load_workspace(root: Option<&Path>) -> Result<(GitScaleConfig, PathBuf)> {
     let config_path = find_config(root)?;
     let config = load_config(&config_path)?;
@@ -421,6 +385,13 @@ pub fn load_workspace(root: Option<&Path>) -> Result<(GitScaleConfig, PathBuf)> 
         .parent()
         .expect("a config file always has a parent directory")
         .to_path_buf();
+    if !crate::git::is_repo_root(&config_root) {
+        bail!(
+            "{} is not the top of a git repository; a {} must sit at the top of one",
+            config_root.display(),
+            CONFIG_FILENAME
+        );
+    }
     Ok((config, config_root))
 }
 
@@ -594,9 +565,6 @@ fn parse_artefact(raw: Option<&RawArtefact>, config_path: &Path) -> Result<Optio
     };
     let at = |what: &str| format!("{}: artefact{}", config_path.display(), what);
 
-    let root = artefact.root.clone().unwrap_or_else(|| ".".to_string());
-    check_relative(&root).with_context(|| at(".root"))?;
-
     if artefact.layer.is_some() && (artefact.include.is_some() || artefact.exclude.is_some()) {
         bail!(
             "{}: use include and exclude directly in [artefact] for a single group, or \
@@ -658,7 +626,7 @@ fn parse_artefact(raw: Option<&RawArtefact>, config_path: &Path) -> Result<Optio
                 .with_context(|| format!("{}: layer \"{}\"", at(""), layer.name))?;
         }
     }
-    Ok(Some(ArtefactSpec { root, layers }))
+    Ok(Some(ArtefactSpec { layers }))
 }
 
 /// A path that must stay below the directory it is relative to.
@@ -690,24 +658,32 @@ fn parse_clean(raw: Option<&RawClean>, config_path: &Path) -> Result<Clean> {
         }
         check_not_option_like(pattern, "clean.exclude entry", config_path)?;
     }
-    Ok(Clean { exclude })
+    if let Some(period) = &clean.keep_recent {
+        crate::cache::parse_period(period)
+            .with_context(|| format!("{}: clean.keep_recent", config_path.display()))?;
+    }
+    Ok(Clean {
+        exclude,
+        keep_recent: clean.keep_recent.clone(),
+    })
 }
 
-/// `[cache]`. `dir` reaches git as a path argument, so it gets the same
-/// option-like check as a URL: `--upload-pack=…` in that position is a shell.
-fn parse_cache(raw: Option<&RawCache>, config_path: &Path) -> Result<CacheSettings> {
-    let Some(cache) = raw else {
-        return Ok(CacheSettings::default());
+/// `[develop]`. A pinned branch is a name or a glob, matched against branch
+/// names as `release/*` would be.
+fn parse_develop(raw: Option<&RawDevelop>, config_path: &Path) -> Result<Develop> {
+    let Some(develop) = raw else {
+        return Ok(Develop::default());
     };
-    let dir = cache.dir.clone().unwrap_or_default();
-    if !dir.is_empty() {
-        check_not_option_like(&dir, "cache.dir", config_path)?;
+    if let Some(pinned) = &develop.pinned {
+        if pinned.iter().any(|b| b.trim().is_empty()) {
+            bail!(
+                "{}: develop.pinned contains an empty branch name",
+                config_path.display()
+            );
+        }
     }
-    Ok(CacheSettings {
-        enabled: cache.enabled.unwrap_or(true),
-        dir,
-        dissociate: cache.dissociate.unwrap_or(false),
-        adopt_root: cache.adopt_root.unwrap_or(false),
+    Ok(Develop {
+        pinned: develop.pinned.clone(),
     })
 }
 
@@ -724,10 +700,11 @@ fn parse_repos(
         let revision = spec.revision.clone().unwrap_or_default();
         check_entry(directory, url, &revision, config_path)?;
 
-        let mode = match &spec.mode {
-            Some(m) => RepoMode::from_str_checked(m)
-                .with_context(|| format!("{}: repos.{}.mode", config_path.display(), directory))?,
-            None => RepoMode::Readwrite,
+        let artefact = match &spec.artefact {
+            Some(a) => Some(ArtefactUse::from_str_checked(a).with_context(|| {
+                format!("{}: repos.{}.artefact", config_path.display(), directory)
+            })?),
+            None => None,
         };
 
         let recursive = spec.recursive.unwrap_or(true);
@@ -745,7 +722,7 @@ fn parse_repos(
             directory: directory.clone(),
             repo_url: url.to_string(),
             revision,
-            mode,
+            artefact,
             recursive,
             is_override,
             singleton: spec.singleton,
@@ -825,6 +802,56 @@ fn parse_hooks(raw: Option<&RawHooks>, config_path: &Path) -> Result<Hooks> {
     })
 }
 
+/// Set the `revision` of each `(directory, revision)` entry of the config at
+/// `path` in place, leaving every comment, key order and table gitscale does
+/// not know about as it was — unlike [`write_config`], which rewrites the
+/// file. An entry without a `revision` key gets one.
+pub fn set_revisions(path: &Path, changes: &[(String, String)]) -> Result<()> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .with_context(|| format!("{}: invalid TOML", path.display()))?;
+    for (directory, revision) in changes {
+        let entry = doc
+            .get_mut("repos")
+            .and_then(|repos| repos.get_mut(directory))
+            .with_context(|| format!("{}: no entry repos.{}", path.display(), directory))?;
+        let value = if let Some(table) = entry.as_inline_table_mut() {
+            table.get_mut("revision")
+        } else if let Some(table) = entry.as_table_mut() {
+            table
+                .get_mut("revision")
+                .and_then(|item| item.as_value_mut())
+        } else {
+            bail!(
+                "{}: repos.{} is neither a table nor an inline table",
+                path.display(),
+                directory
+            );
+        };
+        match value {
+            Some(value) => {
+                let decor = value.decor().clone();
+                *value = toml_edit::Value::from(revision.as_str());
+                *value.decor_mut() = decor;
+            }
+            None => match entry.as_inline_table_mut() {
+                Some(table) => {
+                    table.insert("revision", toml_edit::Value::from(revision.as_str()));
+                }
+                None => {
+                    if let Some(table) = entry.as_table_mut() {
+                        table.insert("revision", toml_edit::value(revision.as_str()));
+                    }
+                }
+            },
+        }
+    }
+    std::fs::write(path, doc.to_string())
+        .with_context(|| format!("cannot write {}", path.display()))
+}
+
 /// Render a value as a TOML basic string.
 ///
 /// Nothing here is validated against quoting: a `post_sync` command is an
@@ -890,27 +917,10 @@ pub fn write_config(config_path: &Path, config: &GitScaleConfig) -> Result<()> {
         lines.push(String::new());
     }
 
-    if config.share.dissociate {
-        lines.push("[share]".to_string());
-        lines.push("dissociate = true".to_string());
-        lines.push(String::new());
-    }
-
-    let cache = &config.cache;
-    if !cache.enabled || !cache.dir.is_empty() || cache.dissociate || cache.adopt_root {
-        lines.push("[cache]".to_string());
-        if !cache.enabled {
-            lines.push("enabled = false".to_string());
-        }
-        if !cache.dir.is_empty() {
-            lines.push(format!("dir = {}", toml_string(&cache.dir)));
-        }
-        if cache.dissociate {
-            lines.push("dissociate = true".to_string());
-        }
-        if cache.adopt_root {
-            lines.push("adopt_root = true".to_string());
-        }
+    if let Some(pinned) = &config.develop.pinned {
+        let quoted: Vec<String> = pinned.iter().map(|b| toml_string(b)).collect();
+        lines.push("[develop]".to_string());
+        lines.push(format!("pinned = [{}]", quoted.join(", ")));
         lines.push(String::new());
     }
 
@@ -928,9 +938,6 @@ pub fn write_config(config_path: &Path, config: &GitScaleConfig) -> Result<()> {
             format!("[{}]", quoted.join(", "))
         };
         lines.push("[artefact]".to_string());
-        if artefact.root != "." {
-            lines.push(format!("root = {}", toml_string(&artefact.root)));
-        }
         match artefact.layers.as_slice() {
             [only] if only.name == DEFAULT_LAYER => {
                 lines.push(format!("include = {}", list(&only.include)));
@@ -965,15 +972,20 @@ pub fn write_config(config_path: &Path, config: &GitScaleConfig) -> Result<()> {
         lines.push(String::new());
     }
 
-    if !config.clean.exclude.is_empty() {
+    if !config.clean.exclude.is_empty() || config.clean.keep_recent.is_some() {
         lines.push("[clean]".to_string());
-        let patterns: Vec<String> = config
-            .clean
-            .exclude
-            .iter()
-            .map(|p| toml_string(p))
-            .collect();
-        lines.push(format!("exclude = [{}]", patterns.join(", ")));
+        if !config.clean.exclude.is_empty() {
+            let patterns: Vec<String> = config
+                .clean
+                .exclude
+                .iter()
+                .map(|p| toml_string(p))
+                .collect();
+            lines.push(format!("exclude = [{}]", patterns.join(", ")));
+        }
+        if let Some(period) = &config.clean.keep_recent {
+            lines.push(format!("keep_recent = {}", toml_string(period)));
+        }
         lines.push(String::new());
     }
 
@@ -986,8 +998,8 @@ pub fn write_config(config_path: &Path, config: &GitScaleConfig) -> Result<()> {
             if !entry.revision.is_empty() {
                 parts.push(format!("revision = {}", toml_string(&entry.revision)));
             }
-            if entry.mode != RepoMode::Readwrite {
-                parts.push(format!("mode = {}", toml_string(&entry.mode.to_string())));
+            if let Some(artefact) = entry.artefact {
+                parts.push(format!("artefact = {}", toml_string(&artefact.to_string())));
             }
             if !entry.recursive {
                 parts.push("recursive = false".to_string());
@@ -1108,20 +1120,20 @@ mod tests {
 
     #[test]
     fn hex_revisions_are_names_unless_they_are_full_shas() {
-        // An all-hex branch or tag name is accepted, in every mode: only a full
-        // SHA is taken for a commit, and a name that matches nothing fails
-        // when it is looked up, with a hint about abbreviated commits.
-        for mode in ["readwrite", "artefact"] {
+        // An all-hex branch or tag name is accepted, source or artefact: only
+        // a full SHA is taken for a commit, and a name that matches nothing
+        // fails when it is looked up, with a hint about abbreviated commits.
+        for artefact in ["", ", artefact = \"replace\""] {
             for revision in [
                 "20241001",
                 "cafe123",
                 "9fceb02d0ae598e95dc970b74767f19372d61af8",
             ] {
                 let text = format!(
-                    "[repos]\n\"a\" = {{ url = \"https://example.com/a.git\", revision = \"{}\", mode = \"{}\" }}\n",
-                    revision, mode
+                    "[repos]\n\"a\" = {{ url = \"https://example.com/a.git\", revision = \"{}\"{} }}\n",
+                    revision, artefact
                 );
-                assert!(load(&text).is_ok(), "{} {}", mode, revision);
+                assert!(load(&text).is_ok(), "{} {}", artefact, revision);
             }
         }
         assert!(!crate::git::is_full_sha("20241001"));
@@ -1132,10 +1144,8 @@ mod tests {
     #[test]
     fn a_single_group_can_skip_the_layer_tables() {
         let config =
-            load("[artefact]\nroot = \"dist\"\ninclude = [\"**\"]\nexclude = [\"**/*.map\"]\n")
-                .unwrap();
+            load("[artefact]\ninclude = [\"dist/**\"]\nexclude = [\"**/*.map\"]\n").unwrap();
         let spec = config.artefact.unwrap();
-        assert_eq!(spec.root, "dist");
         assert_eq!(spec.layers.len(), 1);
         assert_eq!(spec.layers[0].name, DEFAULT_LAYER);
         assert_eq!(spec.layers[0].exclude, vec!["**/*.map"]);
@@ -1164,8 +1174,8 @@ mod tests {
             "[artefact]\n",
             "[artefact]\nincludes = [\"**\"]\n",
             "[artefact]\ninclude = [\"**\"]\n[[artefact.layer]]\nname = \"a\"\ninclude = [\"**\"]\n",
-            "[artefact]\nroot = \"../out\"\ninclude = [\"**\"]\n",
-            "[artefact]\nroot = \"/abs\"\ninclude = [\"**\"]\n",
+            // Image paths are repository paths: there is no root to move them.
+            "[artefact]\nroot = \"dist\"\ninclude = [\"**\"]\n",
             "[artefact]\ninclude = [\"../**\"]\n",
             "[artefact]\ninclude = [\"/etc/**\"]\n",
             "[artefact]\ninclude = [\"\"]\n",
@@ -1181,7 +1191,7 @@ mod tests {
     #[test]
     fn artefact_and_registries_survive_a_rewrite() {
         for text in [
-            "[registries]\n\"git.example\" = \"r.example\"\n\n[artefact]\nroot = \"dist\"\ninclude = [\"**\"]\nexclude = [\"*.map\"]\n",
+            "[registries]\n\"git.example\" = \"r.example\"\n\n[artefact]\ninclude = [\"dist/**\"]\nexclude = [\"*.map\"]\n",
             "[[artefact.layer]]\nname = \"vendor\"\ninclude = [\"vendor/**\"]\n\n[[artefact.layer]]\nname = \"app\"\ninclude = [\"**\"]\nexclude = [\"x\"]\n",
         ] {
             let before = load(text).unwrap();
@@ -1216,6 +1226,84 @@ mod tests {
             "{}",
             text
         );
+    }
+
+    #[test]
+    fn artefact_use_is_replace_or_overlay() {
+        let config = load(
+            "[repos]\n\"a\" = { url = \"https://example.com/a.git\", artefact = \"replace\" }\n\
+             \"b\" = { url = \"https://example.com/b.git\", artefact = \"overlay\" }\n\
+             \"c\" = { url = \"https://example.com/c.git\" }\n",
+        )
+        .unwrap();
+        let by = |d: &str| config.repos.iter().find(|e| e.directory == d).unwrap();
+        assert!(by("a").is_artefact());
+        assert!(by("b").is_overlay() && !by("b").is_artefact());
+        assert_eq!(by("c").artefact, None);
+        assert!(load(
+            "[repos]\n\"a\" = { url = \"https://example.com/a.git\", artefact = \"yes\" }\n"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn develop_pinned_and_keep_recent_survive_a_rewrite() {
+        let before = load(
+            "[develop]\npinned = [\"main\", \"release/*\"]\n\n[clean]\nkeep_recent = \"6months\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            before.develop.pinned,
+            Some(vec!["main".to_string(), "release/*".to_string()])
+        );
+        let dir = std::env::temp_dir().join(format!("gitscale-cfg-dev-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CONFIG_FILENAME);
+        write_config(&path, &before).unwrap();
+        let after = load_config(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(before.develop, after.develop);
+        assert_eq!(after.clean.keep_recent.as_deref(), Some("6months"));
+        assert!(load("[clean]\nkeep_recent = \"soon\"\n").is_err());
+        assert!(load("[develop]\npinned = [\"\"]\n").is_err());
+    }
+
+    #[test]
+    fn a_dependency_config_says_which_branches_it_pins() {
+        let text = "[develop]\npinned = [\"staging\"]\n\n[hooks]\nwhatever = 1\n";
+        let parsed = parse_dependency_config(text, Path::new("dep")).unwrap();
+        assert_eq!(parsed.develop.pinned, Some(vec!["staging".to_string()]));
+        let unset = parse_dependency_config("", Path::new("dep")).unwrap();
+        assert_eq!(unset.develop.pinned, None);
+    }
+
+    #[test]
+    fn set_revisions_keeps_comments_and_adds_a_missing_revision() {
+        let dir = std::env::temp_dir().join(format!("gitscale-cfg-set-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CONFIG_FILENAME);
+        std::fs::write(
+            &path,
+            "# top\n[repos]\n\"a\" = { url = \"u\", revision = \"v1\" } # keep\n\"b\" = { url = \"w\" }\n",
+        )
+        .unwrap();
+        set_revisions(
+            &path,
+            &[
+                ("a".to_string(), "v2".to_string()),
+                ("b".to_string(), "v3".to_string()),
+            ],
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            text.contains("# top") && text.contains("# keep"),
+            "{}",
+            text
+        );
+        assert!(text.contains("revision = \"v2\""), "{}", text);
+        assert!(text.contains("revision = \"v3\""), "{}", text);
     }
 
     #[test]

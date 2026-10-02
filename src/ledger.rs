@@ -114,6 +114,16 @@ pub fn left_behind(config_root: &Path, entries: &[RepoEntry]) -> Vec<(String, Re
         .collect()
 }
 
+/// Every git checkout recorded, whether or not it is still wanted.
+pub fn git_checkouts(config_root: &Path) -> Vec<String> {
+    load(config_root)
+        .checkouts
+        .into_iter()
+        .filter(|(_, kind)| *kind == Recorded::Git)
+        .map(|(dir, _)| dir)
+        .collect()
+}
+
 /// Forget `directory`: removed, or found to be something else now.
 pub fn forget(config_root: &Path, directory: &str) -> Result<()> {
     let mut ledger = load(config_root);

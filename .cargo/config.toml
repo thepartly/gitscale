@@ -15,11 +15,11 @@
 [env]
 GIT_CONFIG_NOSYSTEM = "1"
 
-# The object cache is on by default and lives in the user's data directory, so
-# without this every test run would populate — and leave entries in — the real
+# The CI cache lives in the user's data directory, so without this every CI test
+# — and every `gitscale cache` command a test runs — would populate the real
 # ~/.local/share/gitscale. Pointed inside target/ instead, where it is as
-# disposable as the rest of the build output. Tests that exercise the cache
-# itself set `[cache] dir` and get a directory of their own on top of this.
+# disposable as the rest of the build output. Tests that exercise the cache get
+# a directory of their own on top of this (`TestEnv::run_with_env`).
 GITSCALE_CACHE_DIR = { value = "target/gitscale-test-cache", relative = true }
 
 # Registry logins: an artefact command that meets a 401 looks for what

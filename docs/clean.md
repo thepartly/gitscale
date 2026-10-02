@@ -1,4 +1,4 @@
-# 2.8 Cleaning
+# 2.9 Cleaning
 
 - [What it does](#what-it-does)
 - [The dry run](#the-dry-run)
@@ -10,6 +10,7 @@
 - [What is skipped](#what-is-skipped)
 - [A directory holding no repository](#a-directory-holding-no-repository)
 - [Nested repositories GitScale does not manage](#nested-repositories-gitscale-does-not-manage)
+- [Compacting](#compacting)
 
 ## What it does
 
@@ -74,8 +75,10 @@ Beyond whatever you exclude, clean never removes:
   unguarded `git clean -xdf` at the root would delete the whole workspace — and
   one declared inside another repository (`core` and `core/vendor`) would go the
   same way when that repository is cleaned. Clean excludes them wherever they
-  sit. This matters most for [artefact](artefacts.md) entries, which
-  have no `.git` directory for git to recognise them by.
+  sit. This matters most for `replace` [artefact](artefacts.md) entries,
+  which have no `.git` directory for git to recognise them by.
+- **An overlay's files.** The build output an `overlay` artefact laid over its
+  checkout is ignored by that checkout, and exactly what the overlay is for.
 - **Managed symlinks.** The links GitScale plants for
   [recursive dependencies](recursive-dependencies.md) are untracked files to
   git. Orphaned GitScale symlinks are *not* protected — those are removed, as
@@ -156,9 +159,9 @@ repository's own `[clean]` table. An empty pattern, or one starting with `-`
 ## A directory holding no repository
 
 An entry's directory can exist with no repository in it at all — no `.git` —
-after a failed clone, an interrupted delete, an outside cleaner, or a CI cache
+after a failed checkout, an interrupted delete, an outside cleaner, or a CI cache
 restored into a path whose checkout was not. [`pull`](workflow.md#pull) refuses
-to clone over one that holds files, and nothing inside it belongs to a
+to check out over one that holds files, and nothing inside it belongs to a
 checkout, so `clean` **removes the whole directory**. The dry run lists it as
 `./ (the whole directory: it holds no repository)`. A clean always leaves the
 workspace in a state the next `pull` can complete from.
@@ -176,6 +179,27 @@ A clone somebody made by hand inside a checkout is **reported, not deleted**:
 clean does not pass `git clean`'s second `-f`. Remove those yourself. A stray
 clone somebody forgot about is recoverable only while it still exists.
 
+## Compacting
+
+```
+gitscale clean --gc
+gitscale clean --gc --keep-recent 6months
+```
+
+`--gc` cleans no working tree. It runs `git gc` in every
+[store](stores.md) of the root, then drops the images nothing has used within
+`--keep-recent` — default `[clean] keep_recent`, else `3months` — and every
+layer no remaining image needs:
+
+```
+Compacted /home/dev/app/.git/gitscale: 4 stores collected, 2 images dropped, 310.4 MiB freed.
+```
+
+`pull` already drops unused images once a day, and git collects each store
+when it needs to, so `--gc` is for reclaiming space now. It takes no names, no
+`-f` and no `-e`, and refuses in CI, where the [CI cache](stores.md#cache-compact)
+has its own `gitscale cache compact`.
+
 ---
 
-[← 2.7 CI authentication](ci-authentication.md) · [Contents](README.md) · [Next → 2.9 Artefacts](artefacts.md)
+[← 2.8 CI authentication](ci-authentication.md) · [Contents](README.md) · [Next → 2.10 Artefacts](artefacts.md)
