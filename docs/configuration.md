@@ -25,8 +25,7 @@ instead.
 A checked-out sub-repository may carry its own `.gitscale.toml`. Which parts of
 it are read, and when, is covered under [nested configs](#nested-configs).
 
-Unknown keys and unknown tables are ignored on read — a dependency's config at
-an old revision may carry keys this version no longer knows — except inside
+Unknown keys and unknown tables are ignored on read, except inside
 [`[artefact]`](#artefact), [`[resolve]`](#resolve) and [`[develop]`](#develop),
 where a misspelt key would quietly do less than meant. But see
 [how `add` and `remove` rewrite the file](#how-add-and-remove-rewrite-the-file).
@@ -141,9 +140,6 @@ but this machine.
 The table is read by consumers and by [`artefact publish`](artefacts.md#artefact-publish)
 alike, so a producer and its consumers on a self-hosted forge need the same
 entry.
-
-The `[storage]` table, whose `url` named an S3, GCS or local bucket, is no
-longer supported: a config that has one fails to load, with directions.
 
 ## `[artefact]`
 

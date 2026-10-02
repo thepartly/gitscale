@@ -2642,7 +2642,7 @@ mod tests {
         let mut fake = Fake::default();
         d_versions(&mut fake);
         let config = format!(
-            "[storage]\nurl = \"s3://old\"\n\n[resolve]\nhoist = \"x\"\n\n[hooks]\non_pull_error = \"maybe\"\n\n{}",
+            "[artefact]\nroot = \"dist\"\n\n[resolve]\nhoist = \"x\"\n\n[hooks]\non_pull_error = \"maybe\"\n\n{}",
             deps(&[("libs/d", D, ", revision = \"v1.5.0\"")])
         );
         child(&mut fake, B, "b1", "v1.0.0", &config);

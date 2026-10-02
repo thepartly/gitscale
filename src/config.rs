@@ -224,7 +224,6 @@ pub struct GitScaleConfig {
 struct RawConfig {
     singleton: Option<bool>,
     resolve: Option<RawResolve>,
-    storage: Option<toml::Value>,
     registries: Option<BTreeMap<String, String>>,
     artefact: Option<RawArtefact>,
     repos: Option<BTreeMap<String, RawRepo>>,
@@ -323,7 +322,7 @@ pub fn parse_config(text: &str, config_path: &Path) -> Result<GitScaleConfig> {
     let raw: RawConfig = toml::from_str(text)
         .map_err(|e| anyhow::anyhow!("{}: invalid TOML: {}", config_path.display(), e))?;
 
-    let registries = parse_registries(raw.storage.as_ref(), raw.registries.as_ref(), config_path)?;
+    let registries = parse_registries(raw.registries.as_ref(), config_path)?;
     let artefact = parse_artefact(raw.artefact.as_ref(), config_path)?;
     let repos = parse_repos(raw.repos.as_ref(), config_path)?;
     let hooks = parse_hooks(raw.hooks.as_ref(), config_path)?;
@@ -517,22 +516,11 @@ pub fn check_entry(directory: &str, url: &str, revision: &str, config_path: &Pat
     )
 }
 
-/// `[registries]`. `[storage]` is refused: its `url` named an S3, GCS or local
-/// bucket, and artefacts now come from OCI registries instead.
+/// `[registries]`.
 fn parse_registries(
-    storage: Option<&toml::Value>,
     raw: Option<&BTreeMap<String, String>>,
     config_path: &Path,
 ) -> Result<BTreeMap<String, String>> {
-    if storage.is_some() {
-        bail!(
-            "{}: [storage] is no longer supported. Artefacts are published to and pulled \
-             from OCI registries, located from each entry's repository URL; remove \
-             [storage], and use [registries] for hosts the built-in mapping does not \
-             cover (see docs/artefacts.md)",
-            config_path.display()
-        );
-    }
     let registries = raw.cloned().unwrap_or_default();
     for (key, registry) in &registries {
         if key.is_empty() || registry.is_empty() {
@@ -1096,18 +1084,6 @@ mod tests {
             "[repos]\n\"a\" = { url = \"https://example.com/a.git\", revision = \"--exec=payload\" }\n"
         )
         .is_err());
-    }
-
-    #[test]
-    fn a_storage_table_is_refused_with_directions() {
-        for text in [
-            "[storage]\nurl = \"https://bucket.s3.amazonaws.com/x\"\n",
-            "[storage.registries]\n\"a.example\" = \"r.example\"\n",
-        ] {
-            let err = load(text).unwrap_err().to_string();
-            assert!(err.contains("no longer supported"), "{}", err);
-            assert!(err.contains("[registries]"), "{}", err);
-        }
     }
 
     #[test]
