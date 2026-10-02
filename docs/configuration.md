@@ -326,4 +326,4 @@ these is missing, once for the whole run.
 
 ---
 
-[← 2.10 Artefacts](artefacts.md) · [Contents](README.md) · [Next → 4. Command line reference](cli.md)
+[← 2.11 The agent skill](agents.md) · [Contents](README.md) · [Next → 4. Command line reference](cli.md)

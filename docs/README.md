@@ -21,6 +21,7 @@ GitScale manages several git repositories as one workspace, from a single
 | 2.8 | [CI authentication](ci-authentication.md) — using the runner's own job token, with no pipeline setup |
 | 2.9 | [Cleaning](clean.md) — `gitscale clean`, what it always keeps, and `--gc` |
 | 2.10 | [Artefacts](artefacts.md) — publishing build output to an OCI registry, one image per commit, and installing it instead of a checkout or over one |
+| 2.11 | [The agent skill](agents.md) — teaching coding agents the GitScale workflow: `gitscale skill`, how it stays current |
 
 **3. [Configuration file reference](configuration.md)** — every table, key and
 environment variable.

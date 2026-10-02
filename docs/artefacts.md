@@ -569,4 +569,4 @@ never which files a checkout gets.
 
 ---
 
-[← 2.9 Cleaning](clean.md) · [Contents](README.md) · [Next → 3. Configuration file reference](configuration.md)
+[← 2.9 Cleaning](clean.md) · [Contents](README.md) · [Next → 2.11 The agent skill](agents.md)

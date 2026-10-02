@@ -14,6 +14,7 @@ pub mod promote;
 pub mod registry;
 pub mod resolution;
 pub mod resolve;
+pub mod skill;
 mod ssh;
 pub mod store;
 pub mod stores;
@@ -189,6 +190,12 @@ enum Commands {
         #[command(subcommand)]
         action: HookAction,
     },
+    /// Install, inspect or remove the agent skill that teaches coding agents
+    /// the GitScale workflow
+    Skill {
+        #[command(subcommand)]
+        action: SkillAction,
+    },
     /// Remove a sub-repository entry from .gitscale config
     Remove {
         directory: String,
@@ -228,6 +235,26 @@ enum ArtefactAction {
         #[arg(short = 'C', long)]
         root: Option<PathBuf>,
         names: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SkillAction {
+    /// Write the skill to ~/.agents/skills/gitscale, and to
+    /// ~/.claude/skills/gitscale when ~/.claude exists. Once installed, each
+    /// interactive run keeps it current
+    Install {
+        /// Replace a copy edited by hand, or a file gitscale did not write
+        #[arg(long)]
+        force: bool,
+    },
+    /// Show where the skill is installed and which version
+    Status,
+    /// Remove the skill gitscale installed
+    Remove {
+        /// Remove a copy edited by hand too
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -367,6 +394,44 @@ pub fn run_cli_with(args: &[&str], interactive: bool) -> CliOutput {
 }
 
 fn run_cli_inner(
+    cli: Cli,
+    interactive: bool,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<()> {
+    let is_skill = matches!(cli.command, Commands::Skill { .. });
+    // Where `pull` and a status table may point at `skill install`.
+    let hint_root = match &cli.command {
+        Commands::Pull { root, .. } => Some(root.clone()),
+        Commands::Status {
+            root, format, why, ..
+        } if format == "table" && why.is_none() => Some(root.clone()),
+        _ => None,
+    };
+
+    let result = run_command(cli, interactive, out, err);
+    // Only on a run somebody is watching, and never in CI.
+    if interactive && !is_skill && !git::is_ci() {
+        if let Some(home) = skill::home() {
+            // An installed skill follows the binary; it is never created here.
+            for path in skill::refresh(&home) {
+                let _ = writeln!(
+                    err,
+                    "  updated the gitscale agent skill at {}",
+                    path.display()
+                );
+            }
+            if let (Ok(()), Some(start)) = (&result, hint_root) {
+                if let Ok((_, root)) = config::load_workspace(start.as_deref()) {
+                    skill::hint(&home, &root, err);
+                }
+            }
+        }
+    }
+    result
+}
+
+fn run_command(
     cli: Cli,
     interactive: bool,
     out: &mut dyn Write,
@@ -516,6 +581,38 @@ fn run_cli_inner(
                 keep_recent,
             } => commands::cache::compact(&keep_recent, out),
         },
+        Commands::Skill { action } => {
+            let home = skill::home()
+                .ok_or_else(|| anyhow::anyhow!("HOME is not set: nowhere to put the skill"))?;
+            match action {
+                SkillAction::Install { force } => {
+                    for (path, before) in skill::install(&home, force)? {
+                        if before == skill::State::Current {
+                            writeln!(out, "  ok       {} (already current)", path.display())?;
+                        } else {
+                            writeln!(out, "  install  {}", path.display())?;
+                        }
+                    }
+                    Ok(())
+                }
+                SkillAction::Status => {
+                    for (path, state) in skill::status(&home) {
+                        writeln!(out, "{}: {}", path.display(), state.describe())?;
+                    }
+                    Ok(())
+                }
+                SkillAction::Remove { force } => {
+                    let removed = skill::remove(&home, force)?;
+                    if removed.is_empty() {
+                        writeln!(out, "Nothing to remove: the skill is not installed.")?;
+                    }
+                    for path in removed {
+                        writeln!(out, "  remove  {}", path.display())?;
+                    }
+                    Ok(())
+                }
+            }
+        }
         Commands::Hook { action } => match action {
             HookAction::Install {
                 system,
@@ -548,5 +645,89 @@ fn run_cli_inner(
                 err,
             ),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each `gitscale ...` span in the skill, as the words that name the
+    /// command and the long flags it uses.
+    fn skill_commands() -> Vec<(Vec<String>, Vec<String>)> {
+        let text = include_str!("skill.md");
+        let mut found = Vec::new();
+        for (i, span) in text.split('`').enumerate() {
+            if i % 2 == 0 {
+                continue;
+            }
+            for part in span.split("&&") {
+                let mut words = part.split_whitespace();
+                if words.next() != Some("gitscale") {
+                    continue;
+                }
+                let (mut path, mut flags) = (Vec::new(), Vec::new());
+                // The command's words come first; after any argument, only
+                // long flags are taken.
+                let mut in_path = true;
+                for word in words {
+                    let word = word.trim_matches(|c| c == '[' || c == ']');
+                    if word.starts_with("--") {
+                        flags.push(word.to_string());
+                    } else if in_path && word.starts_with(|c: char| c.is_ascii_lowercase()) {
+                        path.push(word.to_string());
+                    } else {
+                        in_path = false;
+                    }
+                    in_path &= flags.is_empty();
+                }
+                found.push((path, flags));
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn every_command_the_skill_names_exists() {
+        let commands = skill_commands();
+        assert!(commands.len() > 10, "{:?}", commands);
+        for (path, flags) in commands {
+            if path.is_empty() {
+                continue;
+            }
+            let mut args = vec!["gitscale"];
+            args.extend(path.iter().map(String::as_str));
+            args.push("--help");
+            let help = match Cli::try_parse_from(&args) {
+                Err(e) if e.kind() == clap::error::ErrorKind::DisplayHelp => e.to_string(),
+                other => panic!(
+                    "gitscale {}: not a command ({:?})",
+                    path.join(" "),
+                    other.err().map(|e| e.kind())
+                ),
+            };
+            for flag in flags {
+                assert!(
+                    help.contains(&flag),
+                    "gitscale {} has no {}",
+                    path.join(" "),
+                    flag
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_doc_the_skill_links_exists() {
+        let docs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
+        let mut linked = 0;
+        for line in include_str!("skill.md").lines() {
+            let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
+            if let Some(doc) = cells.last().filter(|c| c.ends_with(".md")) {
+                assert!(docs.join(doc).is_file(), "docs/{} does not exist", doc);
+                linked += 1;
+            }
+        }
+        assert!(linked > 10);
     }
 }

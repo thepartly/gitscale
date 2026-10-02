@@ -18,6 +18,7 @@
 - [`gitscale artefact`](#gitscale-artefact)
 - [`gitscale cache`](#gitscale-cache)
 - [`gitscale hook`](#gitscale-hook)
+- [`gitscale skill`](#gitscale-skill)
 
 ## Synopsis
 
@@ -46,6 +47,7 @@ command.
 | [`artefact`](#gitscale-artefact) | Publish this repository's build output as an artefact, and see what the registry holds |
 | [`cache`](#gitscale-cache) | Inspect and maintain the CI cache |
 | [`hook`](#gitscale-hook) | Install or inspect GitScale's git hooks |
+| [`skill`](#gitscale-skill) | Install, inspect or remove the agent skill |
 
 ## Global options
 
@@ -114,7 +116,8 @@ holding files but no repository fails. Then re-create
 images once a day, and run the [`post_sync` hook](hooks.md#post_sync). A
 checkout is moved only when that loses nothing: uncommitted changes to tracked
 files, or a detached HEAD no ref holds, fail the entry and leave it as it was.
-See [workflow → pull](workflow.md#pull).
+See [workflow → pull](workflow.md#pull). While no agent skill is installed,
+prints a [one-time hint](agents.md#the-hint) to install it.
 
 ## `gitscale push`
 
@@ -195,6 +198,8 @@ gitscale status [OPTIONS]
 Note that `-f` here is `--format`, not `--force`. Status takes no repository
 names; it always reports everything. Without `--fetch` it resolves from what
 is on this machine, and never touches the network. See [status](status.md).
+The table prints the [agent skill hint](agents.md#the-hint) once, while no
+skill is installed.
 
 ## `gitscale develop`
 
@@ -385,6 +390,26 @@ gitscale hook install --system --allow 'github.com/acme/*,git.internal.example/*
 gitscale hook status
 gitscale hook uninstall --local
 ```
+
+## `gitscale skill`
+
+```
+gitscale skill <install|status|remove> [OPTIONS]
+```
+
+| Subcommand | Purpose |
+|---|---|
+| `install` | Write the agent skill to `~/.agents/skills/gitscale/`, and to `~/.claude/skills/gitscale/` when `~/.claude` exists |
+| `status` | Each location, and what is installed there |
+| `remove` | Remove the copies gitscale wrote |
+
+| Option | Subcommand | Meaning |
+|---|---|---|
+| `--force` | `install` | Replace a copy edited by hand, or a file gitscale did not write |
+| `--force` | `remove` | Remove a copy edited by hand too |
+
+Once installed, every interactive command outside CI keeps the skill current.
+See [the agent skill](agents.md).
 
 ---
 

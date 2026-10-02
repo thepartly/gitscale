@@ -111,6 +111,9 @@ into the configs that ask for them. See [topics](docs/topics.md).
 - **CI credentials without pipeline setup** — inside a GitLab or GitHub job,
   entries on that same server are fetched with the job token, which never
   reaches `.git/config` or a command line.
+- **An agent skill** — `gitscale skill install` teaches coding agents
+  (Claude Code, Codex, Cursor and others) to carry a change across the
+  workspace's repositories, and stays in step with the installed version.
 - **One status table** covering ahead/behind, ref mismatch, dirty, stale and
   broken-link states, and where a topic stands, with JSON output.
 
@@ -129,6 +132,7 @@ into the configs that ask for them. See [topics](docs/topics.md).
 | [CI authentication](docs/ci-authentication.md) | Job tokens on GitLab and GitHub |
 | [Cleaning](docs/clean.md) | `gitscale clean`, what it always keeps, and `--gc` |
 | [Artefacts](docs/artefacts.md) | Publishing build output to an OCI registry, and installing it |
+| [The agent skill](docs/agents.md) | Teaching coding agents the GitScale workflow |
 | [Configuration reference](docs/configuration.md) | Every table, key and environment variable |
 | [Command line reference](docs/cli.md) | Every command, argument and flag |
 | [Related tools](docs/related-tools.md) | Comparison with submodules, repo, west, vcstool and others |
