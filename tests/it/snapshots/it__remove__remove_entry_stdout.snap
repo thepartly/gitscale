@@ -1,0 +1,5 @@
+---
+source: tests/it/remove.rs
+expression: out.stdout
+---
+Removed libs/core

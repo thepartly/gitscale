@@ -1,0 +1,7 @@
+---
+source: tests/it/push.rs
+assertion_line: 832
+expression: out.stdout
+---
+Pushing local changes...
+  skip  libs/rolib (not on the topic)

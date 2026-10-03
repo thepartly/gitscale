@@ -1,0 +1,7 @@
+---
+source: tests/it/pull.rs
+assertion_line: 148
+expression: out.stdout
+---
+Pulling latest changes...
+  ok    libs/mylib

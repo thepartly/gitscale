@@ -1,6 +1,0 @@
----
-source: tests/cli.rs
-expression: redact_shas(&out2.stdout)
----
-Pulling latest changes...
-  ok    meta/app (artefact [sha])

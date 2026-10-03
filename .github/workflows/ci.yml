@@ -16,7 +16,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     services:
-      # The reference OCI registry, for tests/registry_conformance.rs. Without
+      # The reference OCI registry, for tests/it/registry.rs. Without
       # GITSCALE_TEST_REGISTRY those tests skip themselves; here they run, and
       # the interop ones use the runner's own skopeo.
       registry:

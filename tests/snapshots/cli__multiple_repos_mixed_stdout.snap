@@ -1,9 +1,0 @@
----
-source: tests/cli.rs
-assertion_line: 1414
-expression: redact_shas(&out.stdout)
----
-Pulling latest changes...
-  ok    libs/ro-lib
-  ok    libs/rw-lib
-  ok    meta/art (artefact [sha])

@@ -1,0 +1,7 @@
+---
+source: tests/it/fetch.rs
+assertion_line: 485
+expression: out.stdout
+---
+Fetching...
+  ok    libs/mylib

@@ -1,6 +1,0 @@
----
-source: tests/cli.rs
-expression: redact_shas(&out.stdout)
----
-Fetching...
-  ok    meta/app (artefact [sha])

@@ -1,0 +1,9 @@
+---
+source: tests/it/sync.rs
+assertion_line: 1194
+expression: out.stdout
+---
+Pulling latest changes...
+  ok    libs/mylib
+Pushing local changes...
+  skip  libs/mylib (not on the topic)

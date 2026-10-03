@@ -1,6 +1,0 @@
----
-source: tests/cli.rs
-expression: out.stdout
----
-Pushing local changes...
-  skip  meta/app (artefact)

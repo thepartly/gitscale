@@ -2,8 +2,8 @@ services:
   # The reference OCI registry, for the opt-in conformance tests:
   #
   #   docker compose up -d registry
-  #   GITSCALE_TEST_REGISTRY=localhost:5000 cargo test --test registry_conformance   # on the host
-  #   GITSCALE_TEST_REGISTRY=registry:5000 cargo test --test registry_conformance    # in the devbox
+  #   GITSCALE_TEST_REGISTRY=localhost:5000 cargo test --test it registry:: # on the host
+  #   GITSCALE_TEST_REGISTRY=registry:5000 cargo test --test it registry::  # in the devbox
   #
   # It serves plain HTTP; the tests opt in to that with an http:// registry.
   registry:
