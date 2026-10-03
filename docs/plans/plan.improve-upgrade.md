@@ -49,20 +49,39 @@ a raise. That is what 2 is for; separate streams (`hotfix-v…`) already work.
 
 ## 2. Opt-in: release branches
 
-Name the branches a dependency releases from; only tags reachable from one of
-them are candidates. Applies with 1, not instead of it.
+A repository names the branches it releases from, once, in its own
+`.gitscale.toml`; only tags reachable from one of them are candidates for
+every workspace that depends on it. Applies with 1, not instead of it.
 
 ```toml
-[repos]
-"imports/core" = { url = "https://github.com/org/core.git", revision = "v2026.09.28", releases = ["main", "release/*"] }
+# core's own .gitscale.toml
+[release]
+branches = ["main", "release/*"]
 ```
+
+- **Producer-side**, like `[artefact]`: where a repository tags is its own
+  knowledge, so consumers don't repeat it.
+- **Read from the dependency's default branch** (`origin/HEAD` in its store,
+  `git show origin/HEAD:.gitscale.toml`), not from the pinned commit: the
+  pin can predate the policy, and choosing a *new* tag should follow the
+  policy as it is now. No default branch known: the config at the pin.
+- **No `[release]`, or no `.gitscale.toml`:** rule 1 alone.
+- **Override, for a repository you don't control** (one with no
+  `.gitscale.toml` of its own): `releases` on the consumer's entry wins over
+  the dependency's `[release]`.
+
+  ```toml
+  [repos]
+  "imports/thirdparty" = { url = "https://github.com/other/lib.git", revision = "v1.4.0", releases = ["main"] }
+  ```
 
 - **Patterns** as `[develop] pinned` writes them (`trust::wildcard_match`),
   matched against the store's `refs/remotes/origin/*`.
 - **Rule.** `git tag --merged origin/<b>` for each matching branch, unioned,
   intersected with 1's list.
 - **No match** — no remote branch fits the patterns — is an error naming the
-  entry, not an empty candidate list that reads as "no release".
+  repository and where the patterns came from, not an empty candidate list
+  that reads as "no release".
 - **Scope.** Only `upgrade` (promotion and raise) and the promotion state
   `status` shows. Resolution is untouched: it compares revisions already
   written, and picks no tags.
@@ -73,7 +92,8 @@ them are candidates. Applies with 1, not instead of it.
 
 | Where | Change |
 |---|---|
-| `src/config.rs`, `RepoEntry` | `releases: Option<Vec<String>>` in the `[repos]` inline table; parse, validate (non-empty patterns), round-trip through `add` / `remove` rewrites, and through `upgrade`'s in-place edits |
+| `src/config.rs` | `[release] branches: Vec<String>`; `RepoEntry.releases: Option<Vec<String>>` as the override; both validated as non-empty patterns; `releases` kept by `require` / `unrequire` and `upgrade`'s in-place edits |
+| `src/promote.rs`, new `release_branches(store, entry)` | The entry's `releases`, else `[release] branches` from the dependency's default branch, else none |
 | `src/promote.rs`, `newest` | Takes the candidate list already filtered; stays name-only |
 | `src/promote.rs`, new `candidates(store, pin, releases, cross_major)` | Applies 1 and 2, returns tags newest first |
 | `src/promote.rs`, `assess` | Uses `candidates`; walks them for the newest that holds the change; new `State` for "no release contains the pin" |
@@ -92,12 +112,16 @@ In the `upgrade` and `status` features, through the playground remotes:
   `main` tag below it is.
 - Promotion with that hotfix as the newest tag promotes to the `main` tag that
   holds the change, instead of `not tagged yet`.
-- A hotfix branched from the pin is raised to without `releases`, and not with
-  `releases = ["main"]`.
+- A hotfix branched from the pin is raised to without `[release]`, and not
+  when the dependency declares `branches = ["main"]`.
+- The dependency's `[release]` is read from its default branch: a pin older
+  than the policy still gets it.
+- A consumer's `releases` overrides the dependency's `[release]`.
 - `--major` crosses to a major on a line that does not contain the pin.
 - A moved pin tag reports `no release contains`.
-- `releases` naming no remote branch is an error naming the entry.
-- `releases` survives `gitscale add` / `remove` rewriting the file.
+- Patterns naming no remote branch are an error naming the repository and
+  where the patterns came from.
+- `releases` survives `require` / `unrequire` and `upgrade` editing the file.
 
 Regenerate the test catalog afterwards.
 
@@ -105,18 +129,12 @@ Regenerate the test catalog afterwards.
 
 - `docs/topics.md`, *Promotion* and *Raising a dependency*: the containment
   rule, the newest-that-holds walk, `--major`'s exception, the new state.
-- `docs/configuration.md`: the `releases` key.
+- `docs/configuration.md`: `[release] branches`, and the `releases` override
+  on an entry.
 - `docs/cli.md`, `gitscale upgrade`: one line on which tags qualify.
 
 ## Open questions
 
-- **Producer-side default.** Where a repository tags is the producer's
-  knowledge; every consumer repeating `releases` duplicates it. A
-  `[release] branches` in the dependency's own `.gitscale.toml`, with the
-  consumer's entry overriding — later, if the per-entry key proves
-  repetitive. `singleton` is the precedent: a key a dependency says of
-  itself, read from its config at the revision selected.
-- **Workspace-wide default.** `[upgrade] releases = [...]` for every entry
-  that sets none — cheaper than the producer-side read, less precise.
-- **Should `releases` also bind promotion's `not tagged yet` hint** to name
-  the branch the change still has to reach (`not on main yet`)?
+- **Should the release branches also bind promotion's `not tagged yet`
+  hint** to name the branch the change still has to reach (`not on main
+  yet`)?

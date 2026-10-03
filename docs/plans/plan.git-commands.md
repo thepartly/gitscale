@@ -88,6 +88,12 @@ git topic switch PROJ-9-colleague    # hook: children with PROJ-9 branches join
 #       git fetch && git switch PROJ-9-colleague
 #       note: same result
 
+# See what is left to do on this topic
+git topic status    # joined repos: ahead, pushed, promotion state; what to merge next
+#   or via native git:
+#       git -C <repo> status -sb, per joined repo
+#       lacks: which repos are joined, promotion state, merge order
+
 # Gate the root's merge, in the MR pipeline
 git scale check    # fails while core comes from the topic
 #   or via native git:
@@ -319,6 +325,9 @@ merge-gate:
     end topics: a branch in a plain clone, a worktree when the root is a bare
     repository with worktrees. They also work from the bare repository's
     parent, and set up a bare clone to fetch remote branches.
+21. **`git topic status`** shows the current topic: its joined repos, what
+    each still needs, and what to merge next. `git scale ls` stays the view
+    of the whole workspace.
 
 ## Specification
 
@@ -616,6 +625,7 @@ git topic join [GLOBAL] <DIR>...
 git topic leave [GLOBAL] <DIR>...
 git topic start [GLOBAL] [--from BRANCH] [--worktree | --no-worktree] [--dir DIR] <NAME>
 git topic switch [GLOBAL] [--worktree | --no-worktree] [--dir DIR] <NAME>
+git topic status [GLOBAL] [--fetch] [-f, --format table|json]
 git topic list [GLOBAL] [--fetch]
 git topic finish [GLOBAL] [--force] [NAME]
 ```
@@ -767,6 +777,37 @@ topic), or pinned (`main`). `NAME` is taken with or without the
 
 Children follow placement: on a topic, every child whose store or remote has
 the branch joins it.
+
+#### `git topic status`
+
+The current topic only: the root and every joined child.
+
+```
+topic PROJ-12-price-cache
+
+  REPO           BRANCH                AHEAD  PUSHED  STATE
+  .              PROJ-12-price-cache   2      no      waits on imports/core
+  imports/core   PROJ-12-price-cache   3      yes     not tagged yet
+  imports/b      PROJ-12-price-cache   1      yes     promoted → v2026.10.04
+
+next to merge: imports/core
+then: git upgrade --commit, git scale push
+```
+
+- `BRANCH`: the slot's topic branch (per-major slots differ).
+- `AHEAD`: commits on the branch the pin doesn't have; for the root, commits
+  the default branch doesn't have.
+- `PUSHED`: `yes` when the remote has every commit, else `no`.
+- `STATE`: for a child, the promotion state `upgrade` computes (`no change
+  yet`, `not tagged yet`, `tagged TAG, no image yet`, `promoted → TAG`,
+  `cannot tell`, `held`); for the root, `waits on REPOS` while any joined
+  child is not promoted, else `ready to merge`.
+- **Footer:** `next to merge` as `upgrade` prints it; `then:` the next
+  command — `git upgrade --commit` once a child is promoted, `git scale push`
+  when something is not pushed, `git topic finish` once the root is merged.
+- Offline; `--fetch` fetches the joined repos' stores first. `--format json`
+  for scripts and agents.
+- Off a topic: `not on a topic`, exit 1.
 
 #### `git topic list`
 
@@ -1006,7 +1047,7 @@ fallback stays. The CI cache is unaffected: it is keyed by commit.
 | `Cargo.toml`, `src/bin/` | `git-topic`, `git-upgrade`, `git-explain`: insert the subcommand into argv, call `run_cli` |
 | new `src/commands/topic.rs` | `topic` (print), from `topic::root` and the slot's resolved topic branch |
 | `develop.rs` | Becomes `topic join` / `topic leave` |
-| `src/commands/topic.rs` | Also `start`, `list`, `finish`; `finish` reuses `promote::containment` for the merged test |
+| `src/commands/topic.rs` | Also `start`, `status`, `list`, `finish`; `status` reuses `promote::assess` and the merge order `upgrade` prints; `finish` reuses `promote::containment` for the merged test |
 | `src/lib.rs` | New and renamed commands; `external_subcommand` with the forwarding options |
 | `src/commands/forward.rs` (new) | [Forwarding](#forwarding) |
 | `status.rs` | Becomes `ls`; `--why` moves to `explain.rs` |
@@ -1077,6 +1118,9 @@ fallback stays. The CI cache is unaffected: it is keyed by commit.
   fails with the hint; a name already prefixed isn't prefixed twice; the
   directory drops the prefix; `join` / `finish` accept both forms; no
   `[topic] prefix` changes nothing.
+- **topic status:** only the root and joined children; each promotion state;
+  `waits on` / `ready to merge` for the root; the next command in the footer;
+  off a topic exits 1; `--format json`.
 - **topic list:** current marked; worktree paths; joined children; not
   pushed / pushed / merged, including a squash-merged topic.
 - **topic finish:** squash-merged topic finishes; unmerged refused, `--force`
@@ -1111,7 +1155,8 @@ fallback stays. The CI cache is unaffected: it is keyed by commit.
 - `cli.md`: rewritten from [Specification](#specification).
 - `workflow.md`, `topics.md`: the [Workflows](#workflows); `topics.md`'s
   *`gitscale develop`* section becomes *`git topic join` / `leave`*, and
-  *Parallel topics* uses `git topic start` / `finish`; `workflow.md` drops
+  *Parallel topics* uses `git topic start` / `finish`, and *Promotion* shows
+  `git topic status`; `workflow.md` drops
   the "Named, it is unlinked" row.
 - `hooks.md`: the hook in a child.
 - `recursive-dependencies.md`: *When resolution runs, and what it fetches*
