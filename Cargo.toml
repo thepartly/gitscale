@@ -14,12 +14,27 @@ path = "src/main.rs"
 name = "git-scale"
 path = "src/bin/git-scale.rs"
 
+[[bin]]
+name = "git-topic"
+path = "src/bin/git-topic.rs"
+
+[[bin]]
+name = "git-upgrade"
+path = "src/bin/git-upgrade.rs"
+
+[[bin]]
+name = "git-explain"
+path = "src/bin/git-explain.rs"
+
 [lib]
 name = "gitscale"
 path = "src/lib.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+clap_mangen = "0.3"
+console = "0.15"
+libc = "0.2"
 toml = "0.8"
 toml_edit = "0.22"
 serde = { version = "1", features = ["derive"] }

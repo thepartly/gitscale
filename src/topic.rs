@@ -122,7 +122,8 @@ pub fn default_branch(repo: &Path, online: bool) -> Option<String> {
 /// of them going back to its pin.
 ///
 /// Told from git's own records: the branch's reflog holds nothing but its
-/// creation, and the worktree's last move was from the old branch to it.
+/// creation, from the old branch, and the worktree's last move was from the
+/// old branch to it.
 pub fn branched_from(config_root: &Path, branch: &str) -> Option<String> {
     let created = crate::git::query(
         config_root,
@@ -135,9 +136,10 @@ pub fn branched_from(config_root: &Path, branch: &str) -> Option<String> {
     )?;
     let mut entries = created.lines();
     let first = entries.next()?;
-    if entries.next().is_some() || !first.starts_with("branch: Created from") {
+    if entries.next().is_some() {
         return None;
     }
+    let source = first.strip_prefix("branch: Created from ")?;
     let moved = crate::git::query(
         config_root,
         &["reflog", "show", "-n1", "--format=%gs", "HEAD"],
@@ -145,7 +147,47 @@ pub fn branched_from(config_root: &Path, branch: &str) -> Option<String> {
     let from = moved
         .strip_prefix("checkout: moving from ")?
         .strip_suffix(&format!(" to {}", branch))?;
-    (from != branch).then(|| from.to_string())
+    // Created from where the root was, not from somewhere else while it was
+    // there: `git switch -c y origin/main` on topic x starts afresh.
+    let from_it = source == "HEAD" || source == from || source == format!("refs/heads/{}", from);
+    (from != branch && from_it).then(|| from.to_string())
+}
+
+/// The `[topic] prefix` with `{user}` filled in: git config `gitscale.user`,
+/// else `$USER` (`USERNAME` on Windows). `None` without a prefix.
+pub fn prefix(configured: Option<&str>, repo: &Path) -> anyhow::Result<Option<String>> {
+    let Some(prefix) = configured else {
+        return Ok(None);
+    };
+    if !prefix.contains("{user}") {
+        return Ok(Some(prefix.to_string()));
+    }
+    let user = crate::git::query(repo, &["config", "--get", "gitscale.user"])
+        .filter(|u| !u.is_empty())
+        .or_else(|| std::env::var("USER").ok().filter(|u| !u.is_empty()))
+        .or_else(|| std::env::var("USERNAME").ok().filter(|u| !u.is_empty()));
+    match user {
+        Some(user) => Ok(Some(prefix.replace("{user}", &user))),
+        None => anyhow::bail!("set your name for branches: git config --global gitscale.user NAME"),
+    }
+}
+
+/// The branch `name` stands for: `prefix` in front, unless it is there
+/// already.
+pub fn with_prefix(name: &str, prefix: Option<&str>) -> String {
+    match prefix {
+        Some(prefix) if !name.starts_with(prefix) => format!("{}{}", prefix, name),
+        _ => name.to_string(),
+    }
+}
+
+/// The directory name of a topic's worktree: the branch without the
+/// prefix, every remaining `/` a `-`, so all topics sit at one level.
+pub fn worktree_name(branch: &str, prefix: Option<&str>) -> String {
+    let bare = prefix
+        .and_then(|p| branch.strip_prefix(p))
+        .unwrap_or(branch);
+    bare.replace('/', "-")
 }
 
 /// A CI pipeline run for a branch: which branch, the commit it checked out,
@@ -199,6 +241,20 @@ impl Pipeline {
     pub fn target(var: &dyn Fn(&str) -> Option<String>) -> Option<String> {
         let get = |name: &str| var(name).filter(|v| !v.is_empty());
         get("CI_MERGE_REQUEST_TARGET_BRANCH_NAME").or_else(|| get("GITHUB_BASE_REF"))
+    }
+}
+
+/// The topic a store branch belongs to: `NAME` for `NAME` and for a
+/// version branch `NAME@vN` or `NAME@v0.N`.
+pub fn unversioned(branch: &str) -> &str {
+    match branch.rsplit_once("@v") {
+        Some((topic, v))
+            if v.starts_with(|c: char| c.is_ascii_digit())
+                && v.bytes().all(|b| b.is_ascii_digit() || b == b'.') =>
+        {
+            topic
+        }
+        _ => branch,
     }
 }
 
@@ -275,6 +331,25 @@ mod tests {
     }
 
     #[test]
+    fn a_prefix_is_added_once_and_dropped_from_the_directory() {
+        assert_eq!(with_prefix("feat", Some("andrey/")), "andrey/feat");
+        assert_eq!(with_prefix("andrey/feat", Some("andrey/")), "andrey/feat");
+        assert_eq!(with_prefix("feat", None), "feat");
+        assert_eq!(
+            worktree_name("andrey/feature-blah", Some("andrey/")),
+            "feature-blah"
+        );
+        assert_eq!(
+            worktree_name("andrey/feature/blah", Some("andrey/")),
+            "feature-blah"
+        );
+        assert_eq!(
+            worktree_name("andrey/feature-blah", None),
+            "andrey-feature-blah"
+        );
+    }
+
+    #[test]
     fn the_default_branch_is_pinned_unless_the_list_says_otherwise() {
         assert!(is_pinned("main", None, Some("main")));
         assert!(!is_pinned("feat/x", None, Some("main")));
@@ -286,5 +361,13 @@ mod tests {
         // A written list is exactly what is pinned: the default is not implied.
         assert!(!is_pinned("main", Some(&list), Some("main")));
         assert!(!is_pinned("main", Some(&[]), Some("main")));
+    }
+
+    #[test]
+    fn a_version_branch_belongs_to_its_topic() {
+        assert_eq!(unversioned("feat"), "feat");
+        assert_eq!(unversioned("feat@v2"), "feat");
+        assert_eq!(unversioned("feat@v0.3"), "feat");
+        assert_eq!(unversioned("feat@vnext"), "feat@vnext");
     }
 }

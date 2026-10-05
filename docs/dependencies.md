@@ -48,74 +48,55 @@ list of values GitScale refuses, is in
 
 ## Ignoring the checkout directory
 
-Keep every declared checkout under one directory — `imports/` throughout this
-documentation — and **add it to the workspace repository's `.gitignore`**:
-
-```gitignore
-/imports/
-```
-
 The checkouts are not content of the workspace repository. What that repository
 tracks is the *selection*: `.gitscale.toml`, which names each repository and the
 revision it is pinned to. The checkouts themselves are reproduced from it by
-`gitscale pull`.
+[placement](workflow.md#placement).
 
-Without the ignore rule, every checkout is an untracked directory in the
-workspace repository, which has three visible consequences:
+So GitScale keeps them out of git's sight itself: every placement writes the
+checkout directories into the workspace repository's `info/exclude` — git's
+own per-repository ignore list, never committed — and, in each checkout, the
+[dependency links](recursive-dependencies.md#deduplication-by-symlink) it
+planted there into that repository's. `git status` stays quiet, and
+[`git scale add -A`](cli.md#git-commands-git-scale-git-command) stages neither
+checkouts into the root nor links into a checkout. No `.gitignore` entry is
+needed.
 
-- `git status` in the workspace repository is permanently noisy, listing
-  directories GitScale put there. The same happens one level down, where it also
-  shows up in [`gitscale status`](status.md): a sub-repository that declares its
-  own dependencies reads as [`dirty`](status.md#status-flags) purely because of
-  the symlinks planted in it.
-- [`gitscale commit`](workflow.md#commit) with no names runs `git add -A` in the
-  workspace repository. A git checkout would be staged as an embedded
-  repository; an [artefact](#artefacts-replace-and-overlay) checkout, which has no `.git` directory
-  at all, would have its entire extracted contents committed.
-- Anyone reading a diff has to scroll past it.
+The lines are in a block of GitScale's own per worktree, marked `# gitscale:`;
+lines of your own in the file are left alone. One file serves every worktree
+of a repository, so each root worktree, and each checkout of one store, keeps
+its own block, and the block of a worktree that is gone is dropped.
 
-The same applies one level down. A repository that declares its own dependencies
-gets [symlinks](recursive-dependencies.md) planted at those paths in its working
-tree, and those are untracked files in *that* repository — so it should ignore
-its own import directory in its own `.gitignore`.
-
-Ignoring is safe with [`gitscale clean`](clean.md), which removes ignored files
-(`git clean -xd`) but always excludes the declared checkouts and GitScale's own
-symlinks, at every level. It is **not** safe with a hand-run `git clean -xdf` at
-the workspace root, which has no such knowledge and will delete the whole
-workspace.
+A hand-run `git clean -xdf` — or `-X`, now that the checkouts count as ignored
+— at the workspace root deletes the whole workspace. [`git scale
+clean`](clean.md) keeps every checkout and link, at every level, whatever the
+flags.
 
 Nothing enforces the `imports/` name or requires the checkouts to share a
-directory — an entry may be declared at any relative path. One ignored directory
-is simply the arrangement that keeps the workspace repository clean with a
-single line.
+directory — an entry may be declared at any relative path.
 
 ## Adding and removing entries
 
 ```
-gitscale add imports/core https://github.com/org/core.git main
-gitscale add meta/svc     https://github.com/org/svc.git  main --artefact replace
+git scale require imports/core https://github.com/org/core.git main
+git scale require --artefact replace meta/svc https://github.com/org/svc.git main
 
-gitscale remove imports/core
+git scale unrequire imports/core
 ```
 
-`add` takes `DIRECTORY REPO_URL REVISION`, all three required, plus an optional
-`--artefact replace|overlay`. It refuses a directory that is already declared.
-If no config exists yet, it creates one next to `--root` (or the current
-directory).
+`require` takes `DIR URL [REVISION]`, plus an optional
+`--artefact replace|overlay`; left out, no revision is written. `DIR` is a path
+from the current directory. It refuses a directory that is already declared,
+and creates the root's `.gitscale.toml` when there is none. `unrequire` refuses
+a directory that is not declared.
 
-Neither command touches the filesystem — they edit `.gitscale.toml` only. Run
-[`gitscale pull`](workflow.md#pull) afterwards to materialise a new entry,
-and [`gitscale sync`](workflow.md#sync) after `gitscale remove` to remove its
-checkout — which it does only when that loses nothing (files git ignores, such
-as build output, go with it).
-[`clean`](clean.md) deliberately never deletes checkouts.
-
-> **Both commands rewrite the whole file.** The config is re-emitted from what
-> GitScale parsed, so comments, key order and formatting are lost, and any table
-> GitScale does not know about is dropped. Edit `.gitscale.toml` by hand if you
-> keep comments in it. Entries come back sorted by directory, and keep
-> `recursive = false`, `override` and `singleton` when the file said so.
+Both edit the root's `.gitscale.toml` in place — comments, key order and tables
+GitScale does not know about are kept — and then [place](workflow.md#placement)
+the workspace, online: `require` checks the new entry out; `unrequire` leaves
+its checkout to the relink step, which removes it when that loses nothing
+(files git ignores, such as build output, go with it) and reports it
+otherwise. Editing `.gitscale.toml` by hand and running `git scale sync` does
+the same. [`clean`](clean.md) never deletes checkouts.
 
 ## What a checkout is
 
@@ -126,9 +107,10 @@ in the working tree has its write bits cleared, so an accidental edit fails
 immediately instead of producing a change that later gets lost.
 
 To change a repository, put it on the workspace's topic — the root's branch —
-with [`gitscale develop`](topics.md#gitscale-develop): it gets a branch of the
-topic's name, writable, and `commit` and `push` act on it. Everything else
-stays at its pin. See [topics](topics.md).
+with [`git topic join`](topics.md#git-topic-join--leave): it gets a branch of
+the topic's name, writable, and
+[`git scale commit` and `git scale push`](cli.md#git-commands-git-scale-git-command)
+act on it. Everything else stays at its pin. See [topics](topics.md).
 
 ## Artefacts: `replace` and `overlay`
 
@@ -165,9 +147,11 @@ it moves.
 "imports/utils" = { url = "https://github.com/org/utils.git", revision = "main" }
 ```
 
-The checkout is **detached at the branch's tip**, and each `pull` moves it to
-the new tip. It never lands on the branch itself: a branch is something a
-repository is developed on, and that is what [topics](topics.md) are for.
+The checkout is **detached at the branch's tip**, and each
+[placement](workflow.md#placement) that asks the remotes — `git scale pull`,
+`git scale sync` — moves it to the new tip. It never lands on the branch
+itself: a branch is something a repository is developed on, and that is what
+[topics](topics.md) are for.
 
 ### Tag
 
@@ -175,7 +159,7 @@ repository is developed on, and that is what [topics](topics.md) are for.
 "imports/utils" = { url = "https://github.com/org/utils.git", revision = "v2.1.0" }
 ```
 
-Detached at the commit the tag points at. `gitscale status` reports a mismatch
+Detached at the commit the tag points at. `git scale ls` reports a mismatch
 only when HEAD is not at that commit.
 
 ### Commit SHA
@@ -265,13 +249,13 @@ dependency's `true`. A repository can say it of itself with a top-level
 ## History and depth
 
 On a developer machine every checkout has its repository's whole history: it
-is a worktree of a full bare clone, fetched once per `pull` however many
-checkouts and root worktrees use it.
+is a worktree of a full bare clone, shared by every checkout and root worktree
+that uses it, and fetched once each time resolution asks the remotes.
 
 In CI (`CI=1` or `CI=true`) every checkout is the one commit it needs, at depth
 1, served from the per-user [cache](stores.md#the-ci-cache) when the runner has
-it. A shallow checkout cannot report an exact behind count, so `gitscale
-status` shows `≠ stale` when its commit differs from upstream.
+it. A shallow checkout cannot report an exact behind count, so `git scale ls`
+shows `≠ stale` when its commit differs from upstream.
 
 ## Recursive dependencies
 
@@ -284,4 +268,4 @@ is [its own page](recursive-dependencies.md).
 
 ---
 
-[← 1. Overview](overview.md) · [Contents](README.md) · [Next → 2.2 Status](status.md)
+[← 1. Overview](overview.md) · [Contents](README.md) · [Next → 2.2 The workspace](status.md)

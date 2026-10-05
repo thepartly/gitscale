@@ -18,7 +18,7 @@
 - [Turning it off: `recursive = false`](#turning-it-off-recursive--false)
 - [Unlinked checkouts](#unlinked-checkouts)
 - [Orphaned symlinks](#orphaned-symlinks)
-- [When resolution runs, and what it fetches](#when-resolution-runs-and-what-it-fetches)
+- [When resolution asks the remotes](#when-resolution-asks-the-remotes)
 
 ## The idea
 
@@ -31,8 +31,8 @@ symlink.
 - **Every dependant has a say.** The root, its dependencies and theirs each
   make a *request* for what they need. The highest request wins.
 - **Hoisting.** All checkouts live in the workspace, so there is one place that
-  says which revision of anything is in play — and `gitscale status --why`
-  says how it got there.
+  says which revision of anything is in play — and `git explain` says how it
+  got there.
 - **Version coherence.** Two dependants cannot silently end up with two
   revisions of one major, because there is only one checkout of it.
 
@@ -63,7 +63,7 @@ Root `.gitscale.toml`:
 "vendor/d" = { url = "git@github.com:org/d.git", revision = "v1.5.0" }
 ```
 
-After `gitscale pull`, `imports/d` is at `v1.5.0`, the highest of the three
+After placement, `imports/d` is at `v1.5.0`, the highest of the three
 requests, and `b` and `c` reach it through links:
 
 ```
@@ -78,7 +78,7 @@ workspace/
 ```
     REPO        PATH   ARTEFACT   REF       EXPECTED   STATUS   RESOLUTION
 ✔   imports/d   -      -          3f2a9c1   v1.5.0     ok       raised from v1.2.0 by imports/c, 3 requests
-hint: gitscale status --why <dir> lists every request behind a revision
+hint: git explain <dir> lists every request behind a revision
 ```
 
 Each link is created relative to its own directory, so the workspace can be
@@ -135,7 +135,7 @@ or set the revision in a repository above both, such as the root
 No git history is read, so a shallow CI checkout resolves exactly as a
 developer machine does. On a developer machine, where the stores hold the
 history anyway, a winner that turns out to be behind what a losing request
-asked for is flagged in `status` — `behind imports/c's v2026.09.30` — without
+asked for is flagged in `ls` — `behind imports/c's v2026.09.30` — without
 changing the result.
 
 What counts as a semver or a calendar version, and what a stream is, is in
@@ -177,7 +177,7 @@ regression in v1.5.0, say — a repository marks its entry `override = true`:
   `held at v1.2.0, imports/b wants develop (no such revision)`. Without one it is an
   error.
 
-`status` shows the icon `↧`, `override` in STATUS, and
+`ls` shows the icon `↧`, `override` in STATUS, and
 `held at v1.4.0, imports/c wants v1.6.0` in RESOLUTION on a row an override
 holds below a request it beat.
 
@@ -204,14 +204,15 @@ allow = ["github.com/partner-org/*"]   # see below
 - Two repositories wanting one path is an error; declare one at the root under
   another directory.
 
-Keep `hoist_dir` in the root's `.gitignore`, as with every checkout directory.
+Like every checkout, they are kept out of the root's `git status` — see
+[ignoring the checkout directory](dependencies.md#ignoring-the-checkout-directory).
 
 ### Source or artefact
 
 An implicit checkout is a `replace` artefact when that is what was asked for,
 and an `overlay` when any request asks for one; otherwise it is a checkout of
 the source. Like every checkout it is detached and read-only until
-[developed](topics.md#gitscale-develop). To choose for yourself, declare it at
+[joined to a topic](topics.md#git-topic-join--leave). To choose for yourself, declare it at
 the root with no revision — the root then chooses its path and whether it is an
 artefact, while the revision still comes from resolution:
 
@@ -256,10 +257,10 @@ sees the hoisted path, only its own link.
 
 The lowest major keeps the plain name, so a new major *above* those already
 there never renames anything; a new major below them takes the plain name, and
-the others move to suffixed names on the next `sync`. A plain name the root
+the others move to suffixed names on the next placement. A plain name the root
 already uses for another major of the repository is never taken: the implicit
 one gets its suffix instead (`imports/mylib_v1` beside the root's v2 at
-`imports/mylib`). Each such row says `2 majors` in `status`. Two root
+`imports/mylib`). Each such row says `2 majors` in `ls`. Two root
 entries for one repository need revisions to tell their majors apart.
 
 ### singleton
@@ -281,7 +282,7 @@ root's entry, any.
 ## Errors
 
 Every error is raised by resolution, before anything is checked out, moved or
-linked. `status` prints it above the table and marks the rows `unresolved`.
+linked. `ls` prints it above the table and marks the rows `unresolved`.
 
 | Error | When |
 |---|---|
@@ -299,13 +300,13 @@ linked. `status` prints it above the table and marks the rows `unresolved`.
 A symlink is created when the target checkout exists; entries whose target is
 not there yet are skipped and picked up on a later run. GitScale never clobbers
 a real file or directory sitting at a link path — that is reported by
-[`status`](status.md) as `unlinked` and fixed by [`sync`](workflow.md#sync).
+[`git scale ls`](status.md) as [`unlinked`](#unlinked-checkouts) and fixed by
+the next [placement](workflow.md#placement).
 
-- Symlinked entries are skipped by `fetch`, `push`, `commit` and
-  [`clean`](clean.md). Run inside a child repository, `pull` and `sync` leave
-  them in place too, since the outer workspace decides which revision that
-  checkout is at.
-- `status` shows them as `⤷ symlink`, with the link target in the `PATH` column.
+- A git command run across the workspace with `git scale`, and
+  [`clean`](clean.md), never go through a link: the checkout it points to is
+  reached under its own path.
+- `ls` shows them as `⤷ symlink`, with the link target in the `PATH` column.
 - An artefact's dependencies come from the `.gitscale.toml` its image carries,
   and are linked inside the extracted artefact — see
   [artefacts](artefacts.md#what-gets-published).
@@ -326,14 +327,16 @@ says `recursive = false`.
 
 ## Unlinked checkouts
 
-If a path that should be a symlink holds a real checkout instead — someone
-cloned into it by hand, or it predates the dependency being hoisted — `status`
-flags the **parent repo** as `unlinked`, and `sync` fixes it:
+A path that should be a symlink can hold a real checkout instead: someone
+cloned into it by hand, or it comes from a layout made before the dependency
+was hoisted. `ls` flags the **parent repo** as `unlinked`, and every
+[placement](workflow.md#placement) fixes it:
 
-- A clean checkout is removed and the symlink restored automatically.
-- One with uncommitted changes or unpushed commits is left alone and
-  reported, and `sync --force` is required to replace it. The check descends
-  into its own nested dependencies, so work in a grandchild counts too.
+- A clean checkout is removed and the symlink restored.
+- One with uncommitted changes or unpushed commits is kept and reported, and
+  the placement exits non-zero until it runs with `--force` — `git scale sync
+  --force`, or `git scale pull --force-sync`. The check descends into its own
+  nested dependencies, so work in a grandchild counts too.
 
 ## Orphaned symlinks
 
@@ -342,29 +345,39 @@ behind. GitScale recognises its own links — relative, and pointing at a
 checkout of the workspace, anything under the hoist directory, or a direct
 child of the workspace root — and reports them as `orphan`:
 
-- **Broken orphans** (the target is gone) are removed automatically by `sync`.
-- **Orphans whose target still resolves** are only removed with `sync --force`,
+- **Broken orphans** (the target is gone) are removed by every placement.
+- **Orphans whose target still resolves** are only removed with `--force`,
   since something may still be using them.
 
 An implicit checkout nothing asks for any more — like a declared one whose
-entry was removed — is removed by `sync` when it holds nothing to lose (no
+entry was removed — is removed by placement when it holds nothing to lose (no
 uncommitted changes, unpushed commits or stash; files git ignores go with it), and
-kept otherwise, with `sync` failing until it is dealt with or `--force` is
-given. See [sync](workflow.md#sync).
+kept otherwise, with placement failing until it is dealt with or `--force` is
+given. See [placement](workflow.md#placement).
 
 Symlinks you created yourself, and anything absolute or pointing elsewhere, are
 never touched.
 
-## When resolution runs, and what it fetches
+## When resolution asks the remotes
 
-| Command | Resolves | Implicit checkouts |
-|---|---|---|
-| `pull` | Against the remotes, before moving anything | new ones checked out |
-| `sync` | As `pull`, then relinks and removes orphans | removed when left behind and clean |
-| `fetch` | Against the remotes, refreshing what `status` reads | fetched |
-| `status` | Offline from what is on disk; `--fetch` refreshes first | shown as rows |
-| `clean` | Offline, for the keep-list | kept |
-| `upgrade --resolved` | Against the remotes | never written |
+| Placement or command | Network |
+|---|---|
+| The [hook](hooks.md#git-hooks) in the root (clone, `switch`, a merging `pull`, `worktree add`) | Online |
+| `git scale sync`, `check`, `require`, `unrequire`, `git scale pull` | Online |
+| `git scale fetch` | Online: every store and artefact entry refreshed, nothing placed |
+| The end of any other git command run with `git scale`; the [hook in a child](hooks.md#the-hook-in-a-child) | Fetch on miss |
+| `ls`, `explain` | Offline, in CI too: they show what was placed. `--fetch` goes online |
+| **Any placement in CI** | **Online** |
+
+**Online** fetches every store resolution reads, first. **Offline** reads only
+what this machine has. **Fetch on miss** resolves offline, then fetches each
+store that lacked something resolution asked for — a revision its refs do not
+have included — and resolves again, while new gaps appear. Each store is
+fetched at most once; what is still missing is an error.
+
+A fetch that fails falls back, outside CI, to the refs fetched before, with a
+warning. In CI it fails resolution: runners keep the build directory between
+jobs, and refs an earlier job fetched would build a stale commit.
 
 Resolution reads, per repository, its branches and tags and the
 `.gitscale.toml` of each selected commit — never history:
@@ -379,8 +392,8 @@ Resolution reads, per repository, its branches and tags and the
   image's `gitscale` layer, kept with the images.
 
 Offline, a repository nothing has fetched yet is `unresolved`, with a hint to
-run `status --fetch`.
+run `git scale ls --fetch`.
 
 ---
 
-[← 2.2 Status](status.md) · [Contents](README.md) · [Next → 2.4 Everyday workflow](workflow.md)
+[← 2.2 The workspace](status.md) · [Contents](README.md) · [Next → 2.4 Everyday workflow](workflow.md)

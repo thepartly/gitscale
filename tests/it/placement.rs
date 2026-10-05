@@ -1,5 +1,6 @@
-//! `gitscale pull`: putting every checkout where resolution says, cloning what
-//! is missing, and never losing work to a move.
+//! Placement — what `git scale sync`, `git scale pull`, the hook and CI all
+//! do: putting every checkout where resolution says, checking out what is
+//! missing, and never losing work to a move.
 
 use crate::support;
 use crate::support::resolution::*;
@@ -25,9 +26,9 @@ fn normal_001_makes_each_checkout_a_detached_readonly_worktree_of_the_root_store
         url
     ));
 
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "stderr: {}", out.stderr);
-    insta::assert_snapshot!("pull_fresh_stdout", out.stdout);
+    insta::assert_snapshot!("sync_fresh_stdout", out.stdout);
 
     let checkout = env.playground.join("libs/mylib");
     let file = checkout.join("README.md");
@@ -61,7 +62,7 @@ fn normal_001_makes_each_checkout_a_detached_readonly_worktree_of_the_root_store
 }
 
 #[test]
-fn normal_002_a_second_pull_leaves_a_checkout_where_it_is() {
+fn normal_002_a_second_placement_leaves_a_checkout_where_it_is() {
     let env = TestEnv::new("pull_twice");
     let bare = env.create_bare_repo("mylib", "main", &[("README.md", "# mylib\n")]);
 
@@ -72,13 +73,13 @@ fn normal_002_a_second_pull_leaves_a_checkout_where_it_is() {
         bare.display()
     ));
 
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     let checkout = env.playground.join("libs/mylib");
     let head = git_stdout(&checkout, &["rev-parse", "HEAD"]);
     let link = std::fs::read_to_string(checkout.join(".git")).unwrap();
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success);
-    insta::assert_snapshot!("pull_twice_stdout", out.stdout);
+    insta::assert_snapshot!("sync_twice_stdout", out.stdout);
     // Where it was, and the same worktree — not one made again.
     assert_eq!(git_stdout(&checkout, &["rev-parse", "HEAD"]), head);
     assert_eq!(
@@ -88,7 +89,7 @@ fn normal_002_a_second_pull_leaves_a_checkout_where_it_is() {
 }
 
 #[test]
-fn normal_003_names_select_which_entries_to_pull() {
+fn normal_003_directories_select_which_entries_to_place() {
     let env = TestEnv::new("pull_selective");
     let bare1 = env.create_bare_repo("lib1", "main", &[("a.txt", "a")]);
     let bare2 = env.create_bare_repo("lib2", "main", &[("b.txt", "b")]);
@@ -102,7 +103,7 @@ fn normal_003_names_select_which_entries_to_pull() {
         bare2.display(),
     ));
 
-    let out = env.run(&["pull", "libs/lib1"]);
+    let out = env.run(&["sync", "libs/lib1"]);
     assert!(out.success, "stderr: {}", out.stderr);
 
     assert!(env.playground.join("libs/lib1/a.txt").is_file());
@@ -110,7 +111,7 @@ fn normal_003_names_select_which_entries_to_pull() {
 }
 
 #[test]
-fn normal_004_pulls_checkouts_and_artefacts_together() {
+fn normal_004_places_checkouts_and_artefacts_together() {
     let env = TestEnv::new("multiple_repos_mixed");
     let bare_rw = env.create_bare_repo("rw-lib", "main", &[("rw.txt", "readwrite")]);
     let bare_ro = env.create_bare_repo("ro-lib", "main", &[("ro.txt", "readonly")]);
@@ -130,7 +131,7 @@ fn normal_004_pulls_checkouts_and_artefacts_together() {
         bare_art.display(),
     ));
 
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "stderr: {}", out.stderr);
     insta::assert_snapshot!("multiple_repos_mixed_stdout", redact_shas(&out.stdout));
 
@@ -153,12 +154,12 @@ fn normal_005_moves_a_checkout_to_a_branch_made_after_it() {
         )
     };
     env.write_config(&config("main"));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
 
     bare_git_stdout(&bare, &["branch", "feature", "main"]);
     let tip = commit_to_bare(&bare, "feature", "a.txt", "feature");
     env.write_config(&config("feature"));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     let dest = env.playground.join("libs/mylib");
     assert_eq!(git_stdout(&dest, &["rev-parse", "HEAD"]), tip);
@@ -168,7 +169,7 @@ fn normal_005_moves_a_checkout_to_a_branch_made_after_it() {
     );
 }
 
-/// No revision means the remote's default branch: pull moves to its new head.
+/// No revision means the remote's default branch: sync moves to its new head.
 #[test]
 fn normal_006_without_a_revision_follows_the_default_branch() {
     let env = TestEnv::new("pull_no_rev");
@@ -178,10 +179,10 @@ fn normal_006_without_a_revision_follows_the_default_branch() {
         "[repos]\n\"libs/mylib\" = {{ url = \"{}\" }}\n",
         bare.display()
     ));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
 
     let second = commit_to_bare(&bare, "trunk", "a.txt", "v2");
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "pull failed: {}{}", out.stdout, out.stderr);
     let dest = env.playground.join("libs/mylib");
     assert_eq!(git_stdout(&dest, &["rev-parse", "HEAD"]), second);
@@ -202,7 +203,7 @@ fn edge_007_an_all_hex_tag_name_is_a_tag() {
         "[repos]\n\"libs/lib\" = {{ url = \"{}\", revision = \"20241001\" }}\n",
         bare.display()
     ));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}", out.stderr);
     let checkout = env.playground.join("libs/lib");
     assert_eq!(git_stdout(&checkout, &["rev-parse", "HEAD"]), tagged);
@@ -213,9 +214,10 @@ fn edge_007_an_all_hex_tag_name_is_a_tag() {
 }
 
 /// git exports `GIT_DIR` to hooks — during `git clone`, the new root's `.git`.
-/// A hook-triggered pull that let its git calls inherit it ran them against
-/// the root: the pinned tag "did not exist", and with an existing store the
-/// fetch rewrote the root's refs and checked the sub-repo's tag out over it.
+/// A hook-triggered placement that let its git calls inherit it ran them
+/// against the root: the pinned tag "did not exist", and with an existing
+/// store the fetch rewrote the root's refs and checked the sub-repo's tag out
+/// over it.
 #[test]
 fn edge_008_ignores_an_inherited_git_dir() {
     let env = TestEnv::new("pull_inherited_git_dir");
@@ -246,7 +248,7 @@ fn edge_008_ignores_an_inherited_git_dir() {
     // damaged the root.
     for pass in ["cold", "warm"] {
         let _ = std::fs::remove_dir_all(env.playground.join("libs"));
-        let out = env.run_with_env(&[("GIT_DIR", root_git.to_str().unwrap())], &["pull"]);
+        let out = env.run_with_env(&[("GIT_DIR", root_git.to_str().unwrap())], &["sync"]);
         assert!(
             out.success,
             "{} pass\nstdout: {}\nstderr: {}",
@@ -298,7 +300,7 @@ fn edge_008_ignores_an_inherited_git_dir() {
 }
 
 /// Commits made on a checkout's detached HEAD are somebody's work no branch
-/// holds: pull will not move away from them.
+/// holds: sync will not move away from them.
 #[test]
 fn edge_009_refuses_to_lose_commits_made_at_a_pin() {
     let env = TestEnv::new("pull_detached_commits");
@@ -307,7 +309,7 @@ fn edge_009_refuses_to_lose_commits_made_at_a_pin() {
         "[repos]\n\"libs/mylib\" = {{ url = \"{}\", revision = \"main\" }}\n",
         bare.display()
     ));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     let dest = env.playground.join("libs/mylib");
     support::run_git_pub(&dest, &["config", "user.email", "t@t.com"]);
     support::run_git_pub(&dest, &["config", "user.name", "T"]);
@@ -317,7 +319,7 @@ fn edge_009_refuses_to_lose_commits_made_at_a_pin() {
     let local = git_stdout(&dest, &["rev-parse", "HEAD"]);
     commit_to_bare(&bare, "main", "a.txt", "v2");
 
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success, "{}", out.stdout);
     let text = format!("{}{}", out.stdout, out.stderr);
     assert!(text.contains("is on no branch"), "{}", text);
@@ -331,7 +333,7 @@ fn edge_010_clones_into_an_empty_directory_and_leaves_the_workspace_alone() {
     // checked out `main` over the workspace's own branch.
     let env = workspace_with_stray_directory("pull_empty_entry_dir", |_| {});
 
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "stderr: {}", out.stderr);
     assert_eq!(
         git_out(&env.playground, &["rev-parse", "--abbrev-ref", "HEAD"]),
@@ -349,12 +351,12 @@ fn edge_011_moves_a_checkout_only_when_nothing_can_be_lost() {
     let env = TestEnv::new("res_safe_move");
     let d = tagged(&env, "d", &[("v1.2.0", ""), ("v1.5.0", "")]);
     env.write_config(&repos(&[("imports/d", &d, ", revision = \"v1.2.0\"")]));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     let dest = env.playground.join("imports/d");
     support::edit(&dest.join("README.md"), "local edit");
 
     env.write_config(&repos(&[("imports/d", &d, ", revision = \"v1.5.0\"")]));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success);
     let text = format!("{}{}", out.stdout, out.stderr);
     assert!(text.contains("not moved: uncommitted changes"), "{}", text);
@@ -365,7 +367,7 @@ fn edge_011_moves_a_checkout_only_when_nothing_can_be_lost() {
     );
 
     run_git_pub(&dest, &["checkout", "--", "README.md"]);
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v1.5.0"));
 }
 
@@ -387,12 +389,12 @@ fn edge_012_a_move_never_overwrites_an_untracked_file() {
         )
     };
     env.write_config(&entry("v1"));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     let dest = env.playground.join("imports/d");
     std::fs::write(dest.join("new.txt"), "mine").unwrap();
 
     env.write_config(&entry("v2"));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(
         std::fs::read_to_string(dest.join("new.txt")).unwrap(),
@@ -408,7 +410,7 @@ fn edge_013_does_not_move_a_detached_head_with_commits_on_no_branch() {
     let env = TestEnv::new("res_detached_work");
     let d = tagged(&env, "d", &[("v1.2.0", ""), ("v1.5.0", "")]);
     env.write_config(&repos(&[("imports/d", &d, ", revision = \"v1.2.0\"")]));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     let dest = env.playground.join("imports/d");
     run_git_pub(
         &dest,
@@ -426,7 +428,7 @@ fn edge_013_does_not_move_a_detached_head_with_commits_on_no_branch() {
     let work = head(&env, "imports/d");
 
     env.write_config(&repos(&[("imports/d", &d, ", revision = \"v1.5.0\"")]));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     let text = format!("{}{}", out.stdout, out.stderr);
     assert!(!out.success, "{}", text);
     assert!(text.contains("is on no branch"), "{}", text);
@@ -460,7 +462,7 @@ fn edge_020_pins_an_annotated_tag_at_its_commit() {
         "[repos]\n\"libs/lib\" = {{ url = \"{}\", revision = \"v1.0.0\" }}\n",
         bare.display()
     ));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     let checkout = env.playground.join("libs/lib");
     assert_eq!(git_stdout(&checkout, &["rev-parse", "HEAD"]), commit);
@@ -495,7 +497,7 @@ fn edge_021_a_full_sha_pins_that_commit() {
         wanted.push((name, first));
     }
     env.write_config(&config);
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     for (name, first) in wanted {
         let checkout = env.playground.join("libs").join(name);
@@ -522,7 +524,7 @@ fn edge_022_a_branch_wins_over_a_tag_of_the_same_name() {
         "[repos]\n\"libs/lib\" = {{ url = \"{}\", revision = \"release\" }}\n",
         bare.display()
     ));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(
         git_stdout(&env.playground.join("libs/lib"), &["rev-parse", "HEAD"]),
@@ -530,15 +532,15 @@ fn edge_022_a_branch_wins_over_a_tag_of_the_same_name() {
     );
 }
 
-/// A config with no entries has nothing to pull: the command says so and
+/// A config with no entries has nothing to sync: the command says so and
 /// succeeds.
 #[test]
-fn edge_023_with_no_entries_says_there_is_nothing_to_pull() {
+fn edge_023_with_no_entries_says_there_is_nothing_to_sync() {
     let env = TestEnv::new("pull_no_entries");
     env.write_config("[repos]\n");
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}", out.stderr);
-    assert_eq!(out.stdout, "Nothing to pull.\n");
+    assert_eq!(out.stdout, "Nothing to sync.\n");
 }
 
 /// Commits on a local branch are kept by the branch, so they do not block a
@@ -551,7 +553,7 @@ fn edge_024_a_commit_on_a_local_branch_does_not_block_a_move() {
         "[repos]\n\"libs/lib\" = {{ url = \"{}\", revision = \"main\" }}\n",
         bare.display()
     ));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     let checkout = env.playground.join("libs/lib");
     run_git_pub(&checkout, &["switch", "-q", "-c", "mywork"]);
     std::fs::write(checkout.join("mine.txt"), "mine").unwrap();
@@ -572,7 +574,7 @@ fn edge_024_a_commit_on_a_local_branch_does_not_block_a_move() {
     let mine = git_stdout(&checkout, &["rev-parse", "HEAD"]);
     let tip = env.push_commit(&bare, "main", "a.txt", "v2");
 
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(git_stdout(&checkout, &["rev-parse", "HEAD"]), tip);
     assert_eq!(
@@ -582,7 +584,7 @@ fn edge_024_a_commit_on_a_local_branch_does_not_block_a_move() {
 }
 
 /// Entries may nest (`deps` and `deps/inner`). Moving the outer checkout
-/// must leave the inner one's files as they were: a developed inner checkout
+/// must leave the inner one's files as they were: a joined inner checkout
 /// stays writable.
 #[test]
 #[ignore = "bug: restore_writable/apply_readonly on the outer checkout walk into the nested one, leaving its files read-only"]
@@ -603,15 +605,15 @@ fn edge_025_moving_an_outer_checkout_leaves_a_nested_checkouts_write_bits() {
     ));
     env.init_playground_git();
     env.set_playground_origin(root_remote.to_str().unwrap());
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     run_git_pub(&env.playground, &["switch", "-q", "-c", "feat/x"]);
-    let out = env.run(&["develop", "deps/inner"]);
+    let out = env.run(&["topic", "join", "deps/inner"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     let file = env.playground.join("deps/inner/i.txt");
     assert!(writable(&file), "develop makes the checkout writable");
 
     env.push_commit(&outer, "main", "o.txt", "v2");
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(
         std::fs::read_to_string(env.playground.join("deps/o.txt")).unwrap(),
@@ -624,9 +626,9 @@ fn edge_025_moving_an_outer_checkout_leaves_a_nested_checkouts_write_bits() {
 }
 
 /// A name with a trailing slash — what shell completion of a directory
-/// gives — selects the entry, as it does for `develop`.
+/// gives — selects the entry, as it does for `git topic join`.
 #[test]
-#[ignore = "bug: names are matched as exact strings, so `pull libs/lib1/` is 'Unknown repos: libs/lib1/'"]
+#[ignore = "bug: names are matched as exact strings, so `sync libs/lib1/` is 'Unknown repos: libs/lib1/'"]
 fn edge_029_a_name_with_a_trailing_slash_selects_its_entry() {
     let env = TestEnv::new("pull_trailing_slash");
     let bare = env.create_bare_repo("lib1", "main", &[("a.txt", "a")]);
@@ -634,7 +636,7 @@ fn edge_029_a_name_with_a_trailing_slash_selects_its_entry() {
         "[repos]\n\"libs/lib1\" = {{ url = \"{}\", revision = \"main\" }}\n",
         bare.display()
     ));
-    let out = env.run(&["pull", "libs/lib1/"]);
+    let out = env.run(&["sync", "libs/lib1/"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert!(env.playground.join("libs/lib1/a.txt").is_file());
 }
@@ -655,7 +657,7 @@ fn error_014_an_abbreviated_sha_fails_with_a_hint() {
         bare.display(),
         short
     ));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success);
     assert!(out.stderr.contains("full SHA"), "{}", out.stderr);
     assert!(
@@ -677,23 +679,29 @@ fn error_015_an_unknown_name_is_refused() {
         bare.display(),
     ));
 
-    let out = env.run(&["pull", "nonexistent"]);
+    let out = env.run(&["sync", "nonexistent"]);
     assert!(!out.success);
-    assert!(out.stderr.contains("Unknown repos"));
+    assert!(
+        out.stderr
+            .contains("nonexistent is not a checkout of this workspace"),
+        "{}",
+        out.stderr
+    );
     assert!(!env.playground.join("libs/lib1").exists());
 
     // Mixed with a known name, nothing runs either.
-    let out = env.run(&["pull", "libs/lib1", "nonexistent"]);
+    let out = env.run(&["sync", "libs/lib1", "nonexistent"]);
     assert!(!out.success);
     assert!(
-        out.stderr.contains("Unknown repos: nonexistent"),
+        out.stderr
+            .contains("nonexistent is not a checkout of this workspace"),
         "{}",
         out.stderr
     );
     assert!(!env.playground.join("libs/lib1").exists(), "{}", out.stdout);
 }
 
-/// A pull that cannot reach the remote fails, rather than reporting `ok` for
+/// A sync that cannot reach the remote fails, rather than reporting `ok` for
 /// a checkout it never updated.
 #[test]
 fn error_016_fails_when_the_remote_is_unreachable() {
@@ -703,12 +711,12 @@ fn error_016_fails_when_the_remote_is_unreachable() {
         "[repos]\n\"libs/mylib\" = {{ url = \"{}\", revision = \"main\" }}\n",
         bare.display()
     ));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     let checkout = env.playground.join("libs/mylib");
     let head = git_stdout(&checkout, &["rev-parse", "HEAD"]);
     std::fs::rename(&bare, bare.with_extension("gone")).unwrap();
 
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success, "pull should fail: {}", out.stdout);
     assert!(!out.stdout.contains("ok    libs/mylib"), "{}", out.stdout);
     assert!(out.stderr.contains("Error: "), "{}", out.stderr);
@@ -728,12 +736,12 @@ fn error_017_fails_when_local_changes_block_the_move() {
         "[repos]\n\"libs/mylib\" = {{ url = \"{}\", revision = \"main\" }}\n",
         bare.display()
     ));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     let dest = env.playground.join("libs/mylib");
     support::edit(&dest.join("a.txt"), "edited");
     commit_to_bare(&bare, "main", "a.txt", "v2");
 
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success, "pull should fail: {}", out.stdout);
     let text = format!("{}{}", out.stdout, out.stderr);
     assert!(text.contains("FAIL  libs/mylib"), "{}", text);
@@ -750,7 +758,7 @@ fn error_018_refuses_a_directory_that_holds_something_else() {
         std::fs::write(dir.join("notes.txt"), "mine").unwrap();
     });
 
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success, "stdout: {}", out.stdout);
     let said = format!("{}{}", out.stdout, out.stderr);
     assert!(said.contains("holds no git repository"), "{}", said);
@@ -767,7 +775,7 @@ fn error_018_refuses_a_directory_that_holds_something_else() {
 
 /// One entry that cannot be brought up to date — an artefact whose pipeline
 /// has not published yet — fails the command, but only after everything else
-/// is done: the rest pulled and linked.
+/// is done: the rest placed and linked.
 #[test]
 fn error_019_one_failing_entry_fails_the_command_after_the_rest_is_done() {
     let env = TestEnv::new("res_fail_at_end");
@@ -789,36 +797,25 @@ fn error_019_one_failing_entry_fails_the_command_after_the_rest_is_done() {
     // A commit whose image does not exist yet, before anything is cloned.
     env.push_commit(&art, "main", "README.md", "unpublished");
 
-    for command in ["pull", "sync"] {
-        let _ = std::fs::remove_dir_all(env.playground.join("imports"));
-        let out = env.run(&[command]);
-        let text = format!("{}{}", out.stdout, out.stderr);
-        assert!(!out.success, "{} should fail: {}", command, text);
-        assert!(
-            text.contains("may not have published yet"),
-            "{}: {}",
-            command,
-            text
-        );
-        assert!(
-            out.stderr.contains("FAIL  meta/art")
-                && out.stderr.contains("Error: 1 repo(s) failed to pull"),
-            "{}: {}",
-            command,
-            out.stderr
-        );
-        assert_eq!(
-            head(&env, "imports/d"),
-            tag_commit(&d, "v1.5.0"),
-            "{}: the rest is still pulled",
-            command
-        );
-        assert!(
-            env.playground.join("imports/b/libs/d").is_symlink(),
-            "{}: and linked",
-            command
-        );
-    }
+    let out = env.run(&["sync"]);
+    let text = format!("{}{}", out.stdout, out.stderr);
+    assert!(!out.success, "sync should fail: {}", text);
+    assert!(text.contains("may not have published yet"), "{}", text);
+    assert!(
+        out.stderr.contains("FAIL  meta/art")
+            && out.stderr.contains("Error: 1 repo(s) failed to place"),
+        "{}",
+        out.stderr
+    );
+    assert_eq!(
+        head(&env, "imports/d"),
+        tag_commit(&d, "v1.5.0"),
+        "the rest is still placed"
+    );
+    assert!(
+        env.playground.join("imports/b/libs/d").is_symlink(),
+        "and linked"
+    );
 }
 
 /// A revision the remote has neither as a branch nor as a tag fails the
@@ -831,7 +828,7 @@ fn error_026_a_revision_the_remote_lacks_fails_naming_it() {
         "[repos]\n\"libs/lib\" = {{ url = \"{}\", revision = \"no-such-branch\" }}\n",
         bare.display()
     ));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(out.stderr.contains("no-such-branch"), "{}", out.stderr);
     assert!(!env.playground.join("libs/lib").exists());
@@ -852,7 +849,7 @@ fn error_027_never_places_a_checkout_outside_the_workspace_through_a_symlink() {
         "[repos]\n\"evil/x\" = {{ url = \"{}\", revision = \"main\" }}\n",
         bare.display()
     ));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(
         !outside.join("x").exists(),
         "a checkout was written outside the workspace: {}{}",
@@ -866,10 +863,10 @@ fn error_027_never_places_a_checkout_outside_the_workspace_through_a_symlink() {
 // Performance
 // ---------------------------------------------------------------------------
 
-/// Each store is fetched once per pull, however many times resolution and
-/// placement ask for it — the first pull and every later one.
+/// Each store is fetched once per sync, however many times resolution and
+/// placement ask for it — the first sync and every later one.
 #[test]
-fn perf_028_fetches_each_store_once_per_pull() {
+fn perf_028_fetches_each_store_once_per_placement() {
     let env = TestEnv::new("pull_fetch_count");
     let mut config = String::from("[repos]\n");
     for name in ["a", "b", "c", "d", "e"] {
@@ -883,7 +880,7 @@ fn perf_028_fetches_each_store_once_per_pull() {
     env.write_config(&config);
     let (path, log) = counting_git(&env);
     for round in ["first", "second"] {
-        let out = env.run_with_env(&[("PATH", &path)], &["pull"]);
+        let out = env.run_with_env(&[("PATH", &path)], &["sync"]);
         assert!(out.success, "{}: {}{}", round, out.stdout, out.stderr);
         assert_eq!(take_git_count(&log, "fetch --prune"), 5, "{} pull", round);
     }

@@ -2,7 +2,7 @@
 //! directory so the next job on the runner downloads nothing.
 //!
 //! A developer machine keeps no cache — its stores live in the root's own git
-//! directory, see `stores` — so every test here that pulls does it as a CI
+//! directory, see `stores` — so every test here that syncs does it as a CI
 //! job, and asserts on two things at once: that the cache holds the commit,
 //! and that the checkout was built from it.
 
@@ -63,13 +63,13 @@ fn normal_001_ci_takes_a_pinned_commit_out_of_a_snapshot_entry() {
     );
 }
 
-/// Outside CI, `pull` never touches the cache.
+/// Outside CI, `sync` never touches the cache.
 #[test]
-fn normal_002_a_developer_pull_touches_no_cache() {
+fn normal_002_a_developer_sync_touches_no_cache() {
     let env = TestEnv::new("cache_dev_untouched");
     let bare = env.create_bare_repo("core", "main", &[("a.txt", "a")]);
     env.write_config(&config_for(&bare.display().to_string()));
-    let out = env.run_with_env(&[], &["pull"]);
+    let out = env.run_with_env(&[], &["sync"]);
     assert!(out.success, "{:?}", out.stderr);
     assert!(!env.cache.exists(), "{}", env.cache.display());
 }
@@ -81,7 +81,7 @@ fn normal_003_no_cache_in_ci_fetches_the_commit_from_the_remote() {
     let bare = env.create_bare_repo("core", "main", &[("a.txt", "a")]);
     let url = format!("file://{}", bare.display());
     env.write_config(&config_for(&url));
-    let out = env.run_with_env(&[("CI", "1")], &["pull", "--no-cache"]);
+    let out = env.run_with_env(&[("CI", "1")], &["sync", "--no-cache"]);
     assert!(out.success, "{:?}", out.stderr);
     assert!(!env.cache.exists());
     let checkout = env.playground.join("libs/core");
@@ -123,7 +123,7 @@ fn normal_004_a_second_job_re_pins_when_the_head_has_moved() {
 /// `cache update` works anywhere, `CI` set or not: it adds the pin a job of
 /// this workspace would take.
 #[test]
-fn normal_005_update_warms_a_repo_nobody_has_pulled() {
+fn normal_005_update_warms_a_repo_nobody_has_placed() {
     let env = TestEnv::new("cache_update");
     let bare = env.create_bare_repo("core", "main", &[("a.txt", "a")]);
     let url = format!("file://{}", bare.display());

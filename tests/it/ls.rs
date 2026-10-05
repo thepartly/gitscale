@@ -1,4 +1,4 @@
-//! `gitscale status`: the table and the JSON, one row per checkout.
+//! `git scale ls`: the table and the JSON, one row per checkout.
 
 use crate::support;
 use crate::support::artefacts::entry_config;
@@ -25,10 +25,10 @@ fn normal_001_table_shows_a_missing_checkout() {
         bare.display()
     ));
 
-    let out = env.run(&["status"]);
+    let out = env.run(&["ls"]);
     assert!(out.success, "stderr: {}", out.stderr);
     let plain = strip_ansi(&out.stdout);
-    insta::assert_snapshot!("status_table_missed_stdout", plain);
+    insta::assert_snapshot!("ls_table_missed_stdout", plain);
     // The JSON says the same: nothing there yet.
     let row = json_row(&env, "libs/mylib");
     assert_eq!(row["exists"], false, "{}", row);
@@ -48,11 +48,11 @@ fn normal_002_table_shows_a_checkout_at_its_pin() {
         bare.display()
     ));
 
-    env.run(&["pull"]);
-    let out = env.run(&["status"]);
+    env.run(&["sync"]);
+    let out = env.run(&["ls"]);
     assert!(out.success, "stderr: {}", out.stderr);
     let plain = redact_shas(&strip_ansi(&out.stdout));
-    insta::assert_snapshot!("status_table_ok_stdout", plain);
+    insta::assert_snapshot!("ls_table_ok_stdout", plain);
 }
 
 #[test]
@@ -68,14 +68,14 @@ fn normal_003_json_lists_each_checkout() {
         bare.display()
     ));
 
-    env.run(&["pull"]);
-    let out = env.run(&["status", "--format", "json"]);
+    env.run(&["sync"]);
+    let out = env.run(&["ls", "--format", "json"]);
     assert!(out.success, "stderr: {}", out.stderr);
 
     // Parse to validate JSON, then snapshot
     let parsed: serde_json::Value = serde_json::from_str(&out.stdout).expect("valid JSON");
     // Redact dynamic fields for stable snapshots
-    insta::assert_json_snapshot!("status_json_output", parsed, {
+    insta::assert_json_snapshot!("ls_json_output", parsed, {
         "[].current_ref" => "[ref]",
         "[].resolved_commit" => "[commit]",
         "[].requests[].commit" => "[commit]",
@@ -96,10 +96,10 @@ fn normal_004_table_shows_a_missing_artefact() {
         bare.display(),
     ));
 
-    let out = env.run(&["status"]);
+    let out = env.run(&["ls"]);
     assert!(out.success, "stderr: {}", out.stderr);
     let plain = strip_ansi(&out.stdout);
-    insta::assert_snapshot!("status_artefact_missed_stdout", plain);
+    insta::assert_snapshot!("ls_artefact_missed_stdout", plain);
 }
 
 #[test]
@@ -116,11 +116,11 @@ fn normal_005_table_shows_an_installed_artefact() {
         bare.display(),
     ));
 
-    assert!(env.run(&["pull"]).success);
-    let out = env.run(&["status"]);
+    assert!(env.run(&["sync"]).success);
+    let out = env.run(&["ls"]);
     assert!(out.success, "stderr: {}", out.stderr);
     let plain = redact_shas(&strip_ansi(&out.stdout));
-    insta::assert_snapshot!("status_artefact_ok_stdout", plain);
+    insta::assert_snapshot!("ls_artefact_ok_stdout", plain);
 }
 
 /// The other side of the same rule: detached somewhere the revision does not
@@ -133,7 +133,7 @@ fn normal_006_flags_a_pin_the_checkout_has_not_followed() {
     support::run_git_pub(&bare, &["tag", "demo-v1", "main"]);
     // Both tags exist before the clone, so the checkout knows demo-v2 and can
     // be told it is not on it. A revision the clone has never heard of is a
-    // different thing, and status says nothing about those rather than
+    // different thing, and `ls` says nothing about those rather than
     // guessing.
     commit_to_bare(&bare, "main", "a.txt", "v2");
     support::run_git_pub(&bare, &["tag", "demo-v2", "main"]);
@@ -144,7 +144,7 @@ fn normal_006_flags_a_pin_the_checkout_has_not_followed() {
 "#,
         bare.display()
     ));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
 
     // The config moves on to the later tag; the checkout has not.
     env.write_config(&format!(
@@ -154,7 +154,7 @@ fn normal_006_flags_a_pin_the_checkout_has_not_followed() {
         bare.display()
     ));
 
-    let out = env.run(&["status"]);
+    let out = env.run(&["ls", "--color", "always"]);
     assert!(out.success, "stderr: {}", out.stderr);
     let plain = strip_ansi(&out.stdout);
     assert!(
@@ -196,10 +196,10 @@ fn normal_010_a_dirty_checkout_in_the_table_and_the_json() {
     let env = TestEnv::new("status_dirty");
     let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "a")]);
     env.write_config(&mylib_config(&bare, "main"));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     support::edit(&env.playground.join("libs/mylib/a.txt"), "edited");
 
-    let out = env.run(&["status"]);
+    let out = env.run(&["ls", "--color", "always"]);
     assert!(out.success, "{}", out.stderr);
     assert_eq!(
         status_cell(&out.stdout, "libs/mylib"),
@@ -223,14 +223,18 @@ fn normal_010_a_dirty_checkout_in_the_table_and_the_json() {
 fn normal_011_counts_commits_ahead_of_and_behind_the_upstream() {
     let (env, bare, clone) = setup_commit_env("status_ahead_behind");
     std::fs::write(clone.join("work.txt"), "one").unwrap();
-    assert!(env.run(&["commit", "-m", "one"]).success);
-    let push = env.run(&["push"]);
+    assert!(env.run(&["--for", "libs/mylib", "add", "-A"]).success);
+    assert!(
+        env.run(&["--for", "libs/mylib", "commit", "-m", "one"])
+            .success
+    );
+    let push = env.run(&["--for", "libs/mylib", "push"]);
     assert!(push.success, "{}{}", push.stdout, push.stderr);
 
     // One commit of our own.
     std::fs::write(clone.join("work.txt"), "two").unwrap();
     support::run_git_pub(&clone, &["commit", "-q", "-am", "two"]);
-    let out = env.run(&["status"]);
+    let out = env.run(&["ls", "--color", "always"]);
     assert_eq!(
         status_cell(&out.stdout, "libs/mylib"),
         "+1",
@@ -246,7 +250,7 @@ fn normal_011_counts_commits_ahead_of_and_behind_the_upstream() {
 
     // And one on the remote's side, once fetched.
     env.push_commit(&bare, "feat/x", "remote.txt", "theirs");
-    let out = env.run(&["status", "--fetch"]);
+    let out = env.run(&["ls", "--color", "always", "--fetch"]);
     assert!(out.success, "{}", out.stderr);
     assert_eq!(
         status_cell(&out.stdout, "libs/mylib"),
@@ -263,7 +267,7 @@ fn normal_011_counts_commits_ahead_of_and_behind_the_upstream() {
 
     // Only behind.
     support::run_git_pub(&clone, &["reset", "-q", "--hard", "HEAD~1"]);
-    let out = env.run(&["status"]);
+    let out = env.run(&["ls", "--color", "always"]);
     assert_eq!(
         status_cell(&out.stdout, "libs/mylib"),
         "-1",
@@ -284,7 +288,7 @@ fn normal_012_a_symlinked_entry_shows_where_it_points() {
     let env = TestEnv::new("status_symlink_entry");
     let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "a")]);
     env.write_config(&mylib_config(&bare, "main"));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     let checkout = env.playground.join("libs/mylib");
     std::fs::remove_dir_all(&checkout).unwrap();
     let own = env.repos_remote.join("own-mylib");
@@ -294,7 +298,7 @@ fn normal_012_a_symlinked_entry_shows_where_it_points() {
     );
     std::os::unix::fs::symlink(&own, &checkout).unwrap();
 
-    let out = env.run(&["status"]);
+    let out = env.run(&["ls", "--color", "always"]);
     assert!(out.success, "{}", out.stderr);
     let row = cells(&table_row(&out.stdout, "libs/mylib"));
     assert_eq!(row[2], own.display().to_string(), "{:?}", row);
@@ -315,8 +319,9 @@ fn normal_012_a_symlinked_entry_shows_where_it_points() {
     assert_eq!(json["exists"], true, "{}", json);
 }
 
-/// The planted links git sees as untracked are listed in the JSON, relative to
-/// the checkout, and do not make it unclean there either.
+/// Planted links git sees as untracked — once GitScale's block in the
+/// checkout's `info/exclude` is gone — are listed in the JSON, relative to the
+/// checkout, and do not make it unclean there either.
 #[test]
 fn normal_013_json_lists_the_untracked_links() {
     let env = TestEnv::new("status_json_untracked_links");
@@ -325,8 +330,13 @@ fn normal_013_json_lists_the_untracked_links() {
         ("imports/b", &b, ", revision = \"v1.0.0\""),
         ("imports/d", &d, ", revision = \"v1.2.0\""),
     ]));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
+    let row = json_row(&env, "imports/b");
+    assert_eq!(row["untracked_links"], serde_json::json!([]), "{}", row);
 
+    let checkout = env.playground.join("imports/b");
+    let exclude = support::git_stdout(&checkout, &["rev-parse", "--git-path", "info/exclude"]);
+    std::fs::write(checkout.join(exclude), "").unwrap();
     let row = json_row(&env, "imports/b");
     assert_eq!(
         row["untracked_links"],
@@ -346,7 +356,7 @@ fn normal_014_json_carries_an_artefacts_remote_state_and_flags() {
     let env = TestEnv::new("status_artefact_json_remote");
     let bare = env.artefact_repo("app", &[("app.bin", "v1")]);
     env.write_config(&entry_config(&env, &bare, "main"));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     let installed = support::git_stdout(&bare, &["rev-parse", "main"]);
     let row = json_row(&env, "meta/app");
     assert_eq!(
@@ -380,7 +390,7 @@ fn normal_014_json_carries_an_artefacts_remote_state_and_flags() {
         "{}",
         row
     );
-    let out = env.run(&["status"]);
+    let out = env.run(&["ls", "--color", "always"]);
     assert_eq!(
         icon_and_colour(&out.stdout, "meta/app"),
         ("!".to_string(), "91".to_string())
@@ -398,23 +408,23 @@ fn normal_014_json_carries_an_artefacts_remote_state_and_flags() {
         "{}",
         row
     );
-    let out = env.run(&["status"]);
+    let out = env.run(&["ls", "--color", "always"]);
     assert_eq!(
         icon_and_colour(&out.stdout, "meta/app"),
         ("⇓".to_string(), "33".to_string())
     );
 }
 
-/// `status --fetch` asks the registry itself: the same run reports what it
+/// `ls --fetch` asks the registry itself: the same run reports what it
 /// just found, with no separate `fetch` before it.
 #[test]
 fn normal_015_fetch_reports_what_the_registry_has_now() {
     let env = TestEnv::new("status_fetch_artefact");
     let bare = env.artefact_repo("app", &[("app.bin", "v1")]);
     env.write_config(&entry_config(&env, &bare, "main"));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     env.push_commit(&bare, "main", "README.md", "v2");
-    let offline = env.run(&["status"]);
+    let offline = env.run(&["ls"]);
     assert_eq!(
         status_cell(&offline.stdout, "meta/app"),
         "ok",
@@ -422,7 +432,7 @@ fn normal_015_fetch_reports_what_the_registry_has_now() {
         offline.stdout
     );
 
-    let out = env.run(&["status", "--fetch"]);
+    let out = env.run(&["ls", "--fetch"]);
     assert!(out.success, "{}", out.stderr);
     assert_eq!(
         status_cell(&out.stdout, "meta/app"),
@@ -433,7 +443,7 @@ fn normal_015_fetch_reports_what_the_registry_has_now() {
     );
 
     env.publish(&bare, "main", &[("app.bin", "v2")]);
-    let out = env.run(&["status", "--fetch"]);
+    let out = env.run(&["ls", "--fetch"]);
     assert_eq!(
         status_cell(&out.stdout, "meta/app"),
         "behind",
@@ -444,14 +454,14 @@ fn normal_015_fetch_reports_what_the_registry_has_now() {
 
 /// On a topic, the table starts with the topic's branch and what may merge
 /// next, and the JSON carries both as an object of their own, with the
-/// row's `topic` saying which branch it is on and that it is developed here.
+/// row's `topic` saying which branch it is on and that it is joined here.
 #[test]
 fn normal_016_a_topic_is_named_with_what_may_merge_next() {
     let (env, _bare, clone) = setup_commit_env("status_topic_next");
     std::fs::write(clone.join("work.txt"), "change").unwrap();
     assert!(env.run(&["commit", "-m", "change"]).success);
 
-    let out = env.run(&["status"]);
+    let out = env.run(&["ls"]);
     assert!(out.success, "{}", out.stderr);
     let plain = strip_ansi(&out.stdout);
     let first = plain.lines().next().unwrap_or_default();
@@ -461,7 +471,7 @@ fn normal_016_a_topic_is_named_with_what_may_merge_next() {
         plain
     );
 
-    let json = env.run(&["status", "--format", "json"]);
+    let json = env.run(&["ls", "--format", "json"]);
     let rows = json_rows(&json.stdout);
     let topic = rows
         .iter()
@@ -478,7 +488,7 @@ fn normal_016_a_topic_is_named_with_what_may_merge_next() {
 }
 
 /// A topic branch only the remote has yet is `topic, from remote` until a
-/// pull puts it on a local branch.
+/// placement puts it on a local branch.
 #[test]
 fn normal_017_a_topic_branch_only_the_remote_has_is_from_remote() {
     let f = fixture("status_topic_from_remote", "");
@@ -486,24 +496,24 @@ fn normal_017_a_topic_branch_only_the_remote_has_is_from_remote() {
     let ws = f.clone_root("ws");
     support::run_git_pub(&ws, &["switch", "-q", "-c", "feat/x"]);
 
-    let out = gs(&ws, &["status", "--fetch"]);
+    let out = gs(&ws, &["ls", "--fetch"]);
     assert!(out.success, "{}", out.stderr);
     let row = table_row(&out.stdout, "imports/core");
     assert!(row.contains("topic, from remote"), "{}", row);
 }
 
-/// `--why` marks the requests an override beat and the override itself.
+/// `git explain` marks the requests an override beat and the override itself.
 #[test]
-fn normal_018_why_marks_the_override_and_what_it_overruled() {
+fn normal_018_explain_marks_the_override_and_what_it_overruled() {
     let env = TestEnv::new("status_why_override");
     let (b, d) = diamond(&env);
     env.write_config(&repos(&[
         ("imports/b", &b, ", revision = \"v1.0.0\""),
         ("imports/d", &d, ", revision = \"v1.2.0\", override = true"),
     ]));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
 
-    let out = env.run(&["status", "--why", "imports/d"]);
+    let out = env.run(&["explain", "imports/d"]);
     assert!(out.success, "{}", out.stderr);
     let root = out
         .stdout
@@ -549,20 +559,20 @@ fn normal_018_why_marks_the_override_and_what_it_overruled() {
 fn normal_019_a_workspace_with_no_repos_says_so() {
     let env = TestEnv::new("status_no_repos");
     env.write_config("[repos]\n");
-    let out = env.run(&["status"]);
+    let out = env.run(&["ls"]);
     assert!(out.success, "{}", out.stderr);
     assert_eq!(out.stdout.trim(), "No repos declared in .gitscale.toml");
 }
 
-/// `--why` alone, when no checkout is asked for by more than one repository,
-/// says so rather than printing nothing.
+/// `git explain` alone, when no checkout is asked for by more than one
+/// repository, says so rather than printing nothing.
 #[test]
-fn normal_020_why_with_nothing_shared_says_so() {
+fn normal_020_explain_with_nothing_shared_says_so() {
     let env = TestEnv::new("status_why_nothing_shared");
     let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "a")]);
     env.write_config(&mylib_config(&bare, "main"));
-    assert!(env.run(&["pull"]).success);
-    let out = env.run(&["status", "--why"]);
+    assert!(env.run(&["sync"]).success);
+    let out = env.run(&["explain"]);
     assert!(out.success, "{}", out.stderr);
     assert_eq!(
         out.stdout.trim(),
@@ -588,10 +598,10 @@ fn normal_028_a_topic_slot_waits_on_the_topic_slots_it_asks_for() {
     ));
     env.init_playground_git();
     support::run_git_pub(&env.playground, &["switch", "-q", "-c", "feat/x"]);
-    let pull = env.run(&["pull"]);
+    let pull = env.run(&["sync"]);
     assert!(pull.success, "{}{}", pull.stdout, pull.stderr);
 
-    let out = env.run(&["status"]);
+    let out = env.run(&["ls"]);
     assert!(out.success, "{}", out.stderr);
     let plain = strip_ansi(&out.stdout);
     assert_eq!(
@@ -620,10 +630,10 @@ fn normal_029_a_topic_branch_behind_the_pin_says_rebase_it() {
     ));
     env.init_playground_git();
     support::run_git_pub(&env.playground, &["switch", "-q", "-c", "feat/x"]);
-    let pull = env.run(&["pull"]);
+    let pull = env.run(&["sync"]);
     assert!(pull.success, "{}{}", pull.stdout, pull.stderr);
 
-    let out = env.run(&["status"]);
+    let out = env.run(&["ls"]);
     assert!(out.success, "{}", out.stderr);
     let row = table_row(&out.stdout, "imports/core");
     assert!(
@@ -645,16 +655,16 @@ fn normal_030_a_replace_artefact_on_a_topic_says_image_or_sources() {
     env.write_config(&entry_config(&env, &app, "main"));
     env.init_playground_git();
     support::run_git_pub(&env.playground, &["switch", "-q", "-c", "feat/x"]);
-    let pull = env.run(&["pull"]);
+    let pull = env.run(&["sync"]);
     assert!(pull.success, "{}{}", pull.stdout, pull.stderr);
-    let out = env.run(&["status"]);
+    let out = env.run(&["ls"]);
     let row = table_row(&out.stdout, "meta/app");
     assert!(row.contains(&format!("image {}", &tip[..7])), "{}", row);
 
     env.push_commit(&app, "feat/x", "README.md", "newer");
-    let pull = env.run(&["pull"]);
+    let pull = env.run(&["sync"]);
     assert!(pull.success, "{}{}", pull.stdout, pull.stderr);
-    let out = env.run(&["status"]);
+    let out = env.run(&["ls"]);
     let row = table_row(&out.stdout, "meta/app");
     assert!(row.contains("sources"), "{}", row);
 }
@@ -664,7 +674,7 @@ fn normal_030_a_replace_artefact_on_a_topic_says_image_or_sources() {
 // ---------------------------------------------------------------------------
 
 /// A checkout at its pin is detached, so REF reads as a commit while
-/// EXPECTED reads as the tag. That is not a mismatch, and status must not dress
+/// EXPECTED reads as the tag. That is not a mismatch, and `ls` must not dress
 /// it as one — the yellow REF and a `ref-mismatch` flag both have to key off
 /// where HEAD actually is.
 #[test]
@@ -679,9 +689,9 @@ fn edge_007_a_detached_tag_pin_is_not_a_mismatch() {
 "#,
         bare.display()
     ));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
 
-    let out = env.run(&["status"]);
+    let out = env.run(&["ls"]);
     assert!(out.success, "stderr: {}", out.stderr);
     let plain = strip_ansi(&out.stdout);
     assert!(
@@ -709,7 +719,7 @@ fn edge_008_json_with_no_repos_is_json() {
     let env = TestEnv::new("status_json_empty");
     env.write_config("[repos]\n");
 
-    let out = env.run(&["status", "--format", "json"]);
+    let out = env.run(&["ls", "--format", "json"]);
     assert!(out.success, "stderr: {}", out.stderr);
     assert!(
         serde_json::from_str::<serde_json::Value>(&out.stdout).is_ok(),
@@ -724,7 +734,7 @@ fn edge_008_json_with_no_repos_is_json() {
 #[test]
 fn edge_021a_an_orphan_link_whose_target_resolves() {
     let (env, _orphan) = setup_orphan_env("status_orphan_valid", true);
-    let out = env.run(&["status"]);
+    let out = env.run(&["ls", "--color", "always"]);
     assert!(out.success, "{}", out.stderr);
     let row = table_row(&out.stdout, "repoA/libs/c");
     assert!(row.trim_end().ends_with("orphan"), "{}", row);
@@ -732,7 +742,7 @@ fn edge_021a_an_orphan_link_whose_target_resolves() {
         icon_and_colour(&out.stdout, "repoA/libs/c"),
         ("⊘".to_string(), "33".to_string())
     );
-    let json = env.run(&["status", "--format", "json"]);
+    let json = env.run(&["ls", "--color", "always", "--format", "json"]);
     let rows = json_rows(&json.stdout);
     assert!(
         rows.contains(
@@ -747,7 +757,7 @@ fn edge_021a_an_orphan_link_whose_target_resolves() {
 #[test]
 fn edge_021b_an_orphan_link_whose_target_is_gone() {
     let (env, _orphan) = setup_orphan_env("status_orphan_broken", false);
-    let out = env.run(&["status"]);
+    let out = env.run(&["ls", "--color", "always"]);
     assert!(out.success, "{}", out.stderr);
     let row = table_row(&out.stdout, "repoA/libs/c");
     assert!(row.trim_end().ends_with("orphan, broken"), "{}", row);
@@ -755,7 +765,7 @@ fn edge_021b_an_orphan_link_whose_target_is_gone() {
         icon_and_colour(&out.stdout, "repoA/libs/c"),
         ("⊘".to_string(), "91".to_string())
     );
-    let json = env.run(&["status", "--format", "json"]);
+    let json = env.run(&["ls", "--color", "always", "--format", "json"]);
     let rows = json_rows(&json.stdout);
     assert!(
         rows.contains(
@@ -767,48 +777,46 @@ fn edge_021b_an_orphan_link_whose_target_is_gone() {
 }
 
 /// A directory named with the trailing slash a shell completes is the same
-/// checkout to `--why`.
+/// checkout to `git explain`.
 #[test]
-fn edge_022_why_takes_a_directory_with_a_trailing_slash() {
+fn edge_022_explain_takes_a_directory_with_a_trailing_slash() {
     let env = TestEnv::new("status_why_slash");
     let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "a")]);
     env.write_config(&mylib_config(&bare, "main"));
-    assert!(env.run(&["pull"]).success);
-    let out = env.run(&["status", "--why", "libs/mylib/"]);
+    assert!(env.run(&["sync"]).success);
+    let out = env.run(&["explain", "libs/mylib/"]);
     assert!(out.success, "{}", out.stderr);
     assert!(out.stdout.starts_with("libs/mylib  "), "{}", out.stdout);
 }
 
-/// A clone standing where a link belongs is `unlinked`: that clone is the
-/// whole story. This pins the current behaviour, in which the owner is also
-/// called `dirty`, because git lists the clone as an untracked directory of
-/// the owner's — see the decisions in the report; the docs reserve
-/// `unlinked, dirty` for an owner with changes of its own.
+/// A clone standing where a link belongs is `unlinked`, and that is the whole
+/// story: the path is kept out of the owner's git status, so the owner is not
+/// called `dirty` for it.
 #[test]
 fn edge_023_an_unlinked_clone_in_a_repository_that_does_not_ignore_it() {
     let (env, _link) = setup_unlinked_env("status_unlinked_alone");
-    let out = env.run(&["status"]);
+    let out = env.run(&["ls"]);
     assert!(out.success, "{}", out.stderr);
     assert_eq!(
         status_cell(&out.stdout, "repoA"),
-        "unlinked, dirty",
+        "unlinked",
         "{}",
         out.stdout
     );
 }
 
-/// A remote that cannot be reached when `--fetch` asks for it: status still
+/// A remote that cannot be reached when `--fetch` asks for it: `ls` still
 /// reports, from what was fetched before, and says so on stderr.
 #[test]
 fn edge_024_fetch_falls_back_to_what_was_fetched_before() {
     let env = TestEnv::new("status_fetch_git_failure");
     let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "a")]);
     env.write_config(&mylib_config(&bare, "main"));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     std::fs::rename(&bare, bare.with_extension("moved")).unwrap();
 
     // A subprocess: the warning goes straight to the process's stderr.
-    let out = gitscale(&env, &[], &["status", "--fetch"]);
+    let out = gitscale(&env, &[], &["ls", "--fetch"]);
     assert_eq!(out.code, Some(0), "{}", out.said());
     assert!(
         out.stderr.contains("using what was fetched before"),
@@ -835,7 +843,7 @@ fn edge_031_a_shallow_checkout_behind_its_upstream_is_stale() {
     env.write_config(&mylib_config(&bare, "main"));
     env.init_playground_git();
     let ci = [("CI", "true")];
-    let pull = env.run_with_env(&ci, &["pull", "--no-cache"]);
+    let pull = env.run_with_env(&ci, &["sync", "--no-cache"]);
     assert!(pull.success, "{}{}", pull.stdout, pull.stderr);
     let checkout = env.playground.join("libs/mylib");
     let track = [
@@ -851,7 +859,7 @@ fn edge_031_a_shallow_checkout_behind_its_upstream_is_stale() {
         &checkout,
         &["switch", "-q", "-c", "main", "--track", "origin/main"],
     );
-    let before = env.run_with_env(&ci, &["status"]);
+    let before = env.run_with_env(&ci, &["ls", "--color", "always"]);
     assert_eq!(
         status_cell(&before.stdout, "libs/mylib"),
         "ok",
@@ -861,7 +869,7 @@ fn edge_031_a_shallow_checkout_behind_its_upstream_is_stale() {
 
     env.push_commit(&bare, "main", "a.txt", "moved");
     support::run_git_pub(&checkout, &track);
-    let out = env.run_with_env(&ci, &["status"]);
+    let out = env.run_with_env(&ci, &["ls", "--color", "always"]);
     assert!(out.success, "{}", out.stderr);
     assert_eq!(
         status_cell(&out.stdout, "libs/mylib"),
@@ -873,7 +881,7 @@ fn edge_031_a_shallow_checkout_behind_its_upstream_is_stale() {
         icon_and_colour(&out.stdout, "libs/mylib"),
         ("≠".to_string(), "91".to_string())
     );
-    let json = env.run_with_env(&ci, &["status", "--format", "json"]);
+    let json = env.run_with_env(&ci, &["ls", "--color", "always", "--format", "json"]);
     let rows = json_rows(&json.stdout);
     let row = rows
         .iter()
@@ -884,26 +892,26 @@ fn edge_031_a_shallow_checkout_behind_its_upstream_is_stale() {
 
 /// A checkout git cannot read — its `.git` names a git directory that is
 /// gone — is not `ok`: git could not say whether it is clean, or where its
-/// HEAD is, and status must not claim either.
+/// HEAD is, and `ls` must not claim either.
 #[test]
-#[ignore = "bug: status reads a failed git status as clean, so a checkout git cannot read shows ok"]
+#[ignore = "bug: ls reads a failed git status as clean, so a checkout git cannot read shows ok"]
 fn edge_032_a_checkout_git_cannot_read_is_not_ok() {
     let env = TestEnv::new("status_unreadable_checkout");
     let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "a")]);
     env.write_config(&mylib_config(&bare, "main"));
     env.init_playground_git();
     let ci = [("CI", "true")];
-    let pull = env.run_with_env(&ci, &["pull", "--no-cache"]);
+    let pull = env.run_with_env(&ci, &["sync", "--no-cache"]);
     assert!(pull.success, "{}{}", pull.stdout, pull.stderr);
     let checkout = env.playground.join("libs/mylib");
     std::fs::remove_dir_all(checkout.join(".git")).unwrap();
     std::fs::write(checkout.join(".git"), "gitdir: /nonexistent/gitdir\n").unwrap();
 
-    let out = env.run_with_env(&ci, &["status"]);
+    let out = env.run_with_env(&ci, &["ls"]);
     // REF is empty here, so the row is read whole rather than by cells.
     let row = table_row(&out.stdout, "libs/mylib");
     assert!(!row.trim_end().ends_with(" ok"), "{}", row);
-    let json = env.run_with_env(&ci, &["status", "--format", "json"]);
+    let json = env.run_with_env(&ci, &["ls", "--format", "json"]);
     let rows = json_rows(&json.stdout);
     let row = rows
         .iter()
@@ -928,7 +936,7 @@ fn error_009_fetch_reports_a_fetch_it_could_not_do() {
 "#,
         bare.display()
     ));
-    let out = env.run(&["status", "--fetch"]);
+    let out = env.run(&["ls", "--fetch"]);
     assert!(out.success, "stderr: {}", out.stderr);
     assert!(
         out.stderr.contains("fetch meta/app: no registry is known"),
@@ -952,14 +960,14 @@ fn error_009_fetch_reports_a_fetch_it_could_not_do() {
 /// A graph that cannot be resolved as a whole still gets its table: the error
 /// on stderr as `error: …`, and every declared entry marked `unresolved`,
 /// pointing at it. JSON stays JSON. This pins the current exit status, 0;
-/// whether a failed resolution should fail `status` is a decision for the
+/// whether a failed resolution should fail `ls` is a decision for the
 /// owner.
 #[test]
 fn error_025_a_graph_that_cannot_be_resolved_still_gets_a_table() {
     let env = TestEnv::new("status_resolution_fails");
     conflicted_workspace(&env);
 
-    let out = env.run(&["status"]);
+    let out = env.run(&["ls"]);
     assert!(out.success, "{}", out.stderr);
     assert!(out.stderr.contains("error: "), "{}", out.stderr);
     assert!(out.stderr.contains("override conflict"), "{}", out.stderr);
@@ -969,7 +977,7 @@ fn error_025_a_graph_that_cannot_be_resolved_still_gets_a_table() {
         assert!(row.trim_end().ends_with("see the error above"), "{}", row);
     }
 
-    let json = env.run(&["status", "--format", "json"]);
+    let json = env.run(&["ls", "--format", "json"]);
     assert!(json.success, "{}", json.stderr);
     let rows = json_rows(&json.stdout);
     let b = rows.iter().find(|r| r["directory"] == "imports/b").unwrap();
@@ -982,14 +990,14 @@ fn error_025_a_graph_that_cannot_be_resolved_still_gets_a_table() {
 /// `-v` names each artefact as `--fetch` asks the registry about it — on
 /// stderr, or anywhere but in the JSON a consumer parses.
 #[test]
-#[ignore = "bug: status -v --fetch --format json prints 'Fetching …' into the JSON on stdout"]
+#[ignore = "bug: ls -v --fetch --format json prints 'Fetching …' into the JSON on stdout"]
 fn error_026_verbose_fetch_keeps_json_parseable() {
     let env = TestEnv::new("status_verbose_json");
     let bare = env.artefact_repo("app", &[("app.bin", "v1")]);
     env.write_config(&entry_config(&env, &bare, "main"));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
 
-    let out = env.run(&["status", "-v", "--fetch", "--format", "json"]);
+    let out = env.run(&["ls", "-v", "--fetch", "--format", "json"]);
     assert!(out.success, "{}", out.stderr);
     let parsed = serde_json::from_str::<serde_json::Value>(&out.stdout);
     assert!(parsed.is_ok(), "not JSON:\n{}", out.stdout);
@@ -999,10 +1007,10 @@ fn error_026_verbose_fetch_keeps_json_parseable() {
 // Performance
 // ---------------------------------------------------------------------------
 
-/// Without `--fetch`, status reads only this machine: not one registry
+/// Without `--fetch`, `ls` reads only this machine: not one registry
 /// request, and no attempt at a remote that has gone away.
 #[test]
-fn perf_027_without_fetch_status_asks_nothing_of_the_network() {
+fn perf_027_without_fetch_ls_asks_nothing_of_the_network() {
     let env = TestEnv::new("status_offline");
     let app = env.artefact_repo("app", &[("app.bin", "v1")]);
     let lib = env.create_bare_repo("mylib", "main", &[("a.txt", "a")]);
@@ -1013,12 +1021,12 @@ fn perf_027_without_fetch_status_asks_nothing_of_the_network() {
         app.display(),
         lib.display()
     ));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     std::fs::rename(&lib, lib.with_extension("moved")).unwrap();
     env.registry().clear_log();
 
     for format in ["table", "json"] {
-        let out = env.run(&["status", "--format", format]);
+        let out = env.run(&["ls", "--format", format]);
         assert!(out.success, "{}", out.stderr);
         assert!(out.stderr.is_empty(), "{}: {}", format, out.stderr);
     }

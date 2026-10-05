@@ -277,27 +277,13 @@ impl TestEnv {
     }
 
     /// Run gitscale with `-C dir`, for a command aimed somewhere other than
-    /// the playground. Rendering is forced plain and sequential: the harness
-    /// may run under a TTY, and interactive mode would emit parallel progress
-    /// bars to stderr instead of the deterministic stdout the snapshots
-    /// capture.
+    /// the playground. `-C` goes first, where git commands take it too.
+    /// Rendering is forced plain and sequential: the harness may run under a
+    /// TTY, and interactive mode would emit parallel progress bars to stderr
+    /// instead of the deterministic stdout the snapshots capture.
     pub fn run_in(&self, dir: &Path, args: &[&str]) -> CliOutput {
-        let mut full_args = vec!["gitscale"];
-        if let Some((subcmd, rest)) = args.split_first() {
-            full_args.push(subcmd);
-            // `artefact publish` and `cache …` take -C after their own
-            // subcommand.
-            if (*subcmd == "artefact" || *subcmd == "cache") && !rest.is_empty() {
-                full_args.push(rest[0]);
-                full_args.push("-C");
-                full_args.push(dir.to_str().unwrap());
-                full_args.extend_from_slice(&rest[1..]);
-            } else {
-                full_args.push("-C");
-                full_args.push(dir.to_str().unwrap());
-                full_args.extend_from_slice(rest);
-            }
-        }
+        let mut full_args = vec!["gitscale", "-C", dir.to_str().unwrap()];
+        full_args.extend_from_slice(args);
         run_cli_with(&full_args, false)
     }
 
@@ -388,21 +374,11 @@ impl TestEnv {
         vars: &[(&str, &str)],
         args: &[&str],
     ) -> CliOutput {
-        let mut full_args: Vec<String> = Vec::new();
-        if let Some((subcmd, rest)) = args.split_first() {
-            full_args.push(subcmd.to_string());
-            // `artefact …` and `cache …` take -C after their own subcommand.
-            let nested = (*subcmd == "artefact" || *subcmd == "cache") && !rest.is_empty();
-            let rest = if nested {
-                full_args.push(rest[0].to_string());
-                &rest[1..]
-            } else {
-                rest
-            };
-            full_args.push("-C".to_string());
-            full_args.push(self.playground.to_str().unwrap().to_string());
-            full_args.extend(rest.iter().map(|a| a.to_string()));
-        }
+        let mut full_args: Vec<String> = vec![
+            "-C".to_string(),
+            self.playground.to_str().unwrap().to_string(),
+        ];
+        full_args.extend(args.iter().map(|a| a.to_string()));
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_gitscale"));
         cmd.args(&full_args)
             .env_remove("GITSCALE_HOOK_ALLOW")
@@ -443,9 +419,19 @@ impl TestEnv {
     }
 
     /// Point the playground's own repo at `url`, so the hook allowlist has a
-    /// deterministic host/owner/repo to judge it by.
+    /// deterministic host/owner/repo to judge it by. Its default branch is
+    /// recorded as a clone would have it, so nothing ever asks `url` — which
+    /// is a name for the allowlist, not a remote to reach.
     pub fn set_playground_origin(&self, url: &str) {
         run_git(&self.playground, &["remote", "add", "origin", url]);
+        run_git(
+            &self.playground,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
     }
 
     /// Give the playground's repo a first commit, so HEAD exists.

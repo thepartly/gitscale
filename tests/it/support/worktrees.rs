@@ -4,10 +4,8 @@ use super::{git_stdout, run_git_pub, strip_ansi, TestEnv};
 use std::path::{Path, PathBuf};
 /// gitscale run against the workspace at `dir`.
 pub fn gs(dir: &Path, args: &[&str]) -> super::CliOutput {
-    let mut full = vec!["gitscale"];
-    full.extend_from_slice(&args[..1]);
-    full.extend_from_slice(&["-C", dir.to_str().unwrap()]);
-    full.extend_from_slice(&args[1..]);
+    let mut full = vec!["gitscale", "-C", dir.to_str().unwrap()];
+    full.extend_from_slice(args);
     gitscale::run_cli_with(&full, false)
 }
 
@@ -55,7 +53,7 @@ pub fn fixture(name: &str, extra: &str) -> Fixture {
 }
 
 impl Fixture {
-    /// A plain clone of the root at `name`, pulled.
+    /// A plain clone of the root at `name`, synced.
     pub fn clone_root(&self, name: &str) -> PathBuf {
         let dest = self.env.repos_remote.join(name);
         run_git_pub(
@@ -68,7 +66,7 @@ impl Fixture {
             ],
         );
         identity(&dest);
-        ok(&gs(&dest, &["pull"]));
+        ok(&gs(&dest, &["sync"]));
         dest
     }
 
@@ -117,7 +115,7 @@ pub fn common_dir(dir: &Path) -> PathBuf {
 }
 
 pub fn status_row(dir: &Path, repo: &str) -> String {
-    let out = gs(dir, &["status"]);
+    let out = gs(dir, &["ls"]);
     ok(&out);
     strip_ansi(&out.stdout)
         .lines()
@@ -129,9 +127,8 @@ pub fn status_row(dir: &Path, repo: &str) -> String {
 /// gitscale as a GitLab job on the root's branch `branch` would run it.
 pub fn ci_job(dir: &Path, cache: &Path, branch: &str, args: &[&str]) -> super::CliOutput {
     let commit = git(dir, &["rev-parse", "HEAD"]);
-    let mut full: Vec<&str> = args[..1].to_vec();
-    full.extend_from_slice(&["-C", dir.to_str().unwrap()]);
-    full.extend_from_slice(&args[1..]);
+    let mut full: Vec<&str> = vec!["-C", dir.to_str().unwrap()];
+    full.extend_from_slice(args);
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_gitscale"))
         .args(&full)
         .env("CI", "true")
@@ -209,9 +206,8 @@ pub fn on_some_branch(dir: &Path, commit: &str) -> bool {
 /// environment: for what reads the process environment, such as `HOME` or
 /// `GIT_TRACE2_EVENT`.
 pub fn gs_bin(dir: &Path, args: &[&str], vars: &[(&str, &str)]) -> super::CliOutput {
-    let mut full: Vec<&str> = args[..1].to_vec();
-    full.extend_from_slice(&["-C", dir.to_str().unwrap()]);
-    full.extend_from_slice(&args[1..]);
+    let mut full: Vec<&str> = vec!["-C", dir.to_str().unwrap()];
+    full.extend_from_slice(args);
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_gitscale"));
     cmd.args(&full);
     for (name, value) in vars {

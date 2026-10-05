@@ -40,7 +40,7 @@ fn normal_001_a_ci_job_logs_in_with_its_job_token() {
 
     let vars = gitlab_job(&env);
     let vars: Vec<(&str, &str)> = vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    let out = env.run_with_env(&vars, &["pull"]);
+    let out = env.run_with_env(&vars, &["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(read(&env, "meta/app/dist/app.bin"), "from ci");
     assert!(
@@ -76,15 +76,15 @@ fn normal_002_a_docker_login_is_used_outside_ci() {
     )
     .unwrap();
 
-    let without = env.run_with_env(&[], &["pull"]);
+    let without = env.run_with_env(&[], &["sync"]);
     assert!(!without.success, "no login, no access");
-    let out = env.run_with_env(&[("DOCKER_CONFIG", docker.to_str().unwrap())], &["pull"]);
+    let out = env.run_with_env(&[("DOCKER_CONFIG", docker.to_str().unwrap())], &["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(read(&env, "meta/app/dist/app.bin"), "logged in");
 }
 
 #[test]
-fn normal_003_publish_clone_and_pull_against_a_real_registry() {
+fn normal_003_publish_and_sync_against_a_real_registry() {
     let Some(addr) = registry() else {
         return;
     };
@@ -123,7 +123,7 @@ fn normal_003_publish_clone_and_pull_against_a_real_registry() {
     );
 
     env.write_config(&support::real_registry::entry_config(&env, &bare));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(
         std::fs::read_to_string(env.playground.join("meta/app/dist/app.js")).unwrap(),
@@ -146,7 +146,7 @@ fn normal_003_publish_clone_and_pull_against_a_real_registry() {
         out.stdout
     );
     assert!(env.run(&["fetch"]).success);
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     assert_eq!(
         std::fs::read_to_string(env.playground.join("meta/app/dist/app.js")).unwrap(),
         "v2"
@@ -255,7 +255,7 @@ fn normal_005_gitscale_reads_what_other_tools_publish() {
     );
 
     env.write_config(&support::real_registry::entry_config(&env, &target));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(
         std::fs::read_to_string(env.playground.join("meta/app/dist/hello.txt")).unwrap(),
@@ -274,7 +274,7 @@ fn normal_009_a_basic_challenge_is_answered_with_the_stored_login() {
     env.write_config(&entry_config(&env, &bare, "main"));
     let docker = docker_login(&env, &env.registry().addr, "dev", "personal-token");
 
-    let out = env.run_with_env(&[("DOCKER_CONFIG", s(&docker))], &["pull"]);
+    let out = env.run_with_env(&[("DOCKER_CONFIG", s(&docker))], &["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(read(&env, "meta/app/dist/app.bin"), "basic");
     assert!(env
@@ -304,7 +304,7 @@ fn normal_010_a_stored_identity_token_is_exchanged_for_a_bearer_token() {
         ),
     );
 
-    let out = env.run_with_env(&[("DOCKER_CONFIG", s(&docker))], &["pull"]);
+    let out = env.run_with_env(&[("DOCKER_CONFIG", s(&docker))], &["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(read(&env, "meta/app/dist/app.bin"), "refreshed");
     assert!(
@@ -343,7 +343,7 @@ fn normal_011_a_credential_helper_is_asked_for_the_registry() {
         std::env::var("PATH").unwrap_or_default()
     );
 
-    let out = env.run_with_env(&[("DOCKER_CONFIG", s(&docker)), ("PATH", &path)], &["pull"]);
+    let out = env.run_with_env(&[("DOCKER_CONFIG", s(&docker)), ("PATH", &path)], &["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(read(&env, "meta/app/dist/app.bin"), "from a helper");
 }
@@ -367,7 +367,7 @@ fn normal_012_a_podman_auth_file_is_read_when_docker_has_no_login() {
     )
     .unwrap();
 
-    let out = env.run_with_env(&[("REGISTRY_AUTH_FILE", s(&file))], &["pull"]);
+    let out = env.run_with_env(&[("REGISTRY_AUTH_FILE", s(&file))], &["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(read(&env, "meta/app/dist/app.bin"), "podman");
 }
@@ -383,7 +383,7 @@ fn normal_013_a_token_named_access_token_is_used() {
     env.write_config(&entry_config(&env, &bare, "main"));
     let docker = docker_login(&env, &env.registry().addr, "dev", "pw");
 
-    let out = env.run_with_env(&[("DOCKER_CONFIG", s(&docker))], &["pull"]);
+    let out = env.run_with_env(&[("DOCKER_CONFIG", s(&docker))], &["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(read(&env, "meta/app/dist/app.bin"), "oauth");
 }
@@ -440,7 +440,7 @@ fn edge_006_the_job_token_never_goes_to_a_token_service_elsewhere() {
 
     let vars = gitlab_job(&env);
     let vars: Vec<(&str, &str)> = vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    let out = env.run_with_env(&vars, &["pull"]);
+    let out = env.run_with_env(&vars, &["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(
         out.stderr.contains("Job token permissions"),
@@ -477,7 +477,7 @@ fn edge_015_a_plain_http_registry_off_this_machine_gets_no_bearer_token() {
 
     let mut vars = vec![("DOCKER_CONFIG", s(&docker))];
     vars.extend(NO_PROXY);
-    let _ = env.run_with_env(&vars, &["pull"]);
+    let _ = env.run_with_env(&vars, &["sync"]);
     assert!(!remote.seen().is_empty(), "the registry was never asked");
     let sent: Vec<_> = remote
         .seen()
@@ -507,7 +507,7 @@ fn edge_016_a_plain_http_registry_off_this_machine_gets_no_basic_login() {
 
     let mut vars = vec![("DOCKER_CONFIG", s(&docker))];
     vars.extend(NO_PROXY);
-    let out = env.run_with_env(&vars, &["pull"]);
+    let out = env.run_with_env(&vars, &["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(!remote.seen().is_empty(), "the registry was never asked");
     assert!(
@@ -530,7 +530,7 @@ fn edge_017_the_job_token_never_goes_to_a_registry_the_ci_server_does_not_own() 
     let port = env.registry().addr.rsplit(':').next().unwrap().to_string();
     let vars = gitlab_vars(&format!("127.0.0.1:{}", port), "registry.ci.example:5050");
 
-    let out = env.run_with_env(&borrowed(&vars), &["pull"]);
+    let out = env.run_with_env(&borrowed(&vars), &["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert_eq!(
         env.registry().count("GET", "/token [auth]"),
@@ -664,7 +664,7 @@ fn edge_020_a_blob_redirect_to_another_host_carries_no_authorization() {
 
     let mut vars = vec![("DOCKER_CONFIG", s(&docker))];
     vars.extend(NO_PROXY);
-    let out = env.run_with_env(&vars, &["pull"]);
+    let out = env.run_with_env(&vars, &["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(read(&env, "meta/app/dist/app.bin"), "redirected");
     assert!(cdn.count("GET", "/blobs/") > 0, "{:?}", cdn.log());
@@ -676,7 +676,7 @@ fn edge_020_a_blob_redirect_to_another_host_carries_no_authorization() {
 }
 
 /// Not every registry sends `Docker-Content-Digest`: without it, the digest
-/// is read from the manifest itself, and the pull works the same.
+/// is read from the manifest itself, and the sync works the same.
 #[test]
 fn edge_021_a_manifest_without_a_content_digest_header_is_digested_locally() {
     let env = TestEnv::new("registry_no_digest_header");
@@ -684,7 +684,7 @@ fn edge_021_a_manifest_without_a_content_digest_header_is_digested_locally() {
     let commit = tip(&bare, "main");
     env.registry().omit_manifest_digest();
     env.write_config(&entry_config(&env, &bare, "main"));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(read(&env, "meta/app/dist/app.bin"), "digested");
     assert!(
@@ -706,7 +706,7 @@ fn error_007_a_refusal_says_how_to_get_access() {
     let bare = env.artefact_repo("app", &[("app.bin", "x")]);
     env.registry().refuse_with(403);
     env.write_config(&entry_config(&env, &bare, "main"));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success);
     assert!(out.stderr.contains("refused"), "{}", out.stderr);
     assert!(out.stderr.contains("docker login"), "{}", out.stderr);
@@ -721,7 +721,7 @@ fn error_008_a_missing_tag_is_reported_by_a_real_registry() {
     use_registry(&env, &addr);
     let bare = env.create_bare_repo(&unique("unpublished"), "main", &[("README.md", "x")]);
     env.write_config(&support::real_registry::entry_config(&env, &bare));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success);
     assert!(out.stderr.contains("no artefact for"), "{}", out.stderr);
 }
@@ -738,7 +738,7 @@ fn error_022_registry_errors_are_reported_with_their_status() {
         env.registry()
             .fail("GET", "/manifests/", status, "try again later");
         env.write_config(&entry_config(&env, &bare, "main"));
-        let out = env.run(&["pull"]);
+        let out = env.run(&["sync"]);
         assert!(!out.success, "{}: {}", status, out.stdout);
         assert!(
             out.stderr
@@ -761,7 +761,7 @@ fn error_023_a_refused_login_says_how_to_log_in_and_hides_the_password() {
     env.write_config(&entry_config(&env, &bare, "main"));
     let docker = docker_login(&env, &env.registry().addr, "dev", "wrong-password");
 
-    let out = env.run_with_env(&[("DOCKER_CONFIG", s(&docker))], &["pull"]);
+    let out = env.run_with_env(&[("DOCKER_CONFIG", s(&docker))], &["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(
         out.stderr.contains("refused to let gitscale read"),
@@ -796,7 +796,7 @@ fn error_024_registry_errors_never_print_credentials() {
     let port = env.registry().addr.rsplit(':').next().unwrap().to_string();
     let vars = gitlab_vars(&format!("127.0.0.1:{}", port), &env.registry().addr);
 
-    let out = env.run_with_env(&borrowed(&vars), &["pull"]);
+    let out = env.run_with_env(&borrowed(&vars), &["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(out.stderr.contains("answered 500"), "{}", out.stderr);
     let text = format!("{}{}", out.stdout, out.stderr);
@@ -842,7 +842,7 @@ fn error_025_a_refused_publish_in_ci_says_what_the_job_token_may_do() {
 }
 
 /// A registry whose manifest does not match the digest it claims for it is
-/// not believed: the pull fails, and nothing is installed.
+/// not believed: the sync fails, and nothing is installed.
 #[test]
 fn error_026_a_manifest_not_matching_its_digest_is_refused() {
     let env = TestEnv::new("registry_manifest_digest_lie");
@@ -852,7 +852,7 @@ fn error_026_a_manifest_not_matching_its_digest_is_refused() {
     env.registry()
         .lie_about_manifest(&env.image(&bare), &commit, &claimed);
     env.write_config(&entry_config(&env, &bare, "main"));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(
         out.stderr.contains(&format!(
@@ -865,7 +865,7 @@ fn error_026_a_manifest_not_matching_its_digest_is_refused() {
     assert!(!env.playground.join("meta/app/dist").exists());
 }
 
-/// A layer download cut off part way fails the pull, leaves no partial file
+/// A layer download cut off part way fails the sync, leaves no partial file
 /// in the image store for a reader to find, and leaves the installed
 /// version alone.
 #[test]
@@ -874,13 +874,13 @@ fn error_027_a_cut_off_download_leaves_no_partial_file_and_the_old_install() {
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
     let first = layered(&env, &bare, "app v1");
     env.write_config(&entry_config(&env, &bare, "main"));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
 
     env.push_commit(&bare, "main", "README.md", "v2");
     let second = layered(&env, &bare, "app v2 with a longer body to cut in half");
     let app_layer = layer_digests(&env, &bare, &second)[2].clone();
     env.registry().truncate_blob(&app_layer);
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert_eq!(read(&env, "meta/app/dist/app.js"), "app v1");
     assert_eq!(installed_commit(&env), first);
@@ -895,7 +895,7 @@ fn error_027_a_cut_off_download_leaves_no_partial_file_and_the_old_install() {
 // Performance
 // ---------------------------------------------------------------------------
 
-/// Tokens are kept for the length of a command: a pull asks the token
+/// Tokens are kept for the length of a command: a sync asks the token
 /// service once for its one scope, however many manifests and blobs it
 /// reads; a publish once for reading and once for pushing.
 #[test]
@@ -908,7 +908,7 @@ fn perf_028_one_token_exchange_per_scope_per_command() {
     let docker = docker_login(&env, &env.registry().addr, "dev", "pw");
 
     env.registry().clear_log();
-    let out = env.run_with_env(&[("DOCKER_CONFIG", s(&docker))], &["pull"]);
+    let out = env.run_with_env(&[("DOCKER_CONFIG", s(&docker))], &["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert!(blob_downloads(&env) >= 3, "{:?}", env.registry().log());
     assert_eq!(

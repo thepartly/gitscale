@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::io::Write;
 
 use crate::config::RepoEntry;
+use crate::output::{self, Outcome};
 
 /// Returns true if stdout is a terminal (interactive session).
 pub fn is_interactive() -> bool {
@@ -73,7 +74,7 @@ where
 /// or sequentially to a writer for non-TTY / tests.
 ///
 /// `interactive`: when true, use indicatif progress bars directly on stderr.
-/// Returns the number of failures.
+/// An empty `heading` prints none. Returns the number of failures.
 pub fn run_parallel<F>(
     heading: &str,
     names: &[String],
@@ -92,7 +93,9 @@ where
     if interactive {
         run_interactive(heading, names, &op)
     } else {
-        writeln!(out, "{}", heading)?;
+        if !heading.is_empty() {
+            writeln!(out, "{}", heading)?;
+        }
         run_sequential(names, &op, out, err)
     }
 }
@@ -103,11 +106,13 @@ where
 {
     let mp = MultiProgress::new();
 
-    // Heading line
-    let header = mp.add(ProgressBar::new_spinner());
-    header.set_style(ProgressStyle::with_template("{msg}").unwrap());
-    header.set_message(heading.to_string());
-    header.finish();
+    // Heading line: none under a header of the caller's own.
+    if !heading.is_empty() {
+        let header = mp.add(ProgressBar::new_spinner());
+        header.set_style(ProgressStyle::with_template("{msg}").unwrap());
+        header.set_message(heading.to_string());
+        header.finish();
+    }
 
     // Create a progress bar per repo
     let bars: Vec<ProgressBar> = names
@@ -127,6 +132,9 @@ where
 
     let failed = std::sync::atomic::AtomicUsize::new(0);
     let hints = std::sync::Mutex::new(Vec::new());
+    // The bars are drawn on stderr, by threads of their own.
+    let style = output::current();
+    let color = style.stderr;
 
     std::thread::scope(|s| {
         let handles: Vec<_> = names
@@ -136,18 +144,28 @@ where
                 let failed = &failed;
                 let hints = &hints;
                 s.spawn(move || {
+                    output::set(style);
                     pb.set_message(format!("{:<24} running...", name));
                     let result = op(name);
-                    let done_style = ProgressStyle::with_template("  {msg}").unwrap();
+                    // The line's own indent comes from the result line.
+                    let done_style = ProgressStyle::with_template("{msg}").unwrap();
                     pb.set_style(done_style);
                     match &result {
-                        RepoStatus::Ok(msg) => pb.finish_with_message(format!("ok    {}", msg)),
-                        RepoStatus::Skip(msg) => pb.finish_with_message(format!("skip  {}", msg)),
+                        RepoStatus::Ok(msg) => {
+                            pb.finish_with_message(output::result_line(Outcome::Ok, msg, color))
+                        }
+                        RepoStatus::Skip(msg) => {
+                            pb.finish_with_message(output::result_line(Outcome::Skip, msg, color))
+                        }
                         RepoStatus::Fail(msg) => {
                             failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             let (error, hint) = split_hint(msg);
                             note_hint(&mut hints.lock().unwrap(), hint);
-                            pb.finish_with_message(format!("FAIL  {}", error));
+                            pb.finish_with_message(output::result_line(
+                                Outcome::Fail,
+                                error,
+                                color,
+                            ));
                         }
                     }
                 })
@@ -160,7 +178,7 @@ where
     });
 
     for hint in hints.into_inner().unwrap() {
-        eprintln!("hint: {}", hint);
+        eprintln!("{}", output::hint(&hint, color));
     }
     Ok(failed.load(std::sync::atomic::Ordering::Relaxed))
 }
@@ -176,21 +194,32 @@ where
 {
     let mut failed = 0;
     let mut hints = Vec::new();
+    let (color_out, color_err) = (output::stdout(), output::stderr());
     for name in names {
         let result = op(name);
         match &result {
-            RepoStatus::Ok(msg) => writeln!(out, "  ok    {}", msg)?,
-            RepoStatus::Skip(msg) => writeln!(out, "  skip  {}", msg)?,
+            RepoStatus::Ok(msg) => {
+                writeln!(out, "{}", output::result_line(Outcome::Ok, msg, color_out))?
+            }
+            RepoStatus::Skip(msg) => writeln!(
+                out,
+                "{}",
+                output::result_line(Outcome::Skip, msg, color_out)
+            )?,
             RepoStatus::Fail(msg) => {
                 let (error, hint) = split_hint(msg);
                 note_hint(&mut hints, hint);
-                writeln!(err, "  FAIL  {}", error)?;
+                writeln!(
+                    err,
+                    "{}",
+                    output::result_line(Outcome::Fail, error, color_err)
+                )?;
                 failed += 1;
             }
         }
     }
     for hint in hints {
-        writeln!(err, "hint: {}", hint)?;
+        writeln!(err, "{}", output::hint(&hint, color_err))?;
     }
     Ok(failed)
 }

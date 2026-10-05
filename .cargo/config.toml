@@ -40,3 +40,18 @@ CI = { value = "", force = true }
 GITLAB_CI = { value = "", force = true }
 CI_JOB_TOKEN = { value = "", force = true }
 GITHUB_ACTIONS = { value = "", force = true }
+
+# The network: tests never reach a real host. Fixtures name hosts such as
+# github.com or gitlab.invalid for the allowlist and the CI rewrites to judge,
+# and a remote that cannot be reached is sometimes the point — but an attempt
+# must fail here, at once, rather than wait on DNS or on a host that answers.
+# HTTP(S) goes to a proxy on a port nothing listens on, except for the test
+# servers on this machine and the conformance registry's compose service;
+# ssh is a command that fails.
+HTTP_PROXY = { value = "http://127.0.0.1:9", force = true }
+HTTPS_PROXY = { value = "http://127.0.0.1:9", force = true }
+http_proxy = { value = "http://127.0.0.1:9", force = true }
+https_proxy = { value = "http://127.0.0.1:9", force = true }
+NO_PROXY = { value = "127.0.0.1,localhost,::1,registry", force = true }
+no_proxy = { value = "127.0.0.1,localhost,::1,registry", force = true }
+GIT_SSH_COMMAND = { value = "false", force = true }

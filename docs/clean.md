@@ -1,39 +1,59 @@
 # 2.9 Cleaning
 
 - [What it does](#what-it-does)
+- [Flags](#flags)
 - [The dry run](#the-dry-run)
 - [Selecting repositories](#selecting-repositories)
 - [What is always kept](#what-is-always-kept)
 - [Exclusions](#exclusions)
   - [Per-repo `[clean]`](#per-repo-clean)
-  - [`--exclude` on the command line](#--exclude-on-the-command-line)
+  - [`-e` on the command line](#-e-on-the-command-line)
 - [What is skipped](#what-is-skipped)
 - [A directory holding no repository](#a-directory-holding-no-repository)
 - [Nested repositories GitScale does not manage](#nested-repositories-gitscale-does-not-manage)
-- [Compacting](#compacting)
+- [Compacting: `git scale gc`](#compacting-git-scale-gc)
 
 ## What it does
 
-`gitscale clean` removes untracked files from the workspace repository and from
-each sub-repository, the way `git clean -xd` does in one repo — ignored files
-included. That is why the declared checkouts and GitScale's own symlinks are
-[always kept](#what-is-always-kept) explicitly: it makes
-[gitignoring `imports/`](dependencies.md#ignoring-the-checkout-directory) safe
-here, even though a hand-run `git clean -xdf` at the root would delete the whole
-workspace.
-
 ```
-gitscale clean                  # dry run: list what would be removed
-gitscale clean -f               # remove it
-gitscale clean -f core          # just this repo
-gitscale clean -f .             # just the workspace repo
-gitscale clean -f -e 'dist/'    # keep dist/ in every repo cleaned
+git scale clean [-n] [-f] [-d] [-x | -X] [-e PATTERN]... [-q] [DIR...]
 ```
 
-Each repository is cleaned with its own exclusion set: the workspace repository,
-then every declared checkout, each of them exactly once — a repository reachable
-both as a checkout and through a recursive dependency's symlink is not cleaned
-twice.
+`git scale clean` runs `git clean` with git's own flags in the root repository
+and in each checkout, each once, and never through a link. The declared
+checkouts and GitScale's own symlinks are [always kept](#what-is-always-kept):
+that makes [gitignoring `imports/`](dependencies.md#ignoring-the-checkout-directory)
+safe here, even though a plain `git clean -xdf` at the root would delete the
+whole workspace.
+
+```
+git scale clean -dx                  # dry run: list what would be removed
+git scale clean -fdx                 # remove it
+git scale clean -fdx imports/core    # just this repo
+git scale clean -fdx .               # just the root repo, at the root
+git scale clean -fdx -e 'dist/'      # keep dist/ in every repo cleaned
+```
+
+Each repository is cleaned with its own exclusion set: the root repository,
+then every checkout, each of them exactly once — a repository reachable both as
+a checkout and through a recursive dependency's symlink is not cleaned twice.
+
+## Flags
+
+| Flag | Meaning |
+|---|---|
+| `-n` | Dry run. Also what happens with neither `-n` nor `-f`; with both, `-n` wins |
+| `-f` | Delete |
+| `-d` | Untracked directories too |
+| `-x` | Ignored files too |
+| `-X` | Only ignored files |
+| `-e PATTERN` | Keep, in `.gitignore` syntax, anchored at each repository's root. Repeatable |
+| `-q` | Report only failures |
+
+With `-X`, git itself reads `-e` patterns as more ignored files, to remove.
+GitScale keeps what it [always keeps](#what-is-always-kept) by removing only
+what `-X` would remove and what `-x`, keeping those paths, would remove too —
+so a checkout inside an ignored directory is never removed.
 
 ## The dry run
 
@@ -42,7 +62,7 @@ Without `-f`, nothing is touched and everything that *would* go is listed:
 ```
 Clean (dry run — nothing removed; pass -f to delete)
   . — nothing to remove
-  core
+  imports/core
     target/
     .env
   imports/shared — skip (symlink)
@@ -56,15 +76,16 @@ is clear whether a repository was clean or simply not cleaned.
 
 ## Selecting repositories
 
-Names are the directory keys from `.gitscale.toml`. The workspace repository
-itself is addressed as `.`, the same name `status` gives it.
+Directories are paths from the current directory — see
+[directory arguments](cli.md#directory-arguments). At the root, `.` is the root
+repository; inside a checkout, `.` is that checkout.
 
-| Invocation | Cleans |
+| Invocation, at the root | Cleans |
 |---|---|
-| `gitscale clean` | the workspace repository and every declared entry |
-| `gitscale clean core` | just `core` |
-| `gitscale clean .` | just the workspace repository |
-| `gitscale clean . core` | both |
+| `git scale clean -fdx` | the root repository and every checkout |
+| `git scale clean -fdx imports/core` | just `imports/core` |
+| `git scale clean -fdx .` | just the root repository |
+| `git scale clean -fdx . imports/core` | both |
 
 ## What is always kept
 
@@ -82,9 +103,11 @@ Beyond whatever you exclude, clean never removes:
 - **Managed symlinks.** The links GitScale plants for
   [recursive dependencies](recursive-dependencies.md) are untracked files to
   git. Orphaned GitScale symlinks are *not* protected — those are removed, as
-  `sync` would.
+  placement would.
 - **`.gitscale.toml`**, even when it has not been committed yet. Deleting the
   file that defines the workspace is not something a clean should be able to do.
+- **What each repository's `[clean] exclude` lists** — see
+  [per-repo `[clean]`](#per-repo-clean).
 
 Because the protected symlink set comes from resolving the recursive
 dependencies, a config that cannot be resolved makes `clean` fail rather than
@@ -125,7 +148,7 @@ sub-repository changes.
 
 Reading a sub-repository's `[clean]` is gated on its `recursive` flag, like every
 other nested-config read. A `recursive = false` checkout is still cleaned, by the
-command line's `--exclude` patterns alone: its keep-list is part of a config
+command line's `-e` patterns alone: its keep-list is part of a config
 GitScale was told not to read. Its own dependencies need no protecting from
 that — GitScale plants nothing inside such a checkout, and a clone somebody made
 there is a [nested repository](#nested-repositories-gitscale-does-not-manage),
@@ -135,10 +158,10 @@ A sub-repository's config that exists but does not parse is an error rather
 than an empty keep-list — treating an unreadable file as "keep nothing" would
 delete exactly the files it was written to protect.
 
-### `--exclude` on the command line
+### `-e` on the command line
 
 ```
-gitscale clean -f -e 'dist/' -e '*.log'
+git scale clean -fdx -e 'dist/' -e '*.log'
 ```
 
 Repeatable, and applied to **every** repository cleaned. Use it for a repository
@@ -150,23 +173,25 @@ repository's own `[clean]` table. An empty pattern, or one starting with `-`
 
 | Reason reported | Why |
 |---|---|
-| `artefact` | No working tree to clean; the directory's contents are managed by `pull` |
+| `artefact` | No working tree to clean; the directory's contents are managed by [placement](workflow.md#placement) |
 | `not cloned` | The directory does not exist |
 | `symlink` | A deduped [recursive dependency](recursive-dependencies.md); the real checkout is cleaned under its own name |
 | `not a git repository` | The directory has a `.git` but is not the top level of a working repository — a damaged checkout, which may still hold the only copy of somebody's work. For the workspace root this is only reported when `.` was asked for by name — a workspace that is not itself a repository is an ordinary setup, not a problem |
+| `holds no repository; -d removes it` | See [below](#a-directory-holding-no-repository) |
 | `holds no repository, but another declared checkout is inside it` | See [below](#a-directory-holding-no-repository) |
 
 ## A directory holding no repository
 
 An entry's directory can exist with no repository in it at all — no `.git` —
 after a failed checkout, an interrupted delete, an outside cleaner, or a CI cache
-restored into a path whose checkout was not. [`pull`](workflow.md#pull) refuses
-to check out over one that holds files, and nothing inside it belongs to a
-checkout, so `clean` **removes the whole directory**. The dry run lists it as
-`./ (the whole directory: it holds no repository)`. A clean always leaves the
-workspace in a state the next `pull` can complete from.
+restored into a path whose checkout was not. [Placement](workflow.md#placement)
+refuses to check out over one that holds files, and nothing inside it belongs
+to a checkout, so with `-d` `clean` **removes the whole directory**, as it
+would an untracked one; with `-X` it does not. The dry run lists it as
+`./ (the whole directory: it holds no repository)`. A clean with `-d` always
+leaves the workspace in a state the next placement can complete from.
 
-`--exclude` patterns and `[clean] exclude` do not apply: they describe
+`-e` patterns and `[clean] exclude` do not apply: they describe
 untracked files inside a repository, and there is no repository here.
 
 The one exception is a directory that another declared checkout sits inside,
@@ -179,26 +204,25 @@ A clone somebody made by hand inside a checkout is **reported, not deleted**:
 clean does not pass `git clean`'s second `-f`. Remove those yourself. A stray
 clone somebody forgot about is recoverable only while it still exists.
 
-## Compacting
+## Compacting: `git scale gc`
 
 ```
-gitscale clean --gc
-gitscale clean --gc --keep-recent 6months
+git scale gc
+git scale gc --keep-recent 6months
 ```
 
-`--gc` cleans no working tree. It runs `git gc` in every
-[store](stores.md) of the root, then drops the images nothing has used within
-`--keep-recent` — default `[clean] keep_recent`, else `3months` — and every
-layer no remaining image needs:
+`gc` cleans no working tree. It runs `git gc` in every [store](stores.md) of
+the root, then drops the images nothing has used within `--keep-recent` —
+default `[clean] keep_recent`, else `3months` — and every layer no remaining
+image needs:
 
 ```
 Compacted /home/dev/app/.git/gitscale: 4 stores collected, 2 images dropped, 310.4 MiB freed.
 ```
 
-`pull` already drops unused images once a day, and git collects each store
-when it needs to, so `--gc` is for reclaiming space now. It takes no names, no
-`-f` and no `-e`, and refuses in CI, where the [CI cache](stores.md#cache-compact)
-has its own `gitscale cache compact`.
+Placement already drops unused images once a day, and git collects each store
+when it needs to, so `gc` is for reclaiming space now. It refuses in CI, where
+the [CI cache](stores.md#cache-compact) has its own `gitscale cache compact`.
 
 ---
 

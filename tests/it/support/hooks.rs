@@ -5,8 +5,7 @@ use gitscale::trust::ALLOW_ENV;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Run the CLI directly: `TestEnv::run` injects `-C` after the first
-/// subcommand, which lands in the wrong place for a nested one like `hook`.
+/// Run the CLI directly, with the arguments as given.
 ///
 /// Never interactive: `run_cli` would sniff the terminal, and an interactive
 /// run refreshes the agent skill in the developer's real HOME.
@@ -218,7 +217,7 @@ pub fn run_hook_args(
     (out.status.code().unwrap_or(-1), text)
 }
 
-/// Where `hook run` leaves word of a failed pull.
+/// Where `hook run` leaves word of a failed placement.
 pub fn breadcrumb(repo: &Path) -> PathBuf {
     repo.join(".git/gitscale-pull-failed")
 }

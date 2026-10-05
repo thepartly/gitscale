@@ -10,7 +10,7 @@
 //! install time, next to the binary path and the chained hook that are already
 //! baked in there, and the shim passes them to gitscale in
 //! [`ALLOW_ENV`]. A repository cannot reach the shim, so it cannot widen its
-//! own permissions; and a developer typing `gitscale pull` by hand is not
+//! own permissions; and a developer typing `git scale sync` by hand is not
 //! running under a shim, so nothing gets in their way.
 
 use anyhow::{bail, Result};

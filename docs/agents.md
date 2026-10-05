@@ -9,9 +9,10 @@
 ## What it is
 
 A short [Agent Skill](https://agentskills.io) that teaches coding agents to make
-a change across several repositories: put the root on a topic branch,
-`develop` the children the change touches, commit and push, merge in the order
-`status` prints, and promote each layer with `upgrade`. It carries a table of
+a change across several repositories: `git topic start` a topic, `git topic
+join` the children the change touches, `git scale commit` and `git scale push`,
+merge in the order `git topic status` prints, promote each layer with
+`git upgrade --commit`, and `git topic finish`. It carries a table of
 the commands with links to these docs at the installed version, and the rules
 an agent keeps to: never edit a pin to test a change, never commit in a
 detached child, ask before merging or deleting a remote branch.
@@ -22,7 +23,7 @@ nothing in a session that never touches a `.gitscale.toml`.
 ## Installing it
 
 ```
-gitscale skill install
+git scale skill install
 ```
 
 | Path | Read by | Written |
@@ -36,7 +37,7 @@ Only `skill install` creates the skill. A skill is instructions to coding
 agents, and GitScale never adds those to other tools' directories unasked —
 not even from a `git clone` that fires the [hook](hooks.md#git-hooks).
 
-`gitscale skill status` shows each location and what is there.
+`git scale skill status` shows each location and what is there.
 
 ## How it stays current
 
@@ -48,7 +49,7 @@ the text below it:
 <!-- gitscale-skill 0.7.0 sha256:… -->
 ```
 
-After any interactive `gitscale` command, outside CI, an installed copy older
+After any interactive GitScale command, outside CI, an installed copy older
 than the binary is rewritten, and the command says so on stderr. Nothing else
 is touched:
 
@@ -62,8 +63,8 @@ is touched:
 
 ## The hint
 
-While no skill is installed at either path, `pull` and the `status` table print
-one line to stderr:
+While no skill is installed at either path, `git scale sync` and the
+`git scale ls` table print one line to stderr:
 
 ```
 tip: gitscale skill install teaches coding agents this workflow
@@ -71,13 +72,13 @@ tip: gitscale skill install teaches coding agents this workflow
 
 It shows once per root: a `skill-hint` file in the root's common git dir
 (`.git/gitscale/`, shared by every worktree of the root) records that it was
-shown. Never in CI, never with `--format json` or `--why`, and never when the
-output is not a terminal.
+shown. Never in CI, never with `--format json`, and never when the output is
+not a terminal.
 
 ## Removing it
 
 ```
-gitscale skill remove
+git scale skill remove
 ```
 
 Removes the copies gitscale wrote, and the directories it made for them. An

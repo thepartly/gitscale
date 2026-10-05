@@ -203,6 +203,21 @@ impl Default for ResolveSettings {
     }
 }
 
+/// `[forward]`: how `git scale <git command>` runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Forward {
+    /// Run `fetch`, `pull` and `push` in this many repositories at once.
+    pub parallel: Option<usize>,
+}
+
+/// `[topic]`: how topic branches are named.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TopicSettings {
+    /// Put in front of every topic `git topic start` creates; `{user}` is the
+    /// author's name.
+    pub prefix: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct GitScaleConfig {
     pub repos: Vec<RepoEntry>,
@@ -218,6 +233,8 @@ pub struct GitScaleConfig {
     pub hooks: Hooks,
     pub clean: Clean,
     pub develop: Develop,
+    pub forward: Forward,
+    pub topic: TopicSettings,
 }
 
 #[derive(Deserialize)]
@@ -230,6 +247,20 @@ struct RawConfig {
     hooks: Option<RawHooks>,
     clean: Option<RawClean>,
     develop: Option<RawDevelop>,
+    forward: Option<RawForward>,
+    topic: Option<RawTopic>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawForward {
+    parallel: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTopic {
+    prefix: Option<String>,
 }
 
 // Unknown keys are errors here, unlike the older tables: a misspelt
@@ -329,6 +360,8 @@ pub fn parse_config(text: &str, config_path: &Path) -> Result<GitScaleConfig> {
     let clean = parse_clean(raw.clean.as_ref(), config_path)?;
     let resolve = parse_resolve(raw.resolve.as_ref(), config_path)?;
     let develop = parse_develop(raw.develop.as_ref(), config_path)?;
+    let forward = parse_forward(raw.forward.as_ref(), config_path)?;
+    let topic = parse_topic(raw.topic.as_ref(), config_path)?;
 
     Ok(GitScaleConfig {
         repos,
@@ -339,6 +372,53 @@ pub fn parse_config(text: &str, config_path: &Path) -> Result<GitScaleConfig> {
         hooks,
         clean,
         develop,
+        forward,
+        topic,
+    })
+}
+
+/// `[forward]`. `parallel` is a number of repositories, at least one.
+fn parse_forward(raw: Option<&RawForward>, config_path: &Path) -> Result<Forward> {
+    let Some(forward) = raw else {
+        return Ok(Forward::default());
+    };
+    let parallel = match forward.parallel {
+        None => None,
+        Some(n) if n >= 1 => Some(n as usize),
+        Some(n) => bail!(
+            "{}: forward.parallel = {}: give the number of repositories to run at once, at \
+             least 1",
+            config_path.display(),
+            n
+        ),
+    };
+    Ok(Forward { parallel })
+}
+
+/// `[topic]`. A prefix is part of a branch name, so it holds nothing git
+/// would refuse in one, `{user}` aside.
+fn parse_topic(raw: Option<&RawTopic>, config_path: &Path) -> Result<TopicSettings> {
+    let Some(topic) = raw else {
+        return Ok(TopicSettings::default());
+    };
+    if let Some(prefix) = &topic.prefix {
+        let bad = prefix.is_empty()
+            || prefix.starts_with('-')
+            || prefix.starts_with('/')
+            || prefix.contains("..")
+            || prefix
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control() || "~^:?*[\\".contains(c));
+        if bad {
+            bail!(
+                "{}: topic.prefix \"{}\" cannot start a branch name",
+                config_path.display(),
+                prefix
+            );
+        }
+    }
+    Ok(TopicSettings {
+        prefix: topic.prefix.clone(),
     })
 }
 
@@ -371,27 +451,103 @@ pub fn load_config_optional(config_path: &Path) -> Option<GitScaleConfig> {
     load_config(config_path).ok()
 }
 
-/// The config governing `root` (found by searching upward from it, or from the
-/// current directory), and the workspace directory it lives in — what every
-/// multi-repo command starts from.
+/// The config of the workspace `start` is in (the current directory when
+/// `None`), and the workspace root it lives in — what every multi-repo
+/// command starts from.
 ///
-/// The workspace must be the top of a git repository: every store, record and
-/// checkout gitscale keeps lives in that repository's git directory.
-pub fn load_workspace(root: Option<&Path>) -> Result<(GitScaleConfig, PathBuf)> {
-    let config_path = find_config(root)?;
-    let config = load_config(&config_path)?;
-    let config_root = config_path
-        .parent()
-        .expect("a config file always has a parent directory")
-        .to_path_buf();
-    if !crate::git::is_repo_root(&config_root) {
-        bail!(
-            "{} is not the top of a git repository; a {} must sit at the top of one",
-            config_root.display(),
-            CONFIG_FILENAME
-        );
-    }
+/// The workspace root is the nearest directory above `start` holding a
+/// config at the top of a git repository — unless that repository is a
+/// child, a checkout gitscale made: a child is never a workspace, so the
+/// search goes on up to the root whose stores the child belongs to. See
+/// [`find_root`].
+pub fn load_workspace(start: Option<&Path>) -> Result<(GitScaleConfig, PathBuf)> {
+    let config_root = find_root(start)?;
+    let config = load_config(&config_root.join(CONFIG_FILENAME))?;
     Ok((config, config_root))
+}
+
+/// The error for a directory in no workspace.
+pub const NOT_IN_WORKSPACE: &str = "not inside a GitScale workspace";
+
+/// The workspace root above `start`: see [`load_workspace`].
+///
+/// A repository is a child when its git common dir is one of a root's
+/// stores, `<root common dir>/gitscale/repos/<name>.git`; its workspace is
+/// then the repository above it whose common dir is that root's. Anything
+/// else with a config at its top — a clone made by hand inside a workspace —
+/// is a workspace of its own.
+pub fn find_root(start: Option<&Path>) -> Result<PathBuf> {
+    let start = match start {
+        Some(p) => p
+            .canonicalize()
+            .with_context(|| format!("cannot resolve start path {}", p.display()))?,
+        None => std::env::current_dir().context("cannot get current directory")?,
+    };
+    // The root common dir a child found on the way up belongs to.
+    let mut wanted: Option<PathBuf> = None;
+    // A config not at the top of a repository, for the hint.
+    let mut stray: Option<PathBuf> = None;
+    let mut dir = start.clone();
+    loop {
+        let has_config = dir.join(CONFIG_FILENAME).is_file();
+        let common = if has_config || wanted.is_none() {
+            repo_top_common_dir(&dir)
+        } else {
+            None
+        };
+        match (&common, &wanted) {
+            (Some(common), Some(want)) if has_config && common == want => return Ok(dir),
+            (Some(common), None) => match child_of(common) {
+                Some(root_common) => wanted = Some(root_common),
+                None if has_config => return Ok(dir),
+                None => {}
+            },
+            (None, _) if has_config && stray.is_none() => stray = Some(dir.clone()),
+            _ => {}
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    match stray {
+        Some(dir) => bail!(
+            "{}\nhint: {} has a {} but is not the top of a git repository",
+            NOT_IN_WORKSPACE,
+            dir.display(),
+            CONFIG_FILENAME
+        ),
+        None => bail!("{}", NOT_IN_WORKSPACE),
+    }
+}
+
+/// The git common dir of the repository whose top is `dir`, canonical;
+/// `None` when `dir` is not the top of one.
+fn repo_top_common_dir(dir: &Path) -> Option<PathBuf> {
+    if !dir.join(".git").exists() || !crate::git::is_repo_root(dir) {
+        return None;
+    }
+    let common = crate::git::common_dir(dir)?;
+    Some(common.canonicalize().unwrap_or(common))
+}
+
+/// The root common dir whose store `common` is, when it is one:
+/// `<root common dir>/gitscale/repos/<name>.git`.
+pub fn child_of(common: &Path) -> Option<PathBuf> {
+    let name = common.file_name()?.to_string_lossy();
+    if !name.ends_with(".git") {
+        return None;
+    }
+    let repos = common.parent()?;
+    let gitscale = repos.parent()?;
+    (repos.file_name()? == "repos" && gitscale.file_name()? == "gitscale")
+        .then(|| gitscale.parent().map(Path::to_path_buf))
+        .flatten()
+}
+
+/// Whether the repository whose top is `dir` is a child: a checkout of one
+/// of a root's stores.
+pub fn is_child(dir: &Path) -> bool {
+    crate::git::common_dir(dir).is_some_and(|common| child_of(&common).is_some())
 }
 
 /// The entries `names` selects: all of them when none are given, otherwise
@@ -840,6 +996,64 @@ pub fn set_revisions(path: &Path, changes: &[(String, String)]) -> Result<()> {
         .with_context(|| format!("cannot write {}", path.display()))
 }
 
+/// Add `entry` to the `[repos]` of the config at `path` in place, creating
+/// the file, or the table, when there is none. Comments, key order and
+/// tables gitscale does not know about are kept.
+pub fn add_entry(path: &Path, entry: &RepoEntry) -> Result<()> {
+    let text = if path.is_file() {
+        std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?
+    } else {
+        String::new()
+    };
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .with_context(|| format!("{}: invalid TOML", path.display()))?;
+    let mut value = toml_edit::InlineTable::new();
+    value.insert("url", entry.repo_url.as_str().into());
+    if !entry.revision.is_empty() {
+        value.insert("revision", entry.revision.as_str().into());
+    }
+    if let Some(artefact) = entry.artefact {
+        value.insert("artefact", artefact.to_string().into());
+    }
+    if !doc.contains_key("repos") {
+        doc.insert("repos", toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    let repos = doc.get_mut("repos").expect("inserted above");
+    if let Some(table) = repos.as_table_mut() {
+        table.insert(&entry.directory, toml_edit::value(value));
+    } else if let Some(table) = repos.as_inline_table_mut() {
+        table.insert(&entry.directory, toml_edit::Value::InlineTable(value));
+    } else {
+        bail!("{}: repos is not a table", path.display());
+    }
+    std::fs::write(path, doc.to_string())
+        .with_context(|| format!("cannot write {}", path.display()))
+}
+
+/// Remove `directory` from the `[repos]` of the config at `path` in place.
+/// `Ok(false)` when it is not there.
+pub fn remove_entry(path: &Path, directory: &str) -> Result<bool> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .with_context(|| format!("{}: invalid TOML", path.display()))?;
+    let Some(repos) = doc.get_mut("repos") else {
+        return Ok(false);
+    };
+    let removed = if let Some(table) = repos.as_table_like_mut() {
+        table.remove(directory).is_some()
+    } else {
+        false
+    };
+    if removed {
+        std::fs::write(path, doc.to_string())
+            .with_context(|| format!("cannot write {}", path.display()))?;
+    }
+    Ok(removed)
+}
+
 /// Render a value as a TOML basic string.
 ///
 /// Nothing here is validated against quoting: a `post_sync` command is an
@@ -909,6 +1123,18 @@ pub fn write_config(config_path: &Path, config: &GitScaleConfig) -> Result<()> {
         let quoted: Vec<String> = pinned.iter().map(|b| toml_string(b)).collect();
         lines.push("[develop]".to_string());
         lines.push(format!("pinned = [{}]", quoted.join(", ")));
+        lines.push(String::new());
+    }
+
+    if let Some(parallel) = config.forward.parallel {
+        lines.push("[forward]".to_string());
+        lines.push(format!("parallel = {}", parallel));
+        lines.push(String::new());
+    }
+
+    if let Some(prefix) = &config.topic.prefix {
+        lines.push("[topic]".to_string());
+        lines.push(format!("prefix = {}", toml_string(prefix)));
         lines.push(String::new());
     }
 

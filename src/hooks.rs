@@ -14,8 +14,8 @@ use crate::trust::{Allowlist, Workspace};
 /// the developer never aimed at gitscale at all — the shim passes down the
 /// allowlist it was installed with, and a repository outside it runs nothing.
 ///
-/// With no allowlist in the environment this is a `gitscale pull` or `sync` the
-/// user typed, in a workspace they chose, and the hook runs.
+/// With no allowlist in the environment this is a command the user typed, in
+/// a workspace they chose, and the hook runs.
 pub fn run_post_sync(hooks: &Hooks, cwd: &Path, verbose: bool, out: &mut dyn Write) -> Result<()> {
     let Some(cmd) = &hooks.post_sync else {
         return Ok(());

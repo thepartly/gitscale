@@ -33,7 +33,7 @@ fn normal_001_install_status_and_remove() {
     );
     let text = fs::read_to_string(&shared).unwrap();
     assert!(text.starts_with("---\nname: gitscale\n"), "{}", text);
-    assert!(text.contains("gitscale develop <dir>"), "{}", text);
+    assert!(text.contains("git topic join <dir>"), "{}", text);
     assert_eq!(text, fs::read_to_string(&claude).unwrap());
 
     let (_, out, _) = skill(&home, &["install"]);
@@ -125,7 +125,7 @@ fn normal_009_an_interactive_run_refreshes_an_older_skill() {
     let (_, out, _) = skill(&user, &["status"]);
     assert!(out.contains("installed, 0.0.1 (older"), "{}", out);
 
-    let (ok, printed) = interactive(&user, &root, &["status"], &[]);
+    let (ok, printed) = interactive(&user, &root, &["ls"], &[]);
     assert!(ok, "{}", printed);
     assert!(
         printed.contains(&format!(
@@ -148,10 +148,10 @@ fn normal_009_an_interactive_run_refreshes_an_older_skill() {
     let _ = fs::remove_dir_all(&base);
 }
 
-/// The hint, end to end: an interactive status table with no skill installed
+/// The hint, end to end: an interactive `ls` table with no skill installed
 /// prints it once, and every later run in that root stays quiet.
 #[test]
-fn normal_010_an_interactive_status_table_hints_once() {
+fn normal_010_an_interactive_ls_table_hints_once() {
     if !have_script() {
         eprintln!("skipped: script(1) is not installed");
         return;
@@ -160,7 +160,7 @@ fn normal_010_an_interactive_status_table_hints_once() {
     let (root, second) = root_with_worktree(&base);
     let user = base.join("user");
 
-    let (ok, printed) = interactive(&user, &root, &["status"], &[]);
+    let (ok, printed) = interactive(&user, &root, &["ls"], &[]);
     assert!(ok, "{}", printed);
     assert!(
         printed.contains("tip: gitscale skill install teaches coding agents this workflow"),
@@ -169,7 +169,7 @@ fn normal_010_an_interactive_status_table_hints_once() {
     );
     assert!(root.join(".git/gitscale/skill-hint").is_file());
     for dir in [&root, &second] {
-        let (ok, printed) = interactive(&user, dir, &["status"], &[]);
+        let (ok, printed) = interactive(&user, dir, &["ls"], &[]);
         assert!(ok, "{}", printed);
         assert!(!printed.contains("tip:"), "{}", printed);
     }
@@ -192,10 +192,10 @@ fn edge_004_without_claude_code_only_the_shared_location() {
 }
 
 #[test]
-fn edge_005_pull_and_status_stay_quiet_when_nobody_is_watching() {
+fn edge_005_sync_and_ls_stay_quiet_when_nobody_is_watching() {
     let base = home("hint-plain");
     let (root, _) = root_with_worktree(&base);
-    for args in [&["status"][..], &["pull"]] {
+    for args in [&["ls"][..], &["sync"]] {
         let output = Command::new(env!("CARGO_BIN_EXE_gitscale"))
             .args(args)
             .current_dir(&root)
@@ -235,7 +235,7 @@ fn edge_008_a_copy_edited_in_its_frontmatter_counts_as_edited_by_hand() {
     let _ = fs::remove_dir_all(&home);
 }
 
-/// No hint where nobody should see one: the JSON status, a run in CI, and a
+/// No hint where nobody should see one: `ls` as JSON, a run in CI, and a
 /// command that failed. None of them uses up the one hint either.
 #[test]
 fn edge_011_no_hint_for_json_in_ci_or_after_a_failure() {
@@ -248,10 +248,10 @@ fn edge_011_no_hint_for_json_in_ci_or_after_a_failure() {
     let user = base.join("user");
     let marker = root.join(".git/gitscale/skill-hint");
 
-    let (ok, printed) = interactive(&user, &root, &["status", "--format", "json"], &[]);
+    let (ok, printed) = interactive(&user, &root, &["ls", "--format", "json"], &[]);
     assert!(ok, "{}", printed);
     assert!(!printed.contains("tip:"), "{}", printed);
-    let (ok, printed) = interactive(&user, &root, &["status"], &[("CI", "true")]);
+    let (ok, printed) = interactive(&user, &root, &["ls"], &[("CI", "true")]);
     assert!(ok, "{}", printed);
     assert!(!printed.contains("tip:"), "{}", printed);
 
@@ -260,7 +260,7 @@ fn edge_011_no_hint_for_json_in_ci_or_after_a_failure() {
         "[repos]\n\"libs/gone\" = { url = \"/nonexistent/gone.git\", revision = \"main\" }\n",
     )
     .unwrap();
-    let (ok, printed) = interactive(&user, &root, &["pull"], &[]);
+    let (ok, printed) = interactive(&user, &root, &["sync"], &[]);
     assert!(!ok, "{}", printed);
     assert!(!printed.contains("tip:"), "{}", printed);
     assert!(!marker.exists());

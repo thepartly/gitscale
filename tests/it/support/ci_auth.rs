@@ -56,8 +56,8 @@ pub fn run_in_ci_job(env: &TestEnv, args: &[&str]) -> Output {
 /// [`run_in_ci_job`] with extra environment on top.
 pub fn run_in_ci_job_with(env: &TestEnv, vars: &[(&str, &str)], args: &[&str]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_gitscale"));
-    cmd.args(args)
-        .args(["-C", env.playground.to_str().unwrap()])
+    cmd.args(["-C", env.playground.to_str().unwrap()])
+        .args(args)
         .env("CI", "true")
         .env("GITLAB_CI", "true")
         .env("CI_JOB_TOKEN", "job-token-value")

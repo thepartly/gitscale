@@ -8,27 +8,32 @@
 - [`[registries]`](#registries)
 - [`[artefact]`](#artefact)
 - [`[develop]`](#develop)
+- [`[topic]`](#topic)
 - [`[clean]`](#clean)
 - [`[hooks]`](#hooks)
+- [`[forward]`](#forward)
 - [Nested configs](#nested-configs)
 - [Values GitScale refuses to pass to git](#values-gitscale-refuses-to-pass-to-git)
-- [How `add` and `remove` rewrite the file](#how-add-and-remove-rewrite-the-file)
+- [Git config keys](#git-config-keys)
 - [Environment variables](#environment-variables)
 
 ## Where the file lives
 
 `.gitscale.toml`, at the top of the workspace's root repository — anywhere
 else, GitScale refuses. Every command searches upward from the current
-directory until it finds one; `-C, --root PATH` starts the search from `PATH`
-instead.
+directory, past any checkout GitScale made, to the workspace root — see
+[finding the workspace](cli.md#finding-the-workspace); `-C, --root PATH` starts
+the search from `PATH` instead.
 
 A checked-out sub-repository may carry its own `.gitscale.toml`. Which parts of
 it are read, and when, is covered under [nested configs](#nested-configs).
 
 Unknown keys and unknown tables are ignored on read, except inside
-[`[artefact]`](#artefact), [`[resolve]`](#resolve) and [`[develop]`](#develop),
-where a misspelt key would quietly do less than meant. But see
-[how `add` and `remove` rewrite the file](#how-add-and-remove-rewrite-the-file).
+[`[artefact]`](#artefact), [`[resolve]`](#resolve), [`[develop]`](#develop),
+[`[topic]`](#topic) and [`[forward]`](#forward), where a misspelt key would
+quietly do less than meant. [`git scale require` and `unrequire`](cli.md#git-scale-require--unrequire)
+and [`git upgrade`](cli.md#git-upgrade) edit the file in place: comments, key
+order and unknown tables are kept.
 
 ## A complete example
 
@@ -49,6 +54,9 @@ exclude = ["**/*.map"]
 [develop]
 pinned = ["main", "staging", "release/*"]
 
+[topic]
+prefix = "{user}/"
+
 [clean]
 exclude     = [".vscode", ".idea", ".env", "envs/", "tmp"]
 keep_recent = "3months"
@@ -56,6 +64,9 @@ keep_recent = "3months"
 [hooks]
 post_sync     = "make install"
 on_pull_error = "warn"
+
+[forward]
+parallel = 8
 ```
 
 Every table is optional. A config with nothing but `[clean]` in it is valid and
@@ -194,14 +205,29 @@ read at the revision selected, it holds what that repository asks for at its
 pins when the topic's branch is one it pins — see
 [pinned dependencies](topics.md#inside-a-topic).
 
+## `[topic]`
+
+How `git topic start` names topic branches. Read from the root only.
+
+```toml
+[topic]
+prefix = "{user}/"
+```
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `prefix` | string | unset | Put in front of every topic branch `git topic start` creates. `{user}` is your name for branches: git config [`gitscale.user`](#git-config-keys), else `$USER`. Unset, nothing is added or stripped |
+
+See [branch prefix](topics.md#branch-prefix).
+
 ## `[clean]`
 
-Which untracked files [`gitscale clean`](clean.md) keeps in **this** repository.
+Which untracked files [`git scale clean`](clean.md) keeps in **this** repository.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `exclude` | array of strings | `[]` | `.gitignore`-syntax patterns, anchored at this repository's root, passed to `git clean -e` unchanged |
-| `keep_recent` | string | `"3months"` | Root only: how recently an image in the root's [image store](stores.md#images) must have been used to survive the daily prune and [`clean --gc`](clean.md#compacting). A number and a unit: `30d`, `2 weeks`, `6months` |
+| `keep_recent` | string | `"3months"` | Root only: how recently an image in the root's [image store](stores.md#images) must have been used to survive the daily prune and [`git scale gc`](clean.md#compacting-git-scale-gc). A number and a unit: `30d`, `2 weeks`, `6months` |
 
 `exclude` is scoped to the repository whose config it appears in, and nothing
 below it. A pattern may not be empty or start with `-`.
@@ -213,11 +239,28 @@ Commands GitScale runs after its own operations. Not to be confused with
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `post_sync` | string | — | Shell command run after `pull` and `sync` complete, via `sh -c` in the config root. A non-zero exit fails the command |
-| `on_pull_error` | string | `"fail"` under CI, `"warn"` otherwise | What a **git-hook-triggered** pull does when it fails: `"fail"` returns non-zero and fails the git operation, `"warn"` reports and lets it succeed |
+| `post_sync` | string | — | Shell command run at the end of every [placement](workflow.md#placement) that succeeded, via `sh -c` in the workspace root. A non-zero exit fails the command |
+| `on_pull_error` | string | `"fail"` under CI, `"warn"` otherwise | What a placement a **git hook** ran does when it fails: `"fail"` returns non-zero and fails the git operation, `"warn"` reports and lets it succeed |
 
 Under an installed [git hook](hooks.md#git-hooks), `post_sync` runs only for
-repositories on that hook's [allowlist](hooks.md#the-hook-allowlist).
+workspaces on that hook's [allowlist](hooks.md#the-hook-allowlist).
+
+## `[forward]`
+
+How [git commands run across the workspace](cli.md#git-commands-git-scale-git-command)
+are run. Read from the root only.
+
+```toml
+[forward]
+parallel = 8
+```
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `parallel` | integer, at least 1 | unset | Run `git scale fetch`, `pull` and `push` — after alias lookup — in this many repositories at once. Other git commands run in sequence unless given `--parallel` |
+
+`--parallel=N` on the command line overrides it; `--parallel=1` runs in
+sequence.
 
 ## Nested configs
 
@@ -232,9 +275,9 @@ When a checked-out repository carries its own `.gitscale.toml` and the entry is
 - **`[clean]`** — to decide what [`clean`](clean.md) keeps in that repository.
 
 Everything else in a nested config — `[resolve]`, `[registries]`, `[artefact]`,
-`[hooks]` — is not even parsed by the parent, so nothing
-in those tables can break it. It belongs to that repository when it is used as a workspace in its own
-right, and is not read by the parent.
+`[topic]`, `[hooks]`, `[forward]` — is not even parsed by the parent, so
+nothing in those tables can break it. It belongs to that repository when it is
+cloned as a workspace root of its own.
 
 ## Values GitScale refuses to pass to git
 
@@ -251,27 +294,23 @@ command:
 | A `clean.exclude` pattern that is empty or starts with `-` | It reaches `git clean -e` as an argument |
 
 These checks are independent of the [hook allowlist](hooks.md#the-hook-allowlist),
-which covers the `[hooks]` table, and apply even to a `gitscale pull` you typed
+which covers the `[hooks]` table, and apply even to a placement you started
 yourself.
 
-## How `add` and `remove` rewrite the file
+## Git config keys
 
-`gitscale add` and `gitscale remove` re-emit `.gitscale.toml` from what GitScale
-parsed. Consequences:
+Two settings are one person's preference rather than the workspace's, so they
+are git config, not `.gitscale.toml`:
 
-- Comments, blank lines, key order and formatting are lost.
-- Any table GitScale does not know about is **deleted**.
-- Defaults are not written back: `recursive = true`, an empty revision, and
-  every default `[develop]` / `[clean]` / `[hooks]` value are simply omitted.
-- Tables are emitted in a fixed order: a top-level `singleton`, `[resolve]`,
-  `[develop]`, `[registries]`, `[artefact]`, `[hooks]`, `[clean]`, `[repos]`,
-  with
-  entries inline and sorted by directory. A single `[artefact]` group named
-  `default` is written in the short form, with `include` directly in the table.
+| Key | Meaning |
+|---|---|
+| `gitscale.user` | The name `{user}` stands for in a [`[topic] prefix`](#topic). Unset: `$USER` (`USERNAME` on Windows) |
+| `gitscale.topic.worktree` | `true` or `false`: whether `git topic start` and `switch` use a worktree of their own by default. Unset: a worktree when the root is a bare repository — see [worktree layout](topics.md#worktree-layout) |
 
-If you keep comments in the file, edit it by hand instead.
-[`gitscale upgrade`](topics.md#promotion-gitscale-upgrade) is the exception: it
-changes only the revisions it reports, and keeps everything else as it was.
+```
+git config --global gitscale.user andrey
+git config --global gitscale.topic.worktree true
+```
 
 ## Environment variables
 
@@ -279,16 +318,18 @@ changes only the revisions it reports, and keeps everything else as it was.
 
 | Variable | Effect |
 |---|---|
-| `CI` | `1` or `true` switches to [CI behaviour](stores.md#the-ci-cache): depth-1 checkouts from the per-user cache, and [`clean -f` on every checkout](hooks.md#git-hooks-in-ci) after a `pull` |
+| `CI` | `1` or `true` switches to [CI behaviour](stores.md#the-ci-cache): depth-1 checkouts from the per-user cache, resolution [always against the remotes](recursive-dependencies.md#when-resolution-asks-the-remotes), and [`git scale clean -fdx` of every checkout placed](hooks.md#git-hooks-in-ci) |
 | `GITSCALE_CACHE_DIR` | The CI cache's location |
 | `XDG_DATA_HOME` | `$XDG_DATA_HOME/gitscale` is the CI cache's location, when `GITSCALE_CACHE_DIR` is not set |
 | `HOME` | `~/.local/share/gitscale` is the last fallback; also where `--global` hooks are installed |
+| `NO_COLOR`, `TERM` | `NO_COLOR` set to anything, or `TERM=dumb`, turns colour and icons off — see [colour](cli.md#colour) |
+| `USER`, `USERNAME` | The name `{user}` stands for in a [`[topic] prefix`](#topic) when `gitscale.user` is not set |
 | `GITSCALE_NO_CI_AUTH` | Any non-empty value disables [CI authentication](ci-authentication.md) |
 | `GITSCALE_HOOK_ALLOW` | Set by an installed [git hook shim](hooks.md#the-hook-allowlist) to the allowlist it was installed with. Not something to set yourself |
 | `GITSCALE_HOOK` | Set by GitScale on every git call it makes, so an installed hook can tell re-entry from a genuine user operation |
 | `CI_MERGE_REQUEST_SOURCE_BRANCH_NAME`, `CI_COMMIT_BRANCH`, `CI_DEFAULT_BRANCH`, `CI_MERGE_REQUEST_TARGET_BRANCH_NAME` | GitLab — the [topic of a pipeline](topics.md#topics-in-ci), the default branch, and the merge request's target for `check` |
 | `GITHUB_HEAD_REF`, `GITHUB_REF_NAME`, `GITHUB_REF_TYPE`, `GITHUB_BASE_REF`, `GITHUB_EVENT_PATH` | GitHub — the same |
-| `GITLAB_CI` | `true` makes a hook-triggered pull check that the runner's post-checkout clean keeps the declared checkouts, and [fail if it would not](hooks.md#git-hooks-in-ci) |
+| `GITLAB_CI` | `true` makes a hook-triggered placement check that the runner's post-checkout clean keeps the declared checkouts, and [fail if it would not](hooks.md#git-hooks-in-ci) |
 | `GIT_CLEAN_FLAGS` | GitLab Runner's own: the flags of the `git clean` it runs after its checkout, default `-ffdx`. Read for that check, never set by GitScale |
 
 ### CI authentication

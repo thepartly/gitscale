@@ -19,8 +19,8 @@ where each one is checked out, and which revision each one is pinned to:
 "imports/utils" = { url = "https://github.com/org/utils.git", revision = "v2.1.0" }
 ```
 
-`gitscale pull` materialises all of it; `gitscale status` shows the state of
-every checkout in one table; `gitscale sync` brings everything back in line.
+`git scale sync` materialises all of it; `git scale ls` shows the state of
+every checkout in one table; `git scale pull` brings everything up to date.
 Each checkout is a git worktree with its repository's full history — the
 workspace repository tracks only the *selection*, in `.gitscale.toml`.
 
@@ -38,10 +38,11 @@ The problems GitScale is built for:
   the exact commit its pin names, with the write bit stripped off every file,
   so an accidental edit fails loudly instead of drifting silently.
 - **One change across several repositories, with no config edits.** The root's
-  branch is the *topic*: `gitscale develop imports/core` puts that checkout on a
+  branch is the *topic*: `git topic join imports/core` puts that checkout on a
   branch of the same name, writable, and a CI pipeline on the branch takes every
-  repository's branch of that name too. Once the layers are released,
-  `gitscale upgrade` writes the new tags in. See [topics](topics.md).
+  repository's branch of that name too. `git scale commit` and `git scale push`
+  run in every repository on the topic, dependencies first. Once the layers are
+  released, `git upgrade` writes the new tags in. See [topics](topics.md).
 - **Large prebuilt payloads.** `artefact = "replace"` installs a repository's
   build output instead of cloning it — datasets, generated clients, compiled
   assets — published by its own pipeline to an OCI registry (GitLab's, GHCR, or
@@ -65,7 +66,7 @@ The problems GitScale is built for:
   entries hosted on that same server are fetched over HTTPS with the job token,
   and the token never reaches `.git/config` or a command line. See
   [CI authentication](ci-authentication.md).
-- **One glance at the whole workspace.** `gitscale status` reports ahead/behind,
+- **One glance at the whole workspace.** `git scale ls` reports ahead/behind,
   ref mismatch, dirty, stale and broken-link states, and where a topic stands, for every repo in
   one table, with JSON for anything that wants to consume it. See
   [status](status.md).
@@ -78,7 +79,7 @@ nothing but branches of one name — no manifest of its own, no server. The
 ## What it looks like
 
 ```
-$ gitscale status
+$ git scale ls
     REPO            PATH   ARTEFACT   REF       EXPECTED   STATUS   RESOLUTION
 ✔   imports/core    -      -          3f2a9c1   main       ok
 ✔   imports/utils   -      -          8c1d0e2   v2.1.0     ok
@@ -98,19 +99,24 @@ git clone https://github.com/thepartly/gitscale.git
 cd gitscale && cargo install --path .
 ```
 
-Two binaries are installed: `gitscale`, and `git-scale`, which lets git dispatch
-to it — so `git scale status` and `gitscale status` are the same command.
+Five binaries are installed: `gitscale`, `git-scale`, `git-topic`,
+`git-upgrade` and `git-explain`, which let git dispatch `git scale`,
+`git topic`, `git upgrade` and `git explain` to GitScale. `gitscale` takes the
+same command line as `git scale` — `git scale ls` and `gitscale ls` are the
+same command. See [the synopsis](cli.md#synopsis).
 
 ## Getting a workspace
 
 Authoring one means writing a `.gitscale.toml`, gitignoring the checkout
-directory, and running `gitscale pull` — see
+directory, and running `git scale sync` — see
 [declaring dependencies](dependencies.md).
 
 Using one means `git clone`, and nothing else. A `--global` or `--system`
 [git hook](hooks.md#git-hooks), installed once per machine, materialises every
 declared repository at the end of the clone. Where no hook applies, `git clone`
-followed by [`gitscale pull`](workflow.md#pull) does the same work.
+followed by [`git scale sync`](workflow.md#placement) does the same work. A
+bare clone with a worktree per topic works too — see
+[everyday workflow](workflow.md#a-bare-clone-with-worktrees).
 
 ## Where to go next
 

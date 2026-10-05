@@ -1,6 +1,0 @@
----
-source: tests/it/add.rs
-assertion_line: 44
-expression: out.stdout
----
-Added meta/svc → https://github.com/org/svc.git @ main [artefact replace]

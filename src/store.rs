@@ -152,6 +152,31 @@ impl Stores {
         Ok(path)
     }
 
+    /// `url`'s store when it already holds `commit`; otherwise fetched, as
+    /// [`Stores::update`] does. For a placement that fetches only what it
+    /// lacks.
+    pub fn ready(&self, url: &str, commit: &str) -> Result<PathBuf> {
+        let path = self.repo_path(url);
+        if is_repository(&path) && crate::git::ref_exists(&path, &format!("{}^{{commit}}", commit))
+        {
+            return Ok(path);
+        }
+        self.update(url)
+    }
+
+    /// Fetch the store at `path` from its own `origin`, once per command:
+    /// for a store no entry asks for any more.
+    pub fn update_path(&self, path: &Path) -> Result<()> {
+        if self.fetched.lock().unwrap().contains(path) {
+            return Ok(());
+        }
+        let _lock = Lock::acquire(&self.root.join(LOCKS), path)?;
+        git_in(path, &["fetch", "--prune", "--quiet", "origin"], true)
+            .with_context(|| format!("cannot fetch {}", path.display()))?;
+        self.fetched.lock().unwrap().insert(path.to_path_buf());
+        Ok(())
+    }
+
     /// Every store this root has.
     pub fn all(&self) -> Vec<PathBuf> {
         let Ok(listing) = fs::read_dir(self.root.join(REPOS)) else {

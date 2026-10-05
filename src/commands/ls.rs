@@ -1,3 +1,6 @@
+//! `git scale ls`: every checkout of the workspace, its revision, how it was
+//! chosen, and its state. `git explain`: every request behind a revision.
+
 use anyhow::Result;
 use std::io::Write;
 use std::path::Path;
@@ -8,12 +11,69 @@ use crate::promote::State;
 use crate::resolution::{Kind, Resolution, Slot};
 use crate::store::Sources;
 
-#[allow(clippy::too_many_arguments)]
+/// `git explain [--fetch] [DIR...]`.
+pub fn explain(
+    root: Option<&Path>,
+    do_fetch: bool,
+    dirs: &[String],
+    verbose: bool,
+    no_cache: bool,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<()> {
+    let (config, config_root) = load_workspace(root)?;
+    let sources = Sources::new(&config_root, no_cache)?;
+    let artefacts = crate::artefact::Artefacts::new(&config, &config_root, sources.images());
+    let resolution = resolve_or_report(
+        &config,
+        &config_root,
+        do_fetch,
+        &sources,
+        &artefacts,
+        verbose,
+        err,
+    )?;
+    let here = crate::paths::Here::new(root, &config_root)?;
+    let named = dirs
+        .iter()
+        .map(|d| here.slot(&resolution, d).map(|s| s.directory.clone()))
+        .collect::<Result<Vec<_>>>()?;
+    print_why(&resolution, &named, out)
+}
+
+/// Resolved as `--fetch` says; a graph that cannot be resolved is still worth
+/// a table — the declared entries, each marked unresolved, under the reason.
+fn resolve_or_report(
+    config: &crate::config::GitScaleConfig,
+    config_root: &Path,
+    do_fetch: bool,
+    sources: &Sources,
+    artefacts: &crate::artefact::Artefacts,
+    verbose: bool,
+    err: &mut dyn Write,
+) -> Result<Resolution> {
+    let online = do_fetch;
+    match crate::resolve::workspace(
+        config,
+        config_root,
+        online,
+        sources,
+        Some(artefacts),
+        verbose,
+    ) {
+        Ok(resolution) => Ok(resolution),
+        Err(e) => {
+            writeln!(err, "error: {:#}", e)?;
+            Ok(unresolved(config, &format!("{:#}", e)))
+        }
+    }
+}
+
+/// `git scale ls [--fetch] [-f table|json]`.
 pub fn run(
     root: Option<&Path>,
     do_fetch: bool,
     output_format: &str,
-    why: Option<&[String]>,
     verbose: bool,
     no_cache: bool,
     out: &mut dyn Write,
@@ -22,7 +82,7 @@ pub fn run(
     let (config, config_root) = load_workspace(root)?;
 
     // JSON goes on to print its usual array, so a consumer gets JSON either way.
-    if config.repos.is_empty() && output_format != "json" && why.is_none() {
+    if config.repos.is_empty() && output_format != "json" {
         writeln!(out, "No repos declared in .gitscale.toml")?;
         return Ok(());
     }
@@ -30,27 +90,16 @@ pub fn run(
     let sources = Sources::new(&config_root, no_cache)?;
     let artefacts = crate::artefact::Artefacts::new(&config, &config_root, sources.images());
 
-    // Offline unless `--fetch`: what this machine already has. A graph that
-    // cannot be resolved is still worth a table — the declared entries, each
-    // marked unresolved, under the reason.
-    let resolution = match crate::resolve::workspace(
+    // Offline unless `--fetch`: what this machine already has.
+    let resolution = resolve_or_report(
         &config,
         &config_root,
         do_fetch,
         &sources,
-        Some(&artefacts),
+        &artefacts,
         verbose,
-    ) {
-        Ok(resolution) => resolution,
-        Err(e) => {
-            writeln!(err, "error: {:#}", e)?;
-            unresolved(&config, &format!("{:#}", e))
-        }
-    };
-
-    if let Some(dirs) = why {
-        return print_why(&resolution, dirs, out);
-    }
+        err,
+    )?;
 
     // Resolving online fetched every store; what is left is what the
     // registry has for each artefact.
@@ -322,7 +371,7 @@ fn is_unresolved(slot: &Slot) -> bool {
 
 /// The RESOLUTION column: how the row's revision was chosen, when there is
 /// anything to say beyond "the root asked for it". The winner only, and a
-/// count when more than one repository asked — `--why` has the rest.
+/// count when more than one repository asked — `explain` has the rest.
 fn notes(slot: &Slot, topic: &TopicView, status: Option<&RepoStatus>) -> Vec<String> {
     let mut notes = Vec::new();
     if let Some(on) = &slot.topic {
@@ -357,13 +406,13 @@ fn notes(slot: &Slot, topic: &TopicView, status: Option<&RepoStatus>) -> Vec<Str
     if let Some(reason) = &slot.unresolved {
         notes.push(
             if reason.contains("not on this machine") || reason.contains("not been fetched") {
-                "not fetched yet: run status --fetch".to_string()
+                "not fetched yet: run git scale ls --fetch".to_string()
             } else {
                 "see the error above".to_string()
             },
         );
     } else if slot.unread.is_some() && slot.kind == Kind::Source {
-        notes.push("its dependencies are not fetched yet: run status --fetch".to_string());
+        notes.push("its dependencies are not fetched yet: run git scale ls --fetch".to_string());
     }
     if let Some(chosen) = slot.chosen.as_ref().filter(|_| slot.topic.is_none()) {
         if chosen.resolution == "raised" {
@@ -434,8 +483,8 @@ fn row_flags(s: &RepoStatus, slot: &Slot) -> String {
     format!("{}, {}", flags, warnings.join(", "))
 }
 
-/// `gitscale status --why`: how each slot got its revision. With no
-/// directories, every slot more than one repository asks for.
+/// `git explain`: how each slot got its revision. With no directories,
+/// every slot more than one repository asks for.
 fn print_why(resolution: &Resolution, dirs: &[String], out: &mut dyn Write) -> Result<()> {
     let slots: Vec<&Slot> = if dirs.is_empty() {
         resolution
@@ -444,13 +493,7 @@ fn print_why(resolution: &Resolution, dirs: &[String], out: &mut dyn Write) -> R
             .filter(|s| s.requests.len() > 1)
             .collect()
     } else {
-        dirs.iter()
-            .map(|d| {
-                resolution
-                    .slot(d.trim_end_matches('/'))
-                    .ok_or_else(|| anyhow::anyhow!("no checkout at {}", d))
-            })
-            .collect::<Result<_>>()?
+        dirs.iter().filter_map(|d| resolution.slot(d)).collect()
     };
     if slots.is_empty() {
         writeln!(out, "Every dependency is asked for by one repository only.")?;
@@ -692,7 +735,12 @@ fn status_color(flags: &str) -> &'static str {
     "36" // cyan
 }
 
+/// `text` in the colour `ansi_code`, when stdout gets colour at all: piped
+/// output and CI logs get none.
 fn colorize(text: &str, ansi_code: &str, bold: bool) -> String {
+    if !crate::output::stdout() {
+        return text.to_string();
+    }
     if bold {
         format!("\x1b[1;{}m{}\x1b[0m", ansi_code, text)
     } else {
@@ -863,33 +911,33 @@ fn print_table(
     if rows_in.iter().any(|(_, slot)| slot.requests.len() > 1) {
         writeln!(
             out,
-            "hint: gitscale status --why <dir> lists every request behind a revision"
+            "{}",
+            crate::output::hint(
+                "git explain <dir> lists every request behind a revision",
+                crate::output::stdout()
+            )
         )?;
     }
 
-    // What to do about links git sees: ignore the directories they live in.
+    // Links git sees: placement keeps them in the checkout's info/exclude,
+    // so something took them out of it — or a .gitignore of the
+    // repository's own takes them back in.
     for (s, _) in rows_in {
         if s.untracked_links.is_empty() {
             continue;
         }
-        let mut dirs: Vec<String> = s
-            .untracked_links
-            .iter()
-            .map(|link| match std::path::Path::new(link).parent() {
-                Some(parent) if !parent.as_os_str().is_empty() => {
-                    format!("/{}/", parent.display())
-                }
-                _ => format!("/{}", link),
-            })
-            .collect();
-        dirs.sort();
-        dirs.dedup();
         writeln!(
             out,
-            "hint: {}: the dependency links gitscale planted are untracked files there; \
-             add {} to its .gitignore",
-            s.directory,
-            dirs.join(" and ")
+            "{}",
+            crate::output::hint(
+                &format!(
+                    "{}: git sees the dependency links GitScale planted there ({}); git \
+                     scale sync puts them back in its info/exclude",
+                    s.directory,
+                    s.untracked_links.join(", ")
+                ),
+                crate::output::stdout()
+            )
         )?;
     }
     Ok(())

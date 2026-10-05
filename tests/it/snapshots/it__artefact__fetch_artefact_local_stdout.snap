@@ -1,6 +1,9 @@
 ---
 source: tests/it/artefact.rs
+assertion_line: 202
 expression: redact_shas(&out.stdout)
 ---
+── 1/1 . ────────────────
+── refreshing ────────────────
 Fetching...
   ok    meta/app (artefact [sha])

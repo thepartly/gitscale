@@ -52,6 +52,9 @@ pub struct Placer<'a> {
     pub sources: &'a Sources,
     pub artefacts: &'a Artefacts,
     pub verbose: bool,
+    /// Fetch each store before placing from it. Off, a store is fetched
+    /// only when it lacks the commit to place.
+    pub fetch: bool,
 }
 
 impl Placer<'_> {
@@ -191,7 +194,7 @@ impl Placer<'_> {
         if dest.exists() && !crate::git::is_checkout(&dest) && !crate::artefact::is_empty_dir(&dest)
         {
             bail!(
-                "{} exists but holds no git repository; `gitscale clean -f {}` removes it",
+                "{} exists but holds no git repository; `git scale clean -fd {}` removes it",
                 dest.display(),
                 name
             );
@@ -199,14 +202,19 @@ impl Placer<'_> {
         let mut notes = Vec::new();
         match &self.sources.stores {
             Some(stores) => {
-                let store = stores.update(&crate::git::remote_url(entry))?;
+                let url = crate::git::remote_url(entry);
+                let store = if self.fetch {
+                    stores.update(&url)?
+                } else {
+                    stores.ready(&url, target.commit())?
+                };
                 if crate::git::is_checkout(&dest) {
                     match crate::store::identify(&store, &dest) {
                         Worktree::Ours => {}
                         Worktree::Repaired => notes.push("repaired after a move".to_string()),
                         Worktree::Foreign => bail!(
                             "not a gitscale worktree; move your changes out, delete it and run \
-                             pull"
+                             git scale sync"
                         ),
                     }
                 } else {
@@ -401,7 +409,7 @@ fn move_to(dest: &Path, target: &Target) -> Result<()> {
 }
 
 /// Put the checkout at `dest`, detached at its pin, on a new branch `name`
-/// at the commit it is at — what `gitscale develop` does — and make it
+/// at the commit it is at — what `git topic join` does — and make it
 /// writable.
 pub fn start_branch(dest: &Path, name: &str) -> Result<()> {
     crate::git::restore_writable(dest)?;
@@ -450,8 +458,51 @@ pub fn carry(sources: &Sources, config_root: &Path, from: &str, to: &str) -> Vec
     carried
 }
 
+/// Carry topic `from` to `to` in the stores themselves, for a topic started
+/// from one the root is not on: each store with a branch `from` (or
+/// `from@v<major>`) gets the same branch of `to` at the same commit, which
+/// placement then puts its checkout on. Returns how many were made.
+pub fn carry_branches(sources: &Sources, from: &str, to: &str) -> usize {
+    let Some(stores) = &sources.stores else {
+        return 0;
+    };
+    let mut made = 0;
+    for store in stores.all() {
+        let listed = crate::git::query(
+            &store,
+            &["for-each-ref", "--format=%(refname:short)", "refs/heads/"],
+        )
+        .unwrap_or_default();
+        for branch in listed.lines() {
+            let suffix = match branch.strip_prefix(from) {
+                Some(rest) if rest.is_empty() || rest.starts_with("@v") => rest,
+                _ => continue,
+            };
+            let new = format!("{}{}", to, suffix);
+            if crate::git::ref_exists(&store, &format!("refs/heads/{}", new)) {
+                continue;
+            }
+            let made_one = crate::git::run_git(
+                &[
+                    "branch",
+                    "--quiet",
+                    "--no-track",
+                    &new,
+                    &format!("refs/heads/{}", branch),
+                ],
+                Some(&store),
+                true,
+            );
+            if made_one.is_ok() {
+                made += 1;
+            }
+        }
+    }
+    made
+}
+
 /// Each worktree of `store` that is on a branch: its path and the branch.
-fn worktrees(store: &Path) -> Vec<(PathBuf, String)> {
+pub fn worktrees(store: &Path) -> Vec<(PathBuf, String)> {
     let Some(listing) = crate::git::query(store, &["worktree", "list", "--porcelain"]) else {
         return Vec::new();
     };
@@ -472,7 +523,7 @@ fn worktrees(store: &Path) -> Vec<(PathBuf, String)> {
     found
 }
 
-/// What `gitscale develop --stop` and promotion do to a developed checkout:
+/// What `git topic leave` and promotion do to a joined checkout:
 /// detached at `commit`, read-only again, its branch `branch` deleted from
 /// the store. Refused while the checkout holds work nothing else has —
 /// `planted` are the links gitscale put there, which are not. `released`

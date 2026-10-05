@@ -121,6 +121,9 @@ pub trait Repos {
     fn is_ancestor(&self, url: &str, kind: Kind, ancestor: &str, descendant: &str) -> Result<bool>;
     /// Make the repositories ready, in parallel where that helps. Optional.
     fn prepare(&self, _wanted: &[(String, Kind)]) {}
+    /// A revision was asked of `url` that its refs do not have: when they
+    /// were read offline, a fetch may bring it. Optional.
+    fn unknown(&self, _url: &str, _kind: Kind) {}
     /// The commit a branch of this workspace's own — not the remote's —
     /// points at: where a topic is developed. `None` where there are no
     /// local branches, as in CI.
@@ -914,6 +917,7 @@ impl<'a> Engine<'a> {
             }
             Err(e) if is_unavailable(&e) => req.info = Info::Unavailable(e.to_string()),
             Err(e) if e.downcast_ref::<UnknownRevision>().is_some() => {
+                self.repos.unknown(&req.entry.repo_url, req.kind);
                 let message = e.to_string();
                 self.classified
                     .borrow_mut()

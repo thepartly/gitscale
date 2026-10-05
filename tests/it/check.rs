@@ -1,4 +1,4 @@
-//! `gitscale check`: the merge gate.
+//! `git scale check`: the merge gate.
 
 use crate::support::resolution::allow;
 use crate::support::status_clean::*;
@@ -65,8 +65,8 @@ fn normal_002_fails_a_merge_request_into_a_pinned_branch() {
              that was not tested.",
             &tip[..7]
         ),
-        "- imports/core's change not merged yet: merge it first, then run gitscale upgrade here \
-         and push."
+        "- imports/core's change not merged yet: merge it first, then run git upgrade --commit \
+         here and push."
             .to_string(),
         format!(
             "- already merged and pinned: delete branch feat/x in {}, then rerun this pipeline.",
@@ -87,7 +87,7 @@ fn normal_002_fails_a_merge_request_into_a_pinned_branch() {
 /// a merge into `release/1.0` is checked, and with that list set, `main` —
 /// which it does not name — is not.
 #[test]
-fn normal_003_develop_pinned_globs_decide_which_targets_are_gated() {
+fn normal_003_pinned_globs_decide_which_targets_are_gated() {
     let env = TestEnv::new("check_pinned_globs");
     let core = repo_with_topic(&env, "core", &[("lib.txt", "v1")]);
     let job = job_checkout(
@@ -262,7 +262,7 @@ fn normal_007_outside_ci_it_speaks_of_the_workspace() {
     ));
     env.init_playground_git();
     run_git_pub(&env.playground, &["switch", "-q", "-c", "feat/x"]);
-    let pull = env.run(&["pull"]);
+    let pull = env.run(&["sync"]);
     assert!(pull.success, "{}{}", pull.stdout, pull.stderr);
 
     let out = gitscale(&env, &[], &["check"]);
@@ -274,7 +274,7 @@ fn normal_007_outside_ci_it_speaks_of_the_workspace() {
         out.stderr
     );
     assert!(
-        out.stderr.contains("then rerun gitscale check."),
+        out.stderr.contains("then rerun git scale check."),
         "{}",
         out.stderr
     );
@@ -390,13 +390,11 @@ fn edge_009_a_checkout_a_repository_holds_at_its_pin_does_not_block() {
     );
 }
 
-/// What the gate does when it cannot fetch but has fetched before. This pins
-/// the current behaviour, which is to resolve from the refs fetched last time
-/// with a warning on stderr: the gate then answers from stale refs. Whether a
-/// merge gate should fail instead when it cannot reach a remote is a decision
-/// for the owner.
+/// A gate that cannot fetch fails, though an earlier job fetched: runners
+/// keep the build directory between jobs, and refs fetched then would answer
+/// for a branch that has moved since.
 #[test]
-fn edge_010_a_failed_fetch_answers_from_what_was_fetched_before() {
+fn error_010_in_ci_a_failed_fetch_fails_rather_than_answer_from_old_refs() {
     let env = TestEnv::new("check_stale_refs");
     let core = repo_with_topic(&env, "core", &[("lib.txt", "v1")]);
     let job = job_checkout(
@@ -413,12 +411,13 @@ fn edge_010_a_failed_fetch_answers_from_what_was_fetched_before() {
     let away = core.with_extension("moved");
     std::fs::rename(&core, &away).unwrap();
     let out = check_job(&env, &job, &vars);
+    assert!(out.stderr.contains("cannot fetch"), "{}", out.said());
     assert!(
-        out.stderr.contains("using what was fetched before"),
+        !out.stderr.contains("using what was fetched before"),
         "{}",
         out.said()
     );
-    assert_eq!(out.code, Some(0), "{}", out.said());
+    assert_eq!(out.code, Some(1), "{}", out.said());
 }
 
 /// A `replace` artefact taken from the topic — the image of its branch tip —

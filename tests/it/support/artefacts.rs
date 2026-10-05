@@ -33,9 +33,9 @@ pub fn layered(env: &TestEnv, bare: &Path, app: &str) -> String {
     commit
 }
 
-/// The commit `status` says `meta/app` was installed from.
+/// The commit `ls` says `meta/app` was installed from.
 pub fn installed_commit(env: &TestEnv) -> String {
-    let out = env.run(&["status", "--format", "json"]);
+    let out = env.run(&["ls", "--format", "json"]);
     let rows: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
     rows.as_array()
         .unwrap()
@@ -51,7 +51,7 @@ pub fn blob_downloads(env: &TestEnv) -> usize {
 }
 
 pub fn status_line(env: &TestEnv) -> String {
-    let out = env.run(&["status"]);
+    let out = env.run(&["ls"]);
     assert!(out.success, "{}", out.stderr);
     strip_ansi(&out.stdout)
         .lines()
@@ -109,9 +109,9 @@ pub fn age(entry: &Path, commit: &str) {
     assert!(touched.success());
 }
 
-/// A pull in a CI job: the images go to the per-user cache, not the root.
+/// A sync in a CI job: the images go to the per-user cache, not the root.
 pub fn ci_pull(env: &TestEnv) {
-    let out = env.run_with_env(&[("CI", "true")], &["pull"]);
+    let out = env.run_with_env(&[("CI", "true")], &["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
 }
 

@@ -6,11 +6,11 @@
 //!   topic's configs that ask for less, and the slot leaves the topic.
 //! * `upgrade <dir>...` — the newest release of each named dependency,
 //!   written into every config that asks for it; the repositories those
-//!   configs belong to are developed on the topic, which is created — a new
-//!   branch of the root — when there is none.
+//!   configs belong to join the topic, which is created — a new branch of
+//!   the root — when there is none.
 //! * `upgrade --resolved` — the revision resolution already selected,
-//!   written into the root's own entries (what `gitscale resolve --write`
-//!   did). No tag is looked up, and no topic is needed.
+//!   written into the root's own entries. No tag is looked up, and no topic
+//!   is needed.
 //!
 //! This is the one command that looks for newer tags; resolution never does.
 //! Files are edited with `toml_edit`, so comments and key order survive, and
@@ -63,6 +63,7 @@ pub fn run(
     out: &mut dyn Write,
 ) -> Result<()> {
     let (config, config_root) = load_workspace(root)?;
+    let here = crate::paths::Here::new(root, &config_root)?;
     let sources = Sources::new(&config_root, no_cache)?;
     let artefacts = Artefacts::new(&config, &config_root, sources.images());
     if opts.resolved {
@@ -72,6 +73,7 @@ pub fn run(
         return resolved(
             &config,
             &config_root,
+            &here,
             &sources,
             &artefacts,
             opts,
@@ -96,7 +98,7 @@ pub fn run(
     if opts.dirs.is_empty() {
         if opts.major {
             bail!(
-                "--major raises a named dependency: gitscale upgrade --major <dir>. Promotion \
+                "--major raises a named dependency: git upgrade --major <dir>. Promotion \
                  stays in the major each pin is in"
             );
         }
@@ -113,7 +115,15 @@ pub fn run(
             out,
         )
     } else {
-        raise(&config, &config_root, &resolution, opts, verbose, out)
+        raise(
+            &config,
+            &config_root,
+            &here,
+            &resolution,
+            opts,
+            verbose,
+            out,
+        )
     }
 }
 
@@ -136,8 +146,8 @@ fn promote_topic(
     else {
         bail!(
             "not on a topic: promotion raises the pins of a topic's repositories once they are \
-             released. Name what to raise — gitscale upgrade <dir> — or write what resolution \
-             selected with gitscale upgrade --resolved"
+             released. Name what to raise — git upgrade <dir> — or write what resolution \
+             selected with git upgrade --resolved"
         );
     };
     let topic = resolution.topic_slots();
@@ -224,28 +234,59 @@ fn promote_topic(
             sources,
             artefacts,
             verbose: false,
+            fetch: true,
         };
         for (slot, tag) in &leaving {
             let left = leave_topic(config_root, resolution, &placer, slot, tag)?;
             writeln!(out, "  {}  left the topic: {}", slot.directory, left)?;
-            if crate::commands::develop::remote_has_branch(&slot.url, &branch) {
+            if crate::commands::topic::remote_has_branch(&slot.url, &branch) {
                 writeln!(
                     out,
-                    "  {}: branch {} still exists on its remote; pull and CI keep matching it by \
-                     name until it is deleted",
+                    "  {}: branch {} still exists on its remote; placement and CI keep matching \
+                     it by name until it is deleted",
                     slot.directory, branch
                 )?;
             }
         }
-        apply(&edits, opts.commit, out)?;
+        let committed = apply(&edits, opts.commit, out)?;
+        let next = promote::next_to_merge(&requests, &promoted);
+        if !next.is_empty() {
+            writeln!(out, "next to merge: {}", next.join(", "))?;
+        }
+        to_push(config_root, &committed, out)?;
+        return Ok(());
     }
     let next = promote::next_to_merge(&requests, &promoted);
     if !next.is_empty() {
         writeln!(out, "next to merge: {}", next.join(", "))?;
     }
-    if opts.dry_run {
-        writeln!(out, "(dry run: nothing changed)")?;
+    writeln!(out, "(dry run: nothing changed)")?;
+    Ok(())
+}
+
+/// The last line after `--commit`: the repositories that now have commits
+/// to push — a promotion edits other topic checkouts' configs too.
+fn to_push(config_root: &Path, committed: &[PathBuf], out: &mut dyn Write) -> Result<()> {
+    if committed.is_empty() {
+        return Ok(());
     }
+    let mut names: Vec<String> = committed
+        .iter()
+        .map(|repo| {
+            let rel = repo
+                .strip_prefix(config_root)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if rel.is_empty() {
+                ".".to_string()
+            } else {
+                rel
+            }
+        })
+        .collect();
+    names.sort_by_key(|n| (n == ".", n.clone()));
+    names.dedup();
+    writeln!(out, "to push: {} — git scale push", names.join(", "))?;
     Ok(())
 }
 
@@ -305,6 +346,7 @@ fn on_its_branch(config_root: &Path, slot: &Slot) -> bool {
 fn raise(
     config: &GitScaleConfig,
     config_root: &Path,
+    here: &crate::paths::Here,
     resolution: &Resolution,
     opts: &Options,
     verbose: bool,
@@ -325,9 +367,7 @@ fn raise(
     let mut joiners: Vec<&Slot> = Vec::new();
     let mut raised = Vec::new();
     for dir in opts.dirs {
-        let slot = resolution
-            .find(dir)
-            .ok_or_else(|| anyhow::anyhow!("no checkout at {}", dir))?;
+        let slot = here.slot(resolution, dir)?;
         if let Some(entry) = config
             .repos
             .iter()
@@ -451,12 +491,7 @@ fn raise(
         };
         let names: Vec<String> = joiners.iter().map(|j| j.directory.clone()).collect();
         if opts.dry_run {
-            writeln!(
-                out,
-                "  would develop on topic {}: {}",
-                branch,
-                names.join(", ")
-            )?;
+            writeln!(out, "  would join topic {}: {}", branch, names.join(", "))?;
         } else {
             // No topic yet: the root's new branch is the topic.
             if current.is_none() {
@@ -467,17 +502,19 @@ fn raise(
                 )
                 .with_context(|| format!("cannot create branch {} in the root", branch))?;
             }
-            crate::commands::develop::run(
+            crate::commands::topic::run(
                 Some(config_root),
-                &names,
-                false,
+                crate::commands::topic::Action::Join(names.clone()),
                 verbose,
+                false,
+                false,
+                &mut std::io::sink(),
                 &mut std::io::sink(),
             )?;
             let created = if current.is_none() { " (created)" } else { "" };
             writeln!(
                 out,
-                "  topic {}{}: {} developed",
+                "  topic {}{}: {} joined",
                 branch,
                 created,
                 names.join(", ")
@@ -490,7 +527,7 @@ fn raise(
         writeln!(out, "(dry run: nothing changed)")?;
         return Ok(());
     }
-    apply(&edits, opts.commit, out)?;
+    let committed = apply(&edits, opts.commit, out)?;
     let mut next: Vec<String> = Vec::new();
     for edit in &edits {
         let dir = edit
@@ -509,7 +546,7 @@ fn raise(
     if !next.is_empty() {
         writeln!(out, "next to merge: {}", next.join(", "))?;
     }
-    Ok(())
+    to_push(config_root, &committed, out)
 }
 
 /// Every release tag of the repository at `url`, from its remote.
@@ -546,9 +583,11 @@ fn generated_branch(raised: &[String], edits: &[Edit]) -> String {
 // Writing what resolution selected
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn resolved(
     config: &GitScaleConfig,
     config_root: &Path,
+    here: &crate::paths::Here,
     sources: &Sources,
     artefacts: &Artefacts,
     opts: &Options,
@@ -557,10 +596,13 @@ fn resolved(
 ) -> Result<()> {
     let resolution =
         crate::resolve::workspace(config, config_root, true, sources, Some(artefacts), verbose)?;
+    let mut dirs = Vec::new();
     for dir in opts.dirs {
-        if !config.repos.iter().any(|e| &e.directory == dir) {
+        let rel = here.relative(dir)?.to_string_lossy().into_owned();
+        if !config.repos.iter().any(|e| e.directory == rel) {
             bail!("{} is not an entry of the root {}", dir, CONFIG_FILENAME);
         }
+        dirs.push(rel);
     }
 
     // Only entries that already give a revision: one without leaves it to
@@ -576,7 +618,7 @@ fn resolved(
     for entry in &config.repos {
         if entry.revision.is_empty()
             || entry.is_override
-            || (!opts.dirs.is_empty() && !opts.dirs.contains(&entry.directory))
+            || (!dirs.is_empty() && !dirs.contains(&entry.directory))
         {
             continue;
         }
@@ -671,7 +713,8 @@ fn resolved(
     )?;
     writeln!(out, "Updated {} in {}", count, CONFIG_FILENAME)?;
     if opts.commit {
-        commit_configs(&edits, out)?;
+        let committed = commit_configs(&edits, out)?;
+        to_push(config_root, &committed, out)?;
     }
     Ok(())
 }
@@ -720,7 +763,8 @@ fn print_edits(edits: &[Edit], out: &mut dyn Write) -> Result<()> {
 }
 
 /// Write `edits`, one config at a time, and commit each with `commit`.
-fn apply(edits: &[Edit], commit: bool, out: &mut dyn Write) -> Result<()> {
+/// Returns the repositories committed in.
+fn apply(edits: &[Edit], commit: bool, out: &mut dyn Write) -> Result<Vec<PathBuf>> {
     let mut by_repo: BTreeMap<&Path, Vec<(String, String)>> = BTreeMap::new();
     for edit in edits {
         by_repo
@@ -732,14 +776,15 @@ fn apply(edits: &[Edit], commit: bool, out: &mut dyn Write) -> Result<()> {
         set_revisions(&repo.join(CONFIG_FILENAME), changes)?;
     }
     if commit {
-        commit_configs(edits, out)?;
+        return commit_configs(edits, out);
     }
-    Ok(())
+    Ok(Vec::new())
 }
 
 /// Commit each edited `.gitscale.toml` — that file alone, whatever else the
-/// repository has changed — as `pin <dependency> <tag>`.
-fn commit_configs(edits: &[Edit], out: &mut dyn Write) -> Result<()> {
+/// repository has changed — as `pin <dependency> <tag>`. Returns the
+/// repositories committed in.
+fn commit_configs(edits: &[Edit], out: &mut dyn Write) -> Result<Vec<PathBuf>> {
     let mut by_repo: BTreeMap<&Path, (&str, Vec<String>)> = BTreeMap::new();
     for edit in edits {
         let item = format!("{} {}", edit.dependency, edit.to);
@@ -750,7 +795,9 @@ fn commit_configs(edits: &[Edit], out: &mut dyn Write) -> Result<()> {
             entry.1.push(item);
         }
     }
+    let mut committed = Vec::new();
     for (repo, (label, items)) in by_repo {
+        committed.push(repo.to_path_buf());
         let message = format!("pin {}", items.join(", "));
         crate::git::run_git(&["add", "--", CONFIG_FILENAME], Some(repo), true)?;
         crate::git::run_git(
@@ -761,5 +808,5 @@ fn commit_configs(edits: &[Edit], out: &mut dyn Write) -> Result<()> {
         .with_context(|| format!("cannot commit {}", label))?;
         writeln!(out, "  commit  {}: {}", label, message)?;
     }
-    Ok(())
+    Ok(committed)
 }

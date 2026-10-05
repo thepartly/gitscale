@@ -16,10 +16,10 @@ from the sources.
 ```text
 cargo test                               # everything
 cargo test --test it                     # integration tests only
-cargo test --test it pull::              # one feature
-cargo test --test it pull::edge_         # one kind of case in one feature
+cargo test --test it placement::         # one feature
+cargo test --test it placement::edge_    # one kind of case in one feature
 cargo test --test it ::error_            # one kind of case in every feature
-cargo test --test it pull::edge_007      # one test, with its variants
+cargo test --test it placement::edge_009 # one test, with its variants
 cargo test --test it -- --ignored        # the ignored tests: known failures and slow ones
 ```
 
@@ -42,10 +42,10 @@ An integration test is named
 <feature>::<kind>_<id>[<variant>]_<sentence>
 ```
 
-for example `pull::edge_007_refuses_to_lose_commits_made_at_a_pin`.
+for example `placement::edge_009_refuses_to_lose_commits_made_at_a_pin`.
 
 - **feature** is the module the test lives in: the behaviour that would break
-  if the test failed, not the command the test happens to run. A pull that
+  if the test failed, not the command the test happens to run. A sync that
   must update the CI cache is a `cache` test.
 - **kind** is one of:
   - `normal` — what the feature is for, on ordinary input.
@@ -58,7 +58,7 @@ for example `pull::edge_007_refuses_to_lose_commits_made_at_a_pin`.
 - **id** is three digits, unique within the feature. It is never reused: a
   removed test leaves a gap, and a new test takes the next number after the
   highest. Moving a test to another kind keeps its id. Its catalog id is
-  `<feature>-<id>`, for example `pull-007`.
+  `<feature>-<id>`, for example `placement-009`.
 - **variant** is a letter, `a`, `b`, …, for tests that look at one scenario
   from different angles, such as a refusal without `--force` and the same
   case with it. Tests that differ only in their input are better written as
@@ -78,8 +78,8 @@ A test that is ignored says why, and the reason starts with one of:
 
 ```rust
 #[test]
-#[ignore = "bug: develop --stop deletes unpushed commits on the topic branch"]
-fn error_014_stop_keeps_unpushed_commits_on_the_branch() { ... }
+#[ignore = "bug: leave deletes unpushed commits on the topic branch"]
+fn error_032_leave_keeps_unpushed_commits_on_the_branch() { ... }
 ```
 
 ## The catalog

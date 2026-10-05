@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::cache::{self, Cache};
-use crate::config::{find_config, load_config, load_workspace, GitScaleConfig, RepoEntry};
+use crate::config::{load_config, load_workspace, GitScaleConfig, RepoEntry};
 use crate::progress::{run_parallel, RepoStatus};
 
 /// The cache at its usual location, or an error saying there is none.
@@ -53,7 +53,8 @@ pub fn update(
         Some(&artefacts),
         verbose,
     )?;
-    let selected = resolution.select(names)?;
+    let names = crate::paths::relative_names(root, &config_root, names)?;
+    let selected = resolution.select(&names)?;
     let names: Vec<String> = selected.iter().map(|e| e.directory.clone()).collect();
     let by_name: std::collections::HashMap<&str, &RepoEntry> =
         selected.iter().map(|e| (e.directory.as_str(), e)).collect();
@@ -117,8 +118,8 @@ pub fn update(
 /// workspace — but one that does not parse is an error, not a reason to
 /// guess.
 fn optional_workspace_config(root: Option<&Path>) -> Result<GitScaleConfig> {
-    match find_config(root) {
-        Ok(path) => load_config(&path),
+    match crate::config::find_root(root) {
+        Ok(path) => load_config(&path.join(crate::config::CONFIG_FILENAME)),
         Err(_) => Ok(GitScaleConfig::default()),
     }
 }

@@ -66,7 +66,7 @@ pub(crate) fn run_git(
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     // Marks every git call gitscale makes, so an installed gitscale git hook
     // can tell re-entry from a genuine user operation and bail out. Without
-    // it, a hook that runs `gitscale pull` recurses without bound.
+    // it, a hook that places the workspace recurses without bound.
     cmd.env("GITSCALE_HOOK", "1");
     cmd.env("GIT_ASKPASS", "");
     cmd.env("SSH_ASKPASS", "");
@@ -634,36 +634,6 @@ pub(crate) fn ref_exists(dir: &Path, name: &str) -> bool {
     resolve_ref(dir, name).is_some()
 }
 
-/// Push the topic branch of the checkout at `dir` to `origin` under the same
-/// name, and make it the branch's upstream. `Ok(false)` when there was
-/// nothing to push: the remote already has every commit. `entry` is the
-/// checkout's own, for the CI remote rewrite; `None` for the workspace root.
-pub fn push_topic(entry: Option<&RepoEntry>, dir: &Path, branch: &str) -> Result<bool> {
-    if let Some(entry) = entry {
-        ensure_ci_remote(entry, dir)?;
-    }
-    let tracking = format!("refs/remotes/origin/{}", branch);
-    let up_to_date = resolve_ref(dir, &tracking).is_some_and(|remote| {
-        resolve_ref(dir, "HEAD").as_deref() == Some(remote.as_str())
-            && query(dir, &["config", &format!("branch.{}.remote", branch)]).is_some()
-    });
-    if up_to_date {
-        return Ok(false);
-    }
-    run_git(
-        &[
-            "push",
-            "--quiet",
-            "-u",
-            "origin",
-            &format!("{0}:{0}", branch),
-        ],
-        Some(dir),
-        true,
-    )?;
-    Ok(true)
-}
-
 /// What in the checkout at `dir` a move could lose, as a reason to give —
 /// `None` when nothing: uncommitted changes (see [`uncommitted`]), or commits
 /// on HEAD no remote or tag has.
@@ -711,27 +681,9 @@ pub fn unpushed(dir: &Path) -> usize {
         .count()
 }
 
-/// Stage all changes (including untracked) and commit them with `message`.
-/// Returns `Ok(true)` if a commit was created, `Ok(false)` if the working tree
-/// was already clean (nothing to commit).
-pub fn commit_path(dir: &Path, message: &str) -> Result<bool> {
-    if !is_checkout(dir) {
-        return Ok(false);
-    }
-    // Nothing to commit if the working tree is clean.
-    let porcelain = run_git(&["status", "--porcelain"], Some(dir), true)?;
-    if stdout_str(&porcelain).is_empty() {
-        return Ok(false);
-    }
-    run_git(&["add", "-A"], Some(dir), true)?;
-    run_git(&["commit", "-m", message], Some(dir), true)?;
-    Ok(true)
-}
-
-/// Returns true when `dir` is the top level of its own git repository (not
-/// merely nested inside some ancestor git repo).
-/// Remove untracked files from `dir`'s working tree, returning the paths
-/// removed (or, when `force` is false, the paths that would be).
+/// Remove untracked files from `dir`'s working tree as `flags` say,
+/// returning the paths removed (or, when not deleting, the paths that would
+/// be).
 ///
 /// `excludes` are gitignore-syntax patterns handed to `git clean -e`
 /// unchanged, so each one means what the same text on a `.gitignore` line
@@ -742,14 +694,62 @@ pub fn commit_path(dir: &Path, message: &str) -> Result<bool> {
 /// repository instead of deleting it, which is the right side of that mistake
 /// to be on: a stray clone someone forgot about is recoverable only while it
 /// still exists.
-pub fn clean_repo(dir: &Path, excludes: &[String], force: bool) -> Result<Vec<String>> {
-    let mut args: Vec<&str> = vec!["clean", "-xd", if force { "-f" } else { "-n" }];
-    for pattern in excludes {
-        args.push("-e");
-        args.push(pattern);
+pub fn clean_repo(
+    dir: &Path,
+    excludes: &[String],
+    flags: &crate::commands::clean::Flags,
+) -> Result<Vec<String>> {
+    use crate::commands::clean::Ignored;
+    let listing = |ignored: &str, keep: bool| -> Result<Vec<String>> {
+        let mut args: Vec<&str> = vec!["clean", "-n"];
+        if flags.directories {
+            args.push("-d");
+        }
+        args.push(ignored);
+        if keep {
+            for pattern in excludes {
+                args.push("-e");
+                args.push(pattern);
+            }
+        }
+        Ok(clean_report(&run_git(&args, Some(dir), true)?))
+    };
+    if flags.ignored != Ignored::Only {
+        let mut args: Vec<&str> = vec!["clean", if flags.delete { "-f" } else { "-n" }];
+        if flags.directories {
+            args.push("-d");
+        }
+        if flags.ignored == Ignored::Too {
+            args.push("-x");
+        }
+        for pattern in excludes {
+            args.push("-e");
+            args.push(pattern);
+        }
+        let output = run_git(&args, Some(dir), true)?;
+        return Ok(clean_report(&output));
     }
-    let output = run_git(&args, Some(dir), true)?;
-    Ok(clean_report(&output))
+    // `-X` takes `-e` patterns for more ignored files, to remove rather than
+    // keep — every checkout among them. So what goes is what `-X` alone
+    // would remove that `-x` keeping them would remove too.
+    let keeping = listing("-x", true)?;
+    let paths: Vec<String> = listing("-X", false)?
+        .into_iter()
+        .filter(|p| keeping.contains(p))
+        .collect();
+    if flags.delete && !paths.is_empty() {
+        for chunk in paths.chunks(200) {
+            let specs: Vec<String> = chunk.iter().map(|p| format!(":(literal){}", p)).collect();
+            let mut args: Vec<&str> = vec!["clean", "-f", "-X"];
+            if flags.directories {
+                args.push("-d");
+            }
+            args.push("--");
+            args.extend(specs.iter().map(String::as_str));
+            run_git(&args, Some(dir), true)?;
+        }
+    }
+    Ok(paths)
 }
 
 /// The paths a `git clean` run reports, removed or (with `-n`) to be removed,
@@ -765,6 +765,8 @@ pub(crate) fn clean_report(output: &std::process::Output) -> Vec<String> {
         .collect()
 }
 
+/// Returns true when `dir` is the top level of its own git repository (not
+/// merely nested inside some ancestor git repo).
 pub fn is_repo_root(dir: &Path) -> bool {
     query(dir, &["rev-parse", "--show-toplevel"]).is_some_and(|top| {
         match (fs::canonicalize(top), fs::canonicalize(dir)) {

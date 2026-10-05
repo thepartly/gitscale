@@ -1,109 +1,292 @@
 # 2.4 Everyday workflow
 
-- [How the multi-repo commands behave](#how-the-multi-repo-commands-behave)
-- [Getting a workspace](#getting-a-workspace)
-- [fetch](#fetch)
-- [pull](#pull)
-- [push](#push)
-- [sync](#sync)
-- [commit](#commit)
-- [Choosing between them](#choosing-between-them)
+- [One-time setup](#one-time-setup)
+- [A plain clone](#a-plain-clone)
+- [A bare clone with worktrees](#a-bare-clone-with-worktrees)
+- [Occasional tasks](#occasional-tasks)
+- [Placement](#placement)
+- [Forcing a cleanup](#forcing-a-cleanup)
+- [CI on hosted runners](#ci-on-hosted-runners)
+- [Choosing a command](#choosing-a-command)
 
-## How the multi-repo commands behave
+Each step below is what you want, as a comment; the GitScale command, with
+what it does after it; then the plain git that does the same, with `lacks:`
+for what it misses and `note:` for anything else. Git commands GitScale does
+not know — `status`, `add`, `commit`, `push`, `pull`, `log` — run across the
+workspace with `git scale`: see [git commands](cli.md#git-commands-git-scale-git-command).
 
-`fetch`, `pull`, `push`, `sync`, `commit` and `clean` all share a shape:
+## One-time setup
 
-- **Selection.** With no arguments they act on every declared entry. Given
-  names, they act on those — the names are the directory keys from
-  `.gitscale.toml`, exactly as written. An unknown name is an error
-  (`Unknown repos: …`) and nothing runs.
-- **Parallelism.** On a terminal, repositories are processed concurrently with
-  a progress line each. Redirected to a file or a pipe, they run sequentially
-  and print plain lines, which is what scripts and CI logs see.
-- **Reporting.** One line per repository on stdout — `ok`, `skip` with the
-  reason — and failures on stderr as `FAIL <repo>: <error>`.
-- **Exit status.** Any failure means a non-zero exit and a summary such as
-  `2 repo(s) failed to pull`. Skips are not failures.
-- **Location.** The config is found by searching upward from the current
-  directory; `-C, --root PATH` starts the search somewhere else.
-- **Where checkouts come from.** On a developer machine, from the root's
-  [stores](stores.md); in CI, from the per-user [cache](stores.md#the-ci-cache)
-  unless `--no-cache` is given.
-- **What counts as a checkout.** A directory with a `.git` of its own. One that
-  exists but holds no repository — left by a failed checkout, an interrupted
-  delete, an outside cleaner — is treated as not checked out: git run inside it
-  would walk up and act on the workspace's own repository, so GitScale never
-  runs git there.
+```sh
+# Install
+cargo install gitscale    # binaries: gitscale, git-scale, git-topic, git-upgrade, git-explain
 
-```
-Pulling latest changes...
-  ok    imports/b
-  ok    imports/d (on feat/price-cache)
-  ok    meta/art (artefact 3f2a9c1)
+# Install the hook and the man pages
+git scale hook install --global --allow 'github.com/acme/*'
+#   or via native git:
+#       not available
+#       note: without the hook, run git scale sync after every clone, switch and pull
 ```
 
-## Getting a workspace
+See [git hooks](hooks.md#git-hooks).
 
-**The normal way to set up a workspace is `git clone`.** With a `--global` or
-`--system` [git hook](hooks.md#git-hooks) installed, the `post-checkout` that
-git fires at the end of the clone runs `gitscale pull`, which materialises every
-declared repository. Nobody has to know GitScale is involved:
+## A plain clone
+
+```sh
+# Clone the workspace
+git clone git@github.com:acme/app.git && cd app    # hook: stores in .git/gitscale/repos, children detached and read-only
+
+# See the workspace
+git scale ls    # every checkout: revision, how it was chosen, state
+#   or via native git:
+#       not available
+
+# Start a topic
+git topic start PROJ-12-price-cache    # children with this branch (here or on the remote) join; the rest stay at their pins
+#   or via native git:
+#       git fetch && git switch -c PROJ-12-price-cache origin/main
+#       note: same result
+
+# Join core to the topic
+git topic join imports/core    # core onto the topic from its pin, writable; inside it: git topic join .
+#   or via native git:
+#       git -C imports/core switch -c PROJ-12-price-cache
+#       note: without -c when the branch exists here or on the remote; you pick which
+#       lacks: turning an artefact into a source checkout; join's refusals (override, held slot)
+
+# Edit app/ and imports/core/
+
+# See what changed
+git scale status    # every repo on the topic
+git scale diff
+#   or via native git:
+#       git status
+#       git -C imports/core diff
+#       lacks: knowing which repos are on the topic
+
+# Commit
+git scale add -A
+git scale commit -m "PROJ-12 price cache"    # repos with nothing to commit are skipped
+#   or via native git:
+#       git -C imports/core add -A && git -C imports/core commit -m "PROJ-12 price cache"
+#       git add -A && git commit -m "PROJ-12 price cache"
+#       note: one repo at a time
+
+# Push
+git scale push    # dependencies first, root last; upstream set on first push
+#   or via native git:
+#       git -C imports/core push -u origin HEAD
+#       git push -u origin HEAD
+#       note: children first, by hand; pushed the other way, the root's pipeline builds core at its pin
+
+# Get up to date
+git scale pull    # every checkout current, detached ones included
+#   or via native git:
+#       git -C imports/core pull && git pull
+#       lacks: detached children; a moved branch revision, or a topic a colleague started in one, waits for git scale sync
+
+# Work on a colleague's topic
+git topic switch PROJ-9-colleague    # children with PROJ-9 branches join
+#   or via native git:
+#       git fetch && git switch PROJ-9-colleague
+#       note: same result
+
+# See what is left to do on this topic
+git topic status    # joined repos: ahead, pushed, promotion state; what to merge next
+#   or via native git:
+#       git -C <repo> status -sb, per joined repo
+#       lacks: which repos are joined, promotion state, merge order
+
+# Gate the root's merge, in the MR pipeline
+git scale check    # fails while core comes from the topic
+#   or via native git:
+#       not available
+
+# Promote core, once it is merged and tagged v2026.10.04
+git upgrade --commit    # root's pin → v2026.10.04, core's topic branch deleted, core detached at the tag; ends with: to push: <repos>
+#   or via native git:
+#       edit the revision in every .gitscale.toml that asks for core, commit each
+#       git -C imports/core switch --detach v2026.10.04
+#       git -C imports/core branch -D PROJ-12-price-cache
+#       lacks: finding the tag, checking it holds the change, finding every config that asks for core
+
+# Push the pin bump
+git push    # when only the root is left on the topic; otherwise git scale push
+#   or via native git:
+#       git -C <repo> push for each repo upgrade listed, then git push
+
+# Finish, once the root is merged
+git topic finish    # back on main, up to date, every child at its pin; topic branches deleted
+#   or via native git:
+#       git switch main && git pull
+#       git -C imports/core branch -d PROJ-12-price-cache
+#       lacks: the merged check; deleting each child's topic branch
+```
+
+## A bare clone with worktrees
+
+Run from `app/`, the directory holding the bare repository.
+
+```sh
+# Clone the workspace
+git clone --bare git@github.com:acme/app.git app/.git && cd app
+#   or via native git:
+#       the same, then once:
+#       git config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*' && git fetch
+#       note: a bare clone fetches no new remote branches until told to; the first topic command does this itself
+
+# Add the main worktree
+git topic switch main    # worktree app/main, its checkouts from the stores in app/.git/gitscale/repos
+#   or via native git:
+#       git worktree add main main
+
+# Start a topic in its own worktree
+git topic start PROJ-13-retry    # worktree app/PROJ-13-retry from origin/main, same stores; prints: cd PROJ-13-retry
+#   or via native git:
+#       git fetch && git worktree add -b PROJ-13-retry PROJ-13-retry origin/main
+#       note: with a [topic] prefix, you add it to the branch and drop it from the directory
+
+# Join core to the topic
+cd PROJ-13-retry
+git topic join imports/core    # as in a plain clone
+#   or via native git:
+#       git -C imports/core switch -c PROJ-13-retry
+
+# Edit, commit, push, promote: as in a plain clone
+
+# Work on a colleague's topic
+git topic switch PROJ-9-colleague    # its own worktree; children with PROJ-9 branches join; prints: cd ../PROJ-9-colleague
+#   or via native git:
+#       git fetch && git worktree add ../PROJ-9-colleague PROJ-9-colleague
+
+# See topics in progress
+git topic list    # worktrees, joined children, not pushed / pushed / merged
+#   or via native git:
+#       git worktree list
+#       lacks: joined children, state
+
+# Finish, once merged
+git topic finish    # checks it's merged, removes the worktree, deletes root and child topic branches; prints: cd ../main
+#   or via native git, from ../main:
+#       git worktree remove ../PROJ-13-retry && git branch -d PROJ-13-retry
+#       lacks: the merged check; the children's topic branches stay in the stores
+```
+
+Layout:
 
 ```
-git clone https://github.com/org/root.git
+app/
+├── .git/                          bare repository, shared by every worktree
+│   └── gitscale/repos/            one store per dependency, shared too
+├── main/                          children detached at their pins
+├── PROJ-13-retry/                 git topic start PROJ-13-retry
+├── PROJ-9-colleague/              git topic switch PROJ-9-colleague
+└── feature-blah/                  git topic start feature-blah   (branch andrey/feature-blah with [topic] prefix)
 ```
 
-Without a hook, run `gitscale pull` in the new clone. A
-[root made of worktrees](stores.md#a-root-with-worktrees) works the same way:
-each root worktree gets its own checkouts, all from the same stores.
+See [worktree layout](topics.md#worktree-layout) and
+[stores](stores.md#a-root-with-worktrees).
 
-## fetch
+## Occasional tasks
 
-Update remote state without touching any working tree.
+```sh
+# Leave the topic
+git topic leave imports/core    # back at the pin, topic branch deleted; inside it: git topic leave .
+#   or via native git:
+#       not available
+#       note: needs the pin from resolution, and lacks the refusal when the branch holds unpushed work
 
+# Raise a dependency to its newest release, everywhere it is asked for
+git upgrade imports/d    # inside it: git upgrade .
+#   or via native git:
+#       edit every .gitscale.toml that asks for d
+#       lacks: finding the release and every requester, putting each on a topic
+
+# Promote the topic's released slots
+git upgrade    # from anywhere
+#   or via native git:
+#       as git upgrade --commit above
+
+# See why a checkout has its revision
+git explain imports/utils    # inside it: git explain .
+#   or via native git:
+#       not available
+
+# See every checkout more than one repo asks for
+git explain
+#   or via native git:
+#       not available
+
+# Run a git command in some checkouts
+git scale log --oneline -5 --for imports/core
+#   or via native git:
+#       git -C imports/core log --oneline -5
+
+# Run a git command in every checkout
+git scale log --oneline -1 --foreach    # detached ones included
+#   or via native git:
+#       git -C <dir> log --oneline -1, per checkout
+#       lacks: the list of checkouts, implicit ones included
+
+# Refresh remote state, moving nothing
+git scale fetch    # every store and artefact info
+#   or via native git:
+#       git fetch, per checkout
+#       lacks: stores with no checkout here, artefact info
+
+# Pull in parallel
+git scale --parallel pull    # output kept per repo
+#   or via native git:
+#       not available
+
+# Clean
+git scale clean -fdx    # checkouts, links and overlays always kept
+#   or via native git:
+#       DON'T: git clean -fdx in the root deletes every checkout and artefact
+
+# Compact
+git scale gc    # the stores, and images nothing uses
+#   or via native git:
+#       git gc in each store under .git/gitscale/repos/
+#       lacks: dropping unused images
+
+# Add or remove a dependency
+git scale require imports/utils https://github.com/acme/utils.git v2.1.0    # edits .gitscale.toml in place, checks it out
+git scale unrequire imports/utils    # edits .gitscale.toml in place, cleans up
+#   or via native git:
+#       edit .gitscale.toml, then git scale sync
+
+# See the workspace with remote state refreshed
+git scale ls --fetch
+#   or via native git:
+#       not available
 ```
-gitscale fetch                  # everything
-gitscale fetch imports/core     # one entry
-```
 
-- **Git entries**: the repository's store is fetched — every branch and tag,
-  pruned — whether or not it has a checkout yet. A symlinked (deduped) entry is
-  skipped (`symlink`): the real checkout is fetched under its own name. In CI
-  there is no history to fetch into, so git entries are skipped (`no history in
-  CI`); the next `pull` takes the commit it needs.
-- **Artefact entries**: the revision is resolved to a commit with `git
-  ls-remote` and the registry is asked whether that commit has an image; both
-  are recorded, outside the checkout, for [`status`](artefacts.md#status).
-  Nothing is downloaded or extracted. A commit with no image fails the entry.
+## Placement
 
-Nothing that `fetch` does can change which commit is checked out — it is safe to
-run in a dirty workspace.
-
-## pull
-
-Put every checkout where
+**Placement** is what `git scale sync` does, what the [hook](hooks.md#git-hooks)
+and CI run, and what `git scale pull` — and any git command that moved a
+`HEAD` — ends with: put every checkout where
 [resolution](recursive-dependencies.md#how-a-revision-is-chosen) says it goes,
-against the remotes as they are now — including a revision a dependency starts
-asking for in this very pull, and implicit dependencies new to the graph.
-Anything missing is checked out first.
-
-```
-gitscale pull                   # everything
-gitscale pull imports/core      # one entry
-```
-
-In order:
+including a revision a dependency starts asking for in this very placement,
+and implicit dependencies new to the graph. Anything missing is checked out
+first. In order:
 
 1. **Tidy the stores**: repair checkouts the root's move broke, and prune what
    deleted root worktrees left — see [moving and deleting](stores.md#moving-and-deleting).
 2. **Carry** the topic, when the root's branch was just created from another
    topic — see [a new branch from a topic](topics.md#a-new-branch-from-a-topic).
-3. **Resolve**, fetching each store once.
+3. **Resolve** — online for `sync`, `pull`, the hook in the root and anything
+   in CI; fetching only what is missing otherwise. See
+   [when resolution asks the remotes](recursive-dependencies.md#when-resolution-asks-the-remotes).
 4. **Place** each checkout, below.
-5. **Link** the [recursive dependencies](recursive-dependencies.md).
-6. **Prune** images nothing has used lately, at most once a day — see
+5. **Relink**: restore [dependency links](recursive-dependencies.md#deduplication-by-symlink)
+   replaced by real checkouts, remove checkouts nothing needs any more, and
+   remove orphan links.
+6. In CI, **clean** each checkout placed with [`git scale clean -fdx`](clean.md).
+7. **Prune** images nothing has used lately, at most once a day — see
    [images](stores.md#images).
-7. Run the [`post_sync` hook](hooks.md#post_sync), if one is configured.
+8. Run the [`post_sync` hook](hooks.md#post_sync), when every step succeeded.
 
 | Entry | What happens |
 |---|---|
@@ -112,9 +295,10 @@ In order:
 | On the topic | On the topic branch, writable, fast-forwarded to its upstream — see [where each checkout goes](topics.md#where-each-checkout-goes) |
 | `replace` artefact | Nothing to do, and nothing asked of the registry, when the revision still names the installed commit. Otherwise the new image is downloaded — only the layers the store does not hold — then the files are replaced. A commit with no image fails and leaves the installed files alone |
 | `overlay` artefact | Placed as a git checkout, then the image of its commit laid over it |
-| Directory holding files but no repository | `FAIL … exists but holds no git repository`. Left as it is — [`gitscale clean -f`](clean.md#a-directory-holding-no-repository) removes it, or move it aside, and run again |
+| Directory holding files but no repository | `FAIL … exists but holds no git repository`. Left as it is — [`git scale clean -fd`](clean.md#a-directory-holding-no-repository) removes it, or move it aside, and run again |
 | A checkout that is not a worktree of its store | `FAIL … not a gitscale worktree`, left alone — see [checkouts GitScale did not make](stores.md#checkouts-gitscale-did-not-make) |
-| Symlink planted by an enclosing workspace (running inside a child repository) | `skip (symlink)` — that checkout and its revision belong to the outer workspace's root. Named, it is unlinked |
+| The child the [hook fired in](hooks.md#the-hook-in-a-child) | `skip (left where git put it)` |
+| A link pointing out of the workspace | `skip (symlink)` |
 | Any other symlink | Removed and replaced by a checkout |
 | Artefact entry, no registry known for its host | `FAIL … no registry is known for …`, naming the [`[registries]`](configuration.md#registries) entry to add |
 
@@ -126,116 +310,70 @@ block a move: git keeps them, and refuses rather than overwrite one. Commits on
 a topic branch never block a move: they stay on the branch in the store.
 
 In CI, where checkouts hold nobody's work, the move is forced, and every
-checkout pulled is then cleaned with [`gitscale clean -f`](clean.md) — tracked
-files are updated in place, so unchanged files keep their mtimes and a restored
-build cache stays valid.
+checkout placed is then cleaned — tracked files are updated in place, so
+unchanged files keep their mtimes and a restored build cache stays valid.
 
-An entry that fails — a remote that cannot be reached, a move refused, an
-artefact whose pipeline has not published yet — does not stop the others:
-every other checkout is still pulled and linked, and then `pull` exits non-zero
-naming how many failed.
-
-This is also the command an [installed git hook](hooks.md#git-hooks) runs, which
-is what makes a fresh clone, a `git switch` or a new worktree populate itself.
-
-## push
-
-```
-gitscale push                   # everything on the topic
-gitscale push imports/core      # one entry
-```
-
-Push the topic branch of the root and of every checkout on it, as `git push -u
-origin <branch>`: the remote branch gets the same name and becomes the
-upstream. Checkouts off the topic sit at a pin and are skipped (`not on the
-topic`), as are artefacts, directories that hold no checkout and symlinked
-(deduped) entries. Off a topic, nothing is pushed — the root included. Inside
-CI, the remote is repointed at the job-token HTTPS URL first where that
-applies — see [CI authentication](ci-authentication.md).
-
-## sync
-
-The one-command "make the workspace match the config", in this order:
-
-1. **pull** everything.
-2. **Relink** — restore [recursive dependency](recursive-dependencies.md)
-   symlinks that have been replaced by real checkouts, remove checkouts nothing
-   needs any more, and remove orphaned links.
-3. **push** everything on the topic.
-4. Run the [`post_sync` hook](hooks.md#post_sync).
-
-```
-gitscale sync                   # everything
-gitscale sync imports/core      # one entry
-gitscale sync --force           # also relink modified checkouts, remove valid-target orphans
-```
-
-Every step runs even when an earlier one failed for some entry, so one
-repository that cannot be pulled does not leave the rest unlinked or unpushed.
-`sync` then exits non-zero with the first failure, and the `post_sync` hook
-runs only when every step succeeded.
-
-Step 2 happens *before* the push so that local hygiene is not blocked by a
-remote or authentication failure. It is also the step that can refuse: an
-unlinked checkout with local work, a checkout nothing needs but with local
-work, or an orphaned link whose target still resolves, is reported and left in
-place, and `sync` exits non-zero asking for `--force`. Broken orphans are
-always removed.
+**Relinking** is the step that can refuse. An
+[unlinked checkout](recursive-dependencies.md#unlinked-checkouts) with local
+work, a checkout nothing needs but with local work, or an orphan link whose
+target still resolves, is reported and left in place, and the command exits
+non-zero asking for `--force`. Broken orphans are always removed.
 
 **A checkout nothing needs any more** is one whose entry you removed or
 renamed in `.gitscale.toml`, or an implicit dependency no repository asks for
-now. A `sync` given no names removes it when that loses nothing — no
-uncommitted changes, unpushed commits or stash, while untracked symlinks (the
-links gitscale planted) and files git ignores go with it; an artefact never
-holds any work, since every pull replaces it whole. `pull` keeps a record of
-the checkouts it manages — `gitscale/checkouts.json` in the root worktree's
-git directory — and only those are ever removed: a directory gitscale did not
-make is never touched.
+now. Placement removes it when that loses nothing — no uncommitted changes,
+unpushed commits or stash, while untracked symlinks (the links GitScale
+planted) and files git ignores go with it; an artefact never holds any work,
+since every placement replaces it whole. GitScale keeps a record of the
+checkouts it manages — `gitscale/checkouts.json` in the root worktree's git
+directory — and only those are ever removed: a directory GitScale did not make
+is never touched.
 
-## commit
+An entry that fails — a remote that cannot be reached, a move refused, an
+artefact whose pipeline has not published yet — does not stop the others:
+every other checkout is still placed and linked, and then the command exits
+non-zero naming how many failed.
 
-Commit across the workspace with one shared message.
+## Forcing a cleanup
 
-```
-gitscale commit -m "price cache"
-gitscale commit -m "wip" imports/core apps/web
-```
+```sh
+# Pull, then also relink checkouts with local work and remove orphans
+git scale pull --force-sync
 
-In each selected checkout on the [topic](topics.md) this is `git add -A`
-followed by `git commit -m`, so untracked files are included. A checkout off
-the topic is detached at a pin and never committed; one with changes says how
-to bring it in:
-
-```
-  skip  imports/e (not on topic feat/x; run gitscale develop imports/e)
+# Not the same: git pull --force in each repo, normal cleanup
+git scale pull --force
 ```
 
-Also skipped: artefact entries, directories that hold no checkout, symlinked
-(deduped) entries — the real checkout is committed under its own name — and any
-repo whose working tree is already clean.
+## CI on hosted runners
 
-When run with no names, the root repository is committed too, reported as `.`.
-It is never committed when specific names were given. Off a topic, only the
-root is committed.
+Runners have no hook, so a job places the workspace itself:
 
-Nothing is pushed. Follow with `gitscale push` or `gitscale sync`.
+```yaml
+build:
+  script:
+    - gitscale sync
+    - make
+merge-gate:
+  rules: [{ if: '$CI_PIPELINE_SOURCE == "merge_request_event"' }]
+  script: [gitscale check]   # gates only merges into pinned branches, read from the MR target
+```
 
-Because the root commit is a `git add -A`, the checkout directory should be in
-the root's `.gitignore` — see
-[ignoring the checkout directory](dependencies.md#ignoring-the-checkout-directory).
+In CI every resolution asks the remotes, and a remote that cannot be reached
+fails it: runners keep the build directory between jobs, and refs an earlier
+job fetched would build a branch where it was then. See
+[CI authentication](ci-authentication.md) and [the CI cache](stores.md#the-ci-cache).
 
-## Choosing between them
+## Choosing a command
 
 | You want to | Use |
 |---|---|
-| Set up a workspace | `git clone <url>`, with a [git hook](hooks.md#git-hooks) installed; else `git clone` then `gitscale pull` |
-| Materialise entries added to the config | `gitscale pull` |
-| See what changed upstream, safely | `gitscale fetch` then `gitscale status` |
-| Get up to date | `gitscale pull` |
-| Get up to date, fix links, and push | `gitscale sync` |
-| Change a dependency | `git switch -c <topic>`, then [`gitscale develop <dir>`](topics.md#gitscale-develop) |
-| Work on two things at once | `git worktree add` of the root — see [parallel topics](topics.md#parallel-topics) |
-| Turn a real checkout back into a deduped symlink | `gitscale sync` (`--force` if it has local work) |
+| Set up a workspace | `git clone <url>`, with a [git hook](hooks.md#git-hooks) installed; else `git clone` then `git scale sync` |
+| Check out entries added to the config | `git scale sync` |
+| See what changed upstream, safely | `git scale fetch` then `git scale ls` |
+| Get up to date | `git scale pull` |
+| Change a dependency | `git topic start <topic>`, then [`git topic join <dir>`](topics.md#git-topic-join--leave) |
+| Work on two things at once | `git topic start --worktree`, or a bare clone — see [parallel topics](topics.md#parallel-topics) |
+| Turn a real checkout back into a dependency link | `git scale sync` (`--force` if it has local work) |
 
 ---
 

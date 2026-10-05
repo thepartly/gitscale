@@ -30,7 +30,7 @@ pub fn child_with_outer_link(env: &TestEnv) -> (std::path::PathBuf, String) {
         bare_a.display(),
         bare_b.display(),
     ));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     assert!(
         env.playground.join("repoA/libs/b").is_symlink(),
         "clone should dedup repoA/libs/b"
@@ -41,9 +41,9 @@ pub fn child_with_outer_link(env: &TestEnv) -> (std::path::PathBuf, String) {
     )
 }
 
-/// Run the CLI with `-C dir` after the subcommand, then `rest`.
+/// Run the CLI with `-C dir`, the subcommand, then `rest`.
 pub fn run_in(dir: &std::path::Path, subcommand: &str, rest: &[&str]) -> super::CliOutput {
-    let mut args = vec!["gitscale", subcommand, "-C", dir.to_str().unwrap()];
+    let mut args = vec!["gitscale", "-C", dir.to_str().unwrap(), subcommand];
     args.extend_from_slice(rest);
     gitscale::run_cli_with(&args, false)
 }
@@ -95,13 +95,13 @@ pub fn setup_unlinked_env_at(name: &str, parent: &str) -> (TestEnv, std::path::P
     ));
 
     // Clone creates the symlink
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "clone failed: {}", out.stderr);
 
     let link = env.playground.join(parent).join("libs/b");
     assert!(link.is_symlink(), "expected symlink after clone");
 
-    // Replace symlink with a real clone (simulating `gitscale sync` from inside repoA)
+    // Replace symlink with a real clone (simulating `git scale sync` from inside repoA)
     std::fs::remove_file(&link).unwrap();
     super::run_git_pub(
         &env.playground,
@@ -152,7 +152,7 @@ pub fn setup_orphan_env(name: &str, valid_target: bool) -> (TestEnv, std::path::
         bare_b.display(),
     ));
 
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "clone failed: {}", out.stderr);
 
     // Plant an orphaned gitscale-style symlink for an undeclared dependency.
@@ -166,7 +166,7 @@ pub fn setup_orphan_env(name: &str, valid_target: bool) -> (TestEnv, std::path::
     (env, orphan)
 }
 
-/// A workspace on topic `feat/x` with `libs/mylib` developed on it: the root
+/// A workspace on topic `feat/x` with `libs/mylib` joined to it: the root
 /// on that branch with a remote of its own, the child on its `feat/x`.
 pub fn setup_commit_env(name: &str) -> (TestEnv, std::path::PathBuf, std::path::PathBuf) {
     let env = TestEnv::new(name);
@@ -178,10 +178,10 @@ pub fn setup_commit_env(name: &str) -> (TestEnv, std::path::PathBuf, std::path::
     ));
     env.init_playground_git();
     env.set_playground_origin(root_remote.to_str().unwrap());
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "pull failed: {}", out.stderr);
     run_git_pub(&env.playground, &["switch", "-q", "-c", "feat/x"]);
-    let out = env.run(&["develop", "libs/mylib"]);
+    let out = env.run(&["topic", "join", "libs/mylib"]);
     assert!(out.success, "develop failed: {}{}", out.stdout, out.stderr);
 
     let clone = env.playground.join("libs/mylib");
@@ -246,7 +246,7 @@ pub fn clean_env(name: &str) -> TestEnv {
         core.to_str().unwrap()
     ));
     env.init_playground_git();
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "clone failed: {}", out.stderr);
     env
 }

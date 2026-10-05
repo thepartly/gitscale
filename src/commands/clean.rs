@@ -30,58 +30,177 @@ struct Target {
     stray: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Which ignored files go: `-x`, `-X` or neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ignored {
+    /// Neither flag: ignored files stay.
+    Kept,
+    /// `-x`: ignored files go too.
+    Too,
+    /// `-X`: only ignored files go.
+    Only,
+}
+
+/// `git scale clean`'s flags, which mean what git's do.
+pub struct Options<'a> {
+    /// `-f` without `-n`: delete. Otherwise only list.
+    pub delete: bool,
+    /// `-d`: untracked directories too.
+    pub directories: bool,
+    pub ignored: Ignored,
+    /// `-e`: more to keep.
+    pub exclude: &'a [String],
+    /// `-q`: report only failures.
+    pub quiet: bool,
+    /// The repositories to clean, as typed: `.` is the root.
+    pub dirs: &'a [String],
+}
+
 pub fn run(
-    root: Option<&Path>,
-    names: &[String],
-    cli_excludes: &[String],
-    gc: bool,
-    keep_recent: Option<&str>,
-    force: bool,
+    start: Option<&Path>,
+    opts: &Options,
     interactive: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
-    let (config, config_root) = load_workspace(root)?;
+    let (config, config_root) = load_workspace(start)?;
     let sources = Sources::new(&config_root, false)?;
     if let Some(stores) = &sources.stores {
         stores.tidy(&config_root);
-        if gc {
-            return compact(stores, &config, keep_recent, out);
-        }
-    } else if gc {
-        bail!("--gc compacts the root's own stores, and CI keeps none; use gitscale cache compact");
     }
-
-    for pattern in cli_excludes {
+    for pattern in opts.exclude {
         if pattern.is_empty() {
-            bail!("--exclude needs a pattern");
+            bail!("-e needs a pattern");
         }
         if pattern.starts_with('-') {
             bail!(
-                "--exclude pattern \"{}\" starts with '-', which git would read as a \
-                 command-line option",
+                "-e pattern \"{}\" starts with '-', which git would read as a command-line \
+                 option",
                 pattern
             );
         }
     }
+    // A config `resolve` cannot make sense of is a config whose links — and
+    // whose implicit checkouts — are unknown, and those are the things
+    // standing between a clean and a broken workspace. Refuse rather than
+    // guess. Offline: a clean never fetches.
+    let resolution =
+        crate::resolve::workspace(&config, &config_root, false, &sources, None, false)?;
+    let here = crate::paths::Here::new(start, &config_root)?;
+    let mut names = Vec::new();
+    for dir in opts.dirs {
+        names.push(match here.name(&resolution, dir, true)? {
+            crate::paths::Named::Root => SELF_NAME.to_string(),
+            crate::paths::Named::Slot(dir) => dir,
+        });
+    }
+    clean(
+        &config,
+        &config_root,
+        &resolution,
+        &names,
+        opts,
+        interactive,
+        out,
+        err,
+    )
+}
 
-    let targets = plan(&config, &config_root, &sources, names, cli_excludes)?;
+/// What CI follows every placement with: `clean -fdx` of each checkout
+/// placed.
+pub fn scrub(
+    config: &crate::config::GitScaleConfig,
+    config_root: &Path,
+    dirs: &[String],
+    interactive: bool,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<()> {
+    let sources = Sources::new(config_root, false)?;
+    let resolution = crate::resolve::workspace(config, config_root, false, &sources, None, false)?;
+    let opts = Options {
+        delete: true,
+        directories: true,
+        ignored: Ignored::Too,
+        exclude: &[],
+        quiet: false,
+        dirs: &[],
+    };
+    clean(
+        config,
+        config_root,
+        &resolution,
+        dirs,
+        &opts,
+        interactive,
+        out,
+        err,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn clean(
+    config: &crate::config::GitScaleConfig,
+    config_root: &Path,
+    resolution: &crate::resolution::Resolution,
+    names: &[String],
+    opts: &Options,
+    interactive: bool,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<()> {
+    let targets = plan(config, config_root, resolution, names, opts.exclude)?;
     if targets.is_empty() {
-        writeln!(out, "Nothing to clean.")?;
+        if !opts.quiet {
+            writeln!(out, "Nothing to clean.")?;
+        }
         return Ok(());
     }
+    let flags = Flags {
+        delete: opts.delete,
+        directories: opts.directories,
+        ignored: opts.ignored,
+    };
+    if !opts.delete {
+        if opts.quiet {
+            return report(&targets, &flags, &mut std::io::sink());
+        }
+        return report(&targets, &flags, out);
+    }
+    if opts.quiet {
+        return execute(&targets, &flags, false, &mut std::io::sink(), err);
+    }
+    execute(&targets, &flags, interactive, out, err)
+}
 
-    if force {
-        execute(&targets, interactive, out, err)
-    } else {
-        report(&targets, out)
+/// What `git clean` is asked to do in each repository.
+pub struct Flags {
+    pub delete: bool,
+    pub directories: bool,
+    pub ignored: Ignored,
+}
+
+impl Flags {
+    /// A directory holding no repository goes whole, as an untracked
+    /// directory would: with `-d`, and not when only ignored files go.
+    fn removes_strays(&self) -> bool {
+        self.directories && self.ignored != Ignored::Only
     }
 }
 
-/// `gitscale clean --gc`: `git gc` in every store of the root, and the images
-/// nothing has used within `keep_recent` dropped now rather than on the next
-/// day's pull.
+/// `git scale gc`: `git gc` in every store of the root, and the images
+/// nothing has used within `keep_recent` dropped now rather than on the
+/// next day's placement.
+pub fn gc(start: Option<&Path>, keep_recent: Option<&str>, out: &mut dyn Write) -> Result<()> {
+    let (config, config_root) = load_workspace(start)?;
+    let sources = Sources::new(&config_root, false)?;
+    let Some(stores) = &sources.stores else {
+        bail!("gc compacts the root's own stores, and CI keeps none; use gitscale cache compact");
+    };
+    stores.tidy(&config_root);
+    compact(stores, &config, keep_recent, out)
+}
+
 fn compact(
     stores: &crate::store::Stores,
     config: &crate::config::GitScaleConfig,
@@ -108,17 +227,12 @@ fn compact(
 fn plan(
     config: &crate::config::GitScaleConfig,
     config_root: &Path,
-    sources: &Sources,
+    resolution: &crate::resolution::Resolution,
     names: &[String],
     cli_excludes: &[String],
 ) -> Result<Vec<Target>> {
     // `.` addresses the workspace repo; every other name must be a declared
     // repo. An empty selection means all of them, the root included.
-    // A config `resolve` cannot make sense of is a config whose symlink set —
-    // and whose implicit checkouts — are unknown, and those are the things
-    // standing between a clean and a broken workspace. Refuse rather than
-    // guess. Offline: a clean never fetches.
-    let resolution = crate::resolve::workspace(config, config_root, false, sources, None, false)?;
     // Every checkout, the implicit ones included: each is an untracked
     // directory to whatever repo holds it.
     let all = resolution.entries();
@@ -133,7 +247,7 @@ fn plan(
         filter_entries(&all, &repo_names)?
     };
 
-    let managed_links = managed_link_excludes(&resolution, &all);
+    let managed_links = managed_link_excludes(resolution, &all);
 
     let mut targets = Vec::new();
 
@@ -340,7 +454,7 @@ fn managed_link_excludes(
 }
 
 /// List what would go, without touching anything.
-fn report(targets: &[Target], out: &mut dyn Write) -> Result<()> {
+fn report(targets: &[Target], flags: &Flags, out: &mut dyn Write) -> Result<()> {
     writeln!(out, "Clean (dry run — nothing removed; pass -f to delete)")?;
 
     let mut total = 0usize;
@@ -351,13 +465,26 @@ fn report(targets: &[Target], out: &mut dyn Write) -> Result<()> {
             continue;
         }
         if target.stray {
+            if !flags.removes_strays() {
+                writeln!(
+                    out,
+                    "  {} — skip (holds no repository; -d removes it)",
+                    target.name
+                )?;
+                continue;
+            }
             repos += 1;
             total += 1;
             writeln!(out, "  {}", target.name)?;
             writeln!(out, "    ./ (the whole directory: it holds no repository)")?;
             continue;
         }
-        let paths = clean_repo(&target.dir, &target.excludes, false)
+        let listing = Flags {
+            delete: false,
+            directories: flags.directories,
+            ignored: flags.ignored,
+        };
+        let paths = clean_repo(&target.dir, &target.excludes, &listing)
             .with_context(|| format!("{}: cannot list untracked files", target.name))?;
         if paths.is_empty() {
             writeln!(out, "  {} — nothing to remove", target.name)?;
@@ -391,6 +518,7 @@ fn report(targets: &[Target], out: &mut dyn Write) -> Result<()> {
 /// permission on its directory rather than on the file itself.
 fn execute(
     targets: &[Target],
+    flags: &Flags,
     interactive: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
@@ -408,12 +536,18 @@ fn execute(
                 return RepoStatus::Skip(format!("{} ({})", name, reason));
             }
             if target.stray {
+                if !flags.removes_strays() {
+                    return RepoStatus::Skip(format!(
+                        "{} (holds no repository; -d removes it)",
+                        name
+                    ));
+                }
                 return match std::fs::remove_dir_all(&target.dir) {
                     Ok(()) => RepoStatus::Ok(format!("{} (removed: it held no repository)", name)),
                     Err(e) => RepoStatus::Fail(format!("{}: cannot remove: {}", name, e)),
                 };
             }
-            match clean_repo(&target.dir, &target.excludes, true) {
+            match clean_repo(&target.dir, &target.excludes, flags) {
                 Ok(paths) if paths.is_empty() => {
                     RepoStatus::Skip(format!("{} (nothing to remove)", name))
                 }

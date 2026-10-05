@@ -1,4 +1,4 @@
-//! Helpers for the status, clean and check tests.
+//! Helpers for the ls, clean and check tests.
 
 use super::{run_git_pub, strip_ansi, TestEnv};
 use std::path::{Path, PathBuf};
@@ -38,13 +38,12 @@ const PIPELINE_VARS: &[&str] = &[
     "GITHUB_TOKEN",
 ];
 
-/// The gitscale binary run as `gitscale <args[0]> -C dir <args[1..]>` with
+/// The gitscale binary run as `gitscale -C dir <args>` with
 /// `vars` set on top of an environment scrubbed of pipeline variables, the
 /// CI cache pointed at `cache`.
 pub fn gitscale_at(dir: &Path, cache: &Path, vars: &[(&str, &str)], args: &[&str]) -> Exit {
-    let mut full: Vec<&str> = args[..1].to_vec();
-    full.extend_from_slice(&["-C", dir.to_str().unwrap()]);
-    full.extend_from_slice(&args[1..]);
+    let mut full: Vec<&str> = vec!["-C", dir.to_str().unwrap()];
+    full.extend_from_slice(args);
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_gitscale"));
     cmd.args(&full).env("GITSCALE_CACHE_DIR", cache);
     for var in PIPELINE_VARS {
@@ -114,7 +113,7 @@ pub fn borrowed(vars: &[(String, String)]) -> Vec<(&str, &str)> {
     vars.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect()
 }
 
-/// `gitscale check` in the job checkout `job`, with `vars`.
+/// `git scale check` in the job checkout `job`, with `vars`.
 pub fn check_job(env: &TestEnv, job: &Path, vars: &[(String, String)]) -> Exit {
     gitscale_at(job, &env.cache, &borrowed(vars), &["check"])
 }
@@ -129,7 +128,7 @@ pub fn repo_with_topic(env: &TestEnv, name: &str, files: &[(&str, &str)]) -> Pat
     bare
 }
 
-/// The rows of `status --format json`, which must be a JSON array.
+/// The rows of `ls --format json`, which must be a JSON array.
 pub fn json_rows(stdout: &str) -> Vec<serde_json::Value> {
     let parsed: serde_json::Value = serde_json::from_str(stdout)
         .unwrap_or_else(|e| panic!("status printed no JSON ({}):\n{}", e, stdout));
@@ -138,7 +137,7 @@ pub fn json_rows(stdout: &str) -> Vec<serde_json::Value> {
 
 /// The JSON row for `dir`, which must exist.
 pub fn json_row(env: &TestEnv, dir: &str) -> serde_json::Value {
-    let out = env.run(&["status", "--format", "json"]);
+    let out = env.run(&["ls", "--format", "json"]);
     assert!(out.success, "{}", out.stderr);
     json_rows(&out.stdout)
         .into_iter()
@@ -220,7 +219,7 @@ pub fn conflicted_workspace(env: &TestEnv) {
             ("imports/c", &c, ", revision = \"v1.0.0\""),
         ])
     ));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     super::edit(
         &env.playground.join("imports/c/.gitscale.toml"),

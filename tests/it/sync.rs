@@ -1,5 +1,6 @@
-//! `gitscale sync`: pull, relink and push in one go, and the tidying it does —
-//! removing checkouts nothing asks for any more, but never one holding work.
+//! `git scale sync`: placement with its tidying — relinking, and removing
+//! checkouts nothing asks for any more, but never one holding work. It never
+//! pushes.
 
 use crate::support::resolution::*;
 use crate::support::workspace::*;
@@ -10,7 +11,7 @@ use crate::support::{git_stdout, run_git_pub, TestEnv};
 // ---------------------------------------------------------------------------
 
 #[test]
-fn normal_001_pulls_a_fresh_workspace() {
+fn normal_001_places_a_fresh_workspace() {
     let env = TestEnv::new("sync_full");
     let bare = env.create_bare_repo("mylib", "main", &[("README.md", "# mylib\n")]);
 
@@ -53,7 +54,7 @@ fn normal_002_removes_an_implicit_checkout_left_behind() {
         )
     };
     env.write_config(&config("v1.0.0"));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     assert!(env.playground.join("imports/d").is_dir());
     // Someone's own clone, which gitscale did not make.
     run_git_pub(
@@ -105,7 +106,7 @@ fn normal_003_removes_a_left_behind_implicit_artefact() {
         )
     };
     env.write_config(&config("v1.0.0"));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert!(env.playground.join("imports/art/dist/app.bin").is_file());
     let records = env.playground.join(".git/gitscale/artefacts");
@@ -156,12 +157,12 @@ fn normal_004_removes_a_checkout_whose_entry_was_removed() {
     assert_eq!(head(&env, "libs/e"), tag_commit(&e, "v1.0.0"));
 }
 
-/// `sync` takes the name of an implicit checkout, as `pull` does.
+/// `sync` takes the name of an implicit checkout, as it does a declared one.
 #[test]
 fn normal_005_takes_an_implicit_checkout_by_name() {
     let env = TestEnv::new("res_sync_implicit_name");
     implicit_d(&env);
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     let out = env.run(&["sync", "imports/d"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
 }
@@ -214,7 +215,7 @@ fn edge_007_keeps_a_left_behind_checkout_with_work_and_fails() {
         )
     };
     env.write_config(&config("v1.0.0"));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     std::fs::write(env.playground.join("imports/d/notes.txt"), "mine").unwrap();
 
     env.write_config(&config("v1.1.0"));
@@ -255,10 +256,10 @@ fn edge_008_never_removes_a_directory_holding_a_wanted_checkout() {
 }
 
 /// `sync` removes only checkouts gitscale made. A clone the user made at an
-/// entry's path — which `pull` refused to touch — is not gitscale's, and
+/// entry's path — which `sync` refused to touch — is not gitscale's, and
 /// stays when the entry is removed.
 #[test]
-#[ignore = "bug: pull records any directory with a .git at an entry path as its own, so sync later deletes the user's clone"]
+#[ignore = "bug: sync records any directory with a .git at an entry path as its own, so a later sync deletes the user's clone"]
 fn edge_009_never_removes_a_clone_the_user_made_at_a_removed_entry() {
     let env = TestEnv::new("sync_foreign_clone");
     let bare = env.create_bare_repo("lib", "main", &[("a.txt", "a")]);
@@ -276,7 +277,7 @@ fn edge_009_never_removes_a_clone_the_user_made_at_a_removed_entry() {
         "[repos]\n\"libs/lib\" = {{ url = \"{}\", revision = \"main\" }}\n",
         bare.display()
     ));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(
         out.stderr.contains("not a gitscale worktree"),
@@ -298,7 +299,7 @@ fn edge_009_never_removes_a_clone_the_user_made_at_a_removed_entry() {
 /// `sync` deletes the workspace. Here the root is clean and pushed, the case
 /// in which a checkout nothing needs would be removed.
 #[test]
-#[ignore = "bug: an entry '.' is accepted and pull records the root as a checkout; once the entry goes, sync deletes the whole workspace, .git included"]
+#[ignore = "bug: an entry '.' is accepted and placement records the root as a checkout; once the entry goes, sync deletes the whole workspace, .git included"]
 fn edge_010_never_deletes_the_workspace_after_a_dot_entry_is_removed() {
     let env = TestEnv::new("sync_dot_entry");
     let other = env.create_bare_repo("other", "main", &[("o.txt", "o")]);
@@ -317,7 +318,7 @@ fn edge_010_never_deletes_the_workspace_after_a_dot_entry_is_removed() {
     };
     env.set_playground_origin(root_remote.to_str().unwrap());
     commit_all("dot entry");
-    let _ = env.run(&["pull"]);
+    let _ = env.run(&["sync"]);
 
     env.write_config("[repos]\n");
     commit_all("no entries");
@@ -331,25 +332,23 @@ fn edge_010_never_deletes_the_workspace_after_a_dot_entry_is_removed() {
     assert!(!out.stdout.contains("remove  ."), "{}", out.stdout);
 }
 
-/// The steps of a sync are independent: relink refusing an unlinked clone
-/// with work does not stop the push step from running, and the sync still
-/// fails with relink's reason.
+/// Relink refusing an unlinked checkout with work fails the sync with its
+/// reason, after the checkouts are placed — and a sync pushes nothing, then
+/// or ever.
 #[test]
-fn edge_011_still_pushes_when_relink_refuses() {
+fn edge_011_a_relink_refusal_fails_the_sync_after_placing_and_nothing_is_pushed() {
     let (env, link) = setup_unlinked_env("sync_push_after_refusal");
     std::fs::write(link.join("dirty.txt"), "local change").unwrap();
 
     let out = env.run(&["sync"]);
     assert!(!out.success, "{}", out.stdout);
+    let placed = out.stdout.find("ok    repoB").expect(&out.stdout);
     let relinked = out
         .stdout
         .find("skip  repoA/libs/b (modified")
         .expect(&out.stdout);
-    let pushed = out
-        .stdout
-        .find("Pushing local changes...")
-        .expect(&out.stdout);
-    assert!(relinked < pushed, "{}", out.stdout);
+    assert!(placed < relinked, "{}", out.stdout);
+    assert!(!out.stdout.contains("Pushing"), "{}", out.stdout);
     assert!(
         out.stderr.contains("use --force to override"),
         "{}",
@@ -403,8 +402,8 @@ fn edge_012_keeps_a_left_behind_checkout_with_unpushed_commits() {
 // Performance
 // ---------------------------------------------------------------------------
 
-/// A sync resolves three times — to pull, to relink and to push — but only the
-/// pull talks to the remotes: each store is fetched once per sync.
+/// However often a sync's steps ask for a store, each store is fetched once
+/// per sync.
 #[test]
 fn perf_013_fetches_each_store_once_per_sync() {
     let env = TestEnv::new("sync_fetch_count");

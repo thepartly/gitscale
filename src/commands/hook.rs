@@ -1,19 +1,20 @@
-//! `gitscale hook` — install gitscale as a git hook so `gitscale pull` runs
-//! whenever a checkout or merge changes what is in the working tree.
+//! `gitscale hook` — install gitscale as a git hook so the workspace is
+//! placed whenever a checkout or merge changes what is in a working tree:
+//! the root's, or a child's.
 //!
 //! Only `post-checkout` and `post-merge` are installed. Between them they
 //! cover clone, checkout/switch, CI's `fetch --depth=1` + `checkout
 //! FETCH_HEAD`, merge, `git pull` and rebase (which fires `post-checkout`
 //! too). Neither reads stdin, so chaining to a repo's own hook cannot lose a
 //! payload. `git reset --hard` fires no worktree hook at all and is therefore
-//! not covered — `gitscale status` remains the safety net there.
+//! not covered — `git scale ls` remains the safety net there.
 
 use anyhow::{bail, Context, Result};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::config::{load_config_optional, OnHookError, CONFIG_FILENAME};
+use crate::config::{OnHookError, CONFIG_FILENAME};
 use crate::trust;
 
 /// The git hooks gitscale installs.
@@ -80,8 +81,8 @@ if [ -n "$CHAIN" ] && [ -x "$CHAIN" ]; then
     "$CHAIN" "$@" || RC=$?
 fi
 
-# Every git call gitscale makes sets this. `gitscale pull` runs `git checkout`,
-# which fires this hook again; without the guard that recurses without bound.
+# Every git call gitscale makes sets this. Placement runs `git checkout`, which
+# fires this hook again; without the guard that recurses without bound.
 if [ -n "${{GITSCALE_HOOK:-}}" ]; then
     exit $RC
 fi
@@ -93,20 +94,31 @@ if [ "$HOOK" = post-checkout ] && [ "${{3:-1}}" = 0 ]; then
     exit $RC
 fi
 
-# Opt-in check, at the worktree root only. Deliberately not gitscale's usual
-# upward search: an unrelated repo cloned inside a gitscale workspace would
-# otherwise inherit the parent config and trigger a pull of the whole thing.
+# A child — a checkout gitscale made, whose git common dir is one of a root's
+# stores — places the workspace it belongs to. Anything else opts in with a
+# config at its own top. Deliberately not gitscale's usual upward search: an
+# unrelated repo cloned inside a gitscale workspace would otherwise inherit the
+# parent config and trigger a placement of the whole thing.
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit $RC
-[ -f "$ROOT/{config}" ] || exit $RC
+COMMON=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit $RC
+CHILD=
+case "$COMMON" in
+    */gitscale/repos/*.git) CHILD=1 ;;
+    *) [ -f "$ROOT/{config}" ] || exit $RC ;;
+esac
 
 # Checked only after we know this repo opted in, so repos that never asked for
 # gitscale stay completely silent while a broken install still gets reported.
 if [ ! -x "$GITSCALE_BIN" ]; then
-    echo "gitscale: $HOOK skipped — $GITSCALE_BIN not found, but $ROOT has {config}" >&2
+    echo "gitscale: $HOOK skipped — $GITSCALE_BIN not found, but $ROOT is a gitscale repository" >&2
     exit $RC
 fi
 
-GITSCALE_HOOK="$HOOK" {allow_env}="$ALLOW" "$GITSCALE_BIN" hook run "$HOOK" -C "$ROOT" || RC=$?
+if [ -n "$CHILD" ]; then
+    GITSCALE_HOOK="$HOOK" {allow_env}="$ALLOW" "$GITSCALE_BIN" hook run "$HOOK" --child "$ROOT" -C "$ROOT" || RC=$?
+else
+    GITSCALE_HOOK="$HOOK" {allow_env}="$ALLOW" "$GITSCALE_BIN" hook run "$HOOK" -C "$ROOT" || RC=$?
+fi
 exit $RC
 "#,
         marker = SHIM_MARKER,
@@ -356,6 +368,11 @@ pub fn install(
     }
 
     writeln!(out, "  allowing {}", allow)?;
+    // `git <cmd> --help` is a man page lookup: the pages go beside the
+    // binary's own share directory, where `man` finds them.
+    if let Some(dir) = crate::man::write() {
+        writeln!(out, "  man pages in {}", dir.display())?;
+    }
     writeln!(out, "gitscale hooks installed ({})", scope.label())?;
     Ok(())
 }
@@ -588,7 +605,11 @@ pub fn status(root: Option<&Path>, out: &mut dyn Write) -> Result<()> {
     report_trust(&repo, &dir, out)?;
 
     if let Some(note) = read_breadcrumb(&repo)? {
-        writeln!(out, "\nLast hook-triggered pull FAILED:\n  {}", note.trim())?;
+        writeln!(
+            out,
+            "\nLast hook-triggered placement FAILED:\n  {}",
+            note.trim()
+        )?;
     }
     Ok(())
 }
@@ -652,7 +673,7 @@ fn read_breadcrumb(repo: &Path) -> Result<Option<String>> {
     }
 }
 
-/// Run the pull a git hook asked for.
+/// Place the workspace for a git hook.
 ///
 /// A failure here is reported three ways, because none alone is sufficient: on
 /// stderr (which reaches the user through `git clone`), in a breadcrumb file so
@@ -660,9 +681,11 @@ fn read_breadcrumb(repo: &Path) -> Result<Option<String>> {
 /// the `fail` policy — in the exit status. The exit status is the weakest of
 /// the three: git collapses any non-zero hook exit to 1 and reports it as the
 /// *checkout* failing, which it did not.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     hook: &str,
     root: Option<&Path>,
+    child: Option<&Path>,
     verbose: bool,
     no_cache: bool,
     interactive: bool,
@@ -691,27 +714,74 @@ pub fn run(
         );
     }
 
-    let repo = worktree_root(root)?;
-    // The shim checks this too; re-check so a hand-run `hook run` behaves.
-    if !repo.join(CONFIG_FILENAME).is_file() {
-        return Ok(());
-    }
+    let (repo, leave) = match child {
+        Some(child) => {
+            let child = child
+                .canonicalize()
+                .with_context(|| format!("cannot resolve {}", child.display()))?;
+            // In the middle of a rebase, a merge, a cherry-pick, a revert or a
+            // bisect, the child is not where it will end: nothing moves yet.
+            if mid_operation(&child) {
+                return Ok(());
+            }
+            let root = crate::config::find_root(Some(&child))?;
+            let leave = child
+                .strip_prefix(&root)
+                .map(|p| p.to_string_lossy().into_owned())
+                .ok();
+            (root, leave)
+        }
+        None => {
+            let repo = worktree_root(root)?;
+            // The shim checks this too; re-check so a hand-run `hook run` behaves.
+            if !repo.join(CONFIG_FILENAME).is_file() {
+                return Ok(());
+            }
+            (repo, None)
+        }
+    };
 
+    let config = crate::config::load_config(&repo.join(CONFIG_FILENAME));
     let policy = {
-        let config_path = repo.join(CONFIG_FILENAME);
-        let configured = load_config_optional(&config_path).and_then(|c| c.hooks.on_pull_error);
+        let configured = config.as_ref().ok().and_then(|c| c.hooks.on_pull_error);
         OnHookError::resolved(configured)
     };
 
-    let result =
-        crate::commands::pull::run(Some(&repo), &[], verbose, no_cache, interactive, out, err);
+    let result = config.and_then(|config| {
+        crate::commands::sync::place(
+            &config,
+            &repo,
+            &crate::commands::sync::Placement {
+                dirs: &[],
+                // A hook in the root follows a clone, a switch or a merge:
+                // online. One in a child fetches only what it lacks.
+                network: if leave.is_some() {
+                    crate::resolve::Network::OnMiss
+                } else {
+                    crate::resolve::Network::Online
+                },
+                force: false,
+                leave: leave.as_deref(),
+                heading: "Pulling latest changes...",
+            },
+            verbose,
+            no_cache,
+            interactive,
+            out,
+            err,
+        )?;
+        if let Some(dir) = &leave {
+            settle_child(&config, &repo, dir, no_cache, err)?;
+        }
+        Ok(())
+    });
 
     let breadcrumb = breadcrumb_path(&repo)?;
 
-    // Checked after the pull, when the checkouts exist for `git clean -n` to
-    // find, and failed whatever `on_pull_error` says: that policy is for a pull
-    // that did not work, and this is a pipeline that cannot — the runner is
-    // about to delete what the pull just produced.
+    // Checked after the placement, when the checkouts exist for `git clean -n`
+    // to find, and failed whatever `on_pull_error` says: that policy is for a
+    // placement that did not work, and this is a pipeline that cannot — the
+    // runner is about to delete what the placement just produced.
     if let Err(e) = crate::gitlab::check_runner_clean(&repo) {
         let note = format!("{}: {} hook: {}\n", now_stamp(), hook, e);
         let _ = std::fs::write(&breadcrumb, &note);
@@ -730,13 +800,13 @@ pub fn run(
         }
         Err(e) => {
             let note = format!(
-                "{}: `gitscale pull` triggered by the {} hook failed: {}\n",
+                "{}: the placement the {} hook ran failed: {}\n",
                 now_stamp(),
                 hook,
                 e
             );
             let _ = std::fs::write(&breadcrumb, &note);
-            writeln!(err, "gitscale: {} hook — pull failed: {}", hook, e)?;
+            writeln!(err, "gitscale: {} hook — placement failed: {}", hook, e)?;
             match policy {
                 OnHookError::Fail => Err(e),
                 OnHookError::Warn => {
@@ -750,6 +820,62 @@ pub fn run(
             }
         }
     }
+}
+
+/// Whether the repository at `dir` is in the middle of an operation git
+/// will finish later.
+fn mid_operation(dir: &Path) -> bool {
+    [
+        "rebase-merge",
+        "rebase-apply",
+        "MERGE_HEAD",
+        "CHERRY_PICK_HEAD",
+        "REVERT_HEAD",
+        "BISECT_LOG",
+    ]
+    .iter()
+    .any(|name| crate::git::git_path(dir, name).is_some_and(|p| p.exists()))
+}
+
+/// The child at `dir` after a placement that left it where git put it: on
+/// its slot's topic branch it is made writable, as `git topic join` would;
+/// on any other branch it stays, with a warning.
+fn settle_child(
+    config: &crate::config::GitScaleConfig,
+    root: &Path,
+    dir: &str,
+    no_cache: bool,
+    err: &mut dyn Write,
+) -> Result<()> {
+    let dest = root.join(dir);
+    let Some(branch) = crate::git::current_branch(&dest) else {
+        return Ok(());
+    };
+    let sources = crate::store::Sources::new(root, no_cache)?;
+    let resolution = crate::resolve::workspace(config, root, false, &sources, None, false)?;
+    let wanted = resolution.slot(dir).and_then(|s| s.branch.clone());
+    if wanted.as_deref() == Some(branch.as_str()) {
+        crate::git::restore_writable(&dest)?;
+        return Ok(());
+    }
+    let color = crate::output::stderr();
+    let message = match wanted {
+        Some(topic) => format!(
+            "{} is on {}, not the topic {}; the next placement moves it back to its pin",
+            dir, branch, topic
+        ),
+        None => format!(
+            "{} is on {}, and the workspace is on no topic; the next placement moves it back \
+             to its pin",
+            dir, branch
+        ),
+    };
+    writeln!(
+        err,
+        "{}",
+        crate::output::paint(color, crate::output::YELLOW, &message)
+    )?;
+    Ok(())
 }
 
 fn now_stamp() -> String {

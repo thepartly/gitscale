@@ -1,4 +1,4 @@
-//! `gitscale upgrade`: raising pins and recording what resolution chose.
+//! `git upgrade`: raising pins and recording what resolution chose.
 
 use crate::support;
 use crate::support::resolution::*;
@@ -46,7 +46,7 @@ fn normal_001_resolved_records_the_resolved_revisions_and_keeps_comments() {
     assert!(out.stdout.contains("already declares"), "{}", out.stdout);
 }
 
-/// Once a release tag holds a developed child's change, `upgrade` writes the
+/// Once a release tag holds a joined child's change, `upgrade` writes the
 /// tag into the root's config, deletes the child's topic branch and detaches
 /// it at the tag.
 #[test]
@@ -54,7 +54,7 @@ fn normal_002_promotes_a_child_whose_change_is_released() {
     let f = fixture("wt_promote", "");
     let ws = f.clone_root("ws");
     run_git_pub(&ws, &["switch", "-q", "-c", "feat/x"]);
-    ok(&gs(&ws, &["develop", "imports/core"]));
+    ok(&gs(&ws, &["topic", "join", "imports/core"]));
     let child = ws.join("imports/core");
     identity(&child);
     std::fs::write(child.join("lib.txt"), "v2").unwrap();
@@ -117,7 +117,7 @@ fn normal_003_raises_a_named_dependency_to_its_newest_release() {
 }
 
 /// `upgrade <dir>` with a requester other than the root, and no topic:
-/// the root's new branch becomes the topic, the requester is developed on
+/// the root's new branch becomes the topic, the requester is joined to
 /// it, and both configs get the new release in place, comments kept. With
 /// `--commit` each config is committed alone, as `pin <dep> <tag>`.
 #[test]
@@ -125,7 +125,7 @@ fn normal_005_raising_creates_the_topic_and_edits_every_requester() {
     let env = TestEnv::new("upgrade_raise_topic");
     let (b, d, config) = raise_graph(&env);
     let ws = root_workspace(&env, &config);
-    ok(&gs(&ws, &["pull"]));
+    ok(&gs(&ws, &["sync"]));
     let child = ws.join("imports/b");
     identity(&child);
 
@@ -138,7 +138,7 @@ fn normal_005_raising_creates_the_topic_and_edits_every_requester() {
     );
     assert!(
         out.stdout
-            .contains("topic upgrade/d-v1.1.0 (created): imports/b developed"),
+            .contains("topic upgrade/d-v1.1.0 (created): imports/b joined"),
         "{}",
         out.stdout
     );
@@ -183,13 +183,13 @@ fn normal_005_raising_creates_the_topic_and_edits_every_requester() {
 
 /// `upgrade <dir> --dry-run` prints the whole plan — the topic it would
 /// create, every edit — and changes nothing: no file, no branch, no
-/// developed checkout.
+/// joined checkout.
 #[test]
 fn normal_006_a_dry_run_raise_changes_no_file_or_branch() {
     let env = TestEnv::new("upgrade_raise_dry_run");
     let (_, _, config) = raise_graph(&env);
     let ws = root_workspace(&env, &config);
-    ok(&gs(&ws, &["pull"]));
+    ok(&gs(&ws, &["sync"]));
     let child = ws.join("imports/b");
     let (root_before, child_before) = (config_text(&ws), config_text(&child));
     let root_head = support::worktrees::head(&ws);
@@ -198,7 +198,7 @@ fn normal_006_a_dry_run_raise_changes_no_file_or_branch() {
     ok(&out);
     for expected in [
         "imports/d   v1.0.0 → v1.1.0",
-        "would develop on topic upgrade/d-v1.1.0: imports/b",
+        "would join topic upgrade/d-v1.1.0: imports/b",
         "imports/b/.gitscale.toml",
         "(dry run: nothing changed)",
     ] {
@@ -226,12 +226,12 @@ fn normal_007_c_names_the_topic_a_raise_creates() {
     let env = TestEnv::new("upgrade_raise_named_topic");
     let (_, _, config) = raise_graph(&env);
     let ws = root_workspace(&env, &config);
-    ok(&gs(&ws, &["pull"]));
+    ok(&gs(&ws, &["sync"]));
     let out = gs(&ws, &["upgrade", "-c", "feat/bump", "imports/d"]);
     ok(&out);
     assert!(
         out.stdout
-            .contains("topic feat/bump (created): imports/b developed"),
+            .contains("topic feat/bump (created): imports/b joined"),
         "{}",
         out.stdout
     );
@@ -392,9 +392,9 @@ fn normal_011_resolved_on_a_topic_writes_the_pin_not_the_branch() {
             ("imports/d", &d, ", revision = \"v1.2.0\""),
         ]),
     );
-    ok(&gs(&ws, &["pull"]));
+    ok(&gs(&ws, &["sync"]));
     run_git_pub(&ws, &["switch", "-q", "-c", "feat/x"]);
-    ok(&gs(&ws, &["develop", "imports/d"]));
+    ok(&gs(&ws, &["topic", "join", "imports/d"]));
     assert_eq!(branch(&ws.join("imports/d")).as_deref(), Some("feat/x"));
 
     let out = gs(&ws, &["upgrade", "--resolved"]);
@@ -417,7 +417,7 @@ fn normal_012_a_dry_run_promotion_changes_nothing_and_the_real_one_warns_of_the_
     let f = fixture("upgrade_promote_dry_run", "");
     let ws = f.clone_root("ws");
     run_git_pub(&ws, &["switch", "-q", "-c", "feat/x"]);
-    ok(&gs(&ws, &["develop", "imports/core"]));
+    ok(&gs(&ws, &["topic", "join", "imports/core"]));
     let child = ws.join("imports/core");
     identity(&child);
     std::fs::write(child.join("lib.txt"), "v2").unwrap();
@@ -491,7 +491,7 @@ fn edge_013_promotion_leaves_a_slot_whose_change_no_tag_holds() {
     let f = fixture("upgrade_promote_untagged", "");
     let ws = f.clone_root("ws");
     run_git_pub(&ws, &["switch", "-q", "-c", "feat/x"]);
-    ok(&gs(&ws, &["develop", "imports/core"]));
+    ok(&gs(&ws, &["topic", "join", "imports/core"]));
     let child = ws.join("imports/core");
     identity(&child);
 
@@ -531,7 +531,7 @@ fn edge_014_promotion_holds_a_slot_with_uncommitted_work() {
     let f = fixture("upgrade_promote_held", "");
     let ws = f.clone_root("ws");
     run_git_pub(&ws, &["switch", "-q", "-c", "feat/x"]);
-    ok(&gs(&ws, &["develop", "imports/core"]));
+    ok(&gs(&ws, &["topic", "join", "imports/core"]));
     let child = ws.join("imports/core");
     identity(&child);
     std::fs::write(child.join("lib.txt"), "v2").unwrap();
@@ -576,9 +576,9 @@ fn edge_015_promotion_leaves_another_majors_entry_alone() {
             ("imports/core_old", &core, ", revision = \"v0.9.0\""),
         ]),
     );
-    ok(&gs(&ws, &["pull"]));
+    ok(&gs(&ws, &["sync"]));
     run_git_pub(&ws, &["switch", "-q", "-c", "feat/x"]);
-    ok(&gs(&ws, &["develop", "imports/core"]));
+    ok(&gs(&ws, &["topic", "join", "imports/core"]));
     let child = ws.join("imports/core");
     identity(&child);
     std::fs::write(child.join("lib.txt"), "v2").unwrap();
@@ -605,7 +605,7 @@ fn edge_015_promotion_leaves_another_majors_entry_alone() {
     };
     assert!(line("imports/core").contains("v1.1.0"), "{}", config);
     assert!(line("imports/core_old").contains("v0.9.0"), "{}", config);
-    ok(&gs(&ws, &["status"]));
+    ok(&gs(&ws, &["ls"]));
 }
 
 /// A dependency may be named by the link a repository has to it, as that
@@ -639,7 +639,7 @@ fn edge_017_a_requester_on_a_branch_is_reported_and_left_alone() {
             ("imports/d", &d, ", revision = \"v1.0.0\""),
         ]),
     );
-    ok(&gs(&ws, &["pull"]));
+    ok(&gs(&ws, &["sync"]));
     let child = ws.join("imports/b");
     let child_before = config_text(&child);
 
@@ -660,7 +660,7 @@ fn edge_017_a_requester_on_a_branch_is_reported_and_left_alone() {
 
 /// Overrides stop a raise where they stand: a dependency the root overrides
 /// is not raised at all, and a requester the root overrides cannot be
-/// developed, so its pin is reported and left — while the root's own entry
+/// joined, so its pin is reported and left — while the root's own entry
 /// is still raised, with no topic created.
 #[test]
 fn edge_018_root_overrides_hold_what_a_raise_would_change() {
@@ -775,7 +775,7 @@ fn error_020_misused_options_are_refused_and_change_nothing() {
         (&["upgrade"][..], "not on a topic"),
         (
             &["upgrade", "imports/nowhere"][..],
-            "no checkout at imports/nowhere",
+            "imports/nowhere is not a checkout of this workspace",
         ),
         (
             &["upgrade", "--resolved", "imports/nowhere"][..],

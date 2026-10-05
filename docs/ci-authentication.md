@@ -40,8 +40,9 @@ Both SSH spellings are recognised — `git@host:group/repo.git` and
 port is dropped, since it says nothing about the HTTPS endpoint. A URL already
 spelled with the CI server's scheme and host is used as-is.
 
-This applies to checkouts, fetches, pushes and the [CI
-cache](stores.md#the-ci-cache)'s own entries. An existing checkout whose
+This applies to checkouts, fetches, [git commands](cli.md#git-commands-git-scale-git-command)
+run across the workspace — `git scale push` included — and the
+[CI cache](stores.md#the-ci-cache)'s own entries. An existing checkout whose
 `origin` still points at SSH — a workspace restored from a cache, or the
 runner's own checkout — is repointed before the next network operation.
 

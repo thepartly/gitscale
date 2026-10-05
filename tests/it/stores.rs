@@ -46,7 +46,7 @@ fn normal_002_a_bare_root_shares_one_store_across_its_worktrees() {
     run_git_pub(&repo, &["worktree", "add", "-q", "main", "main"]);
     let main = repo.join("main");
     identity(&main);
-    ok(&gs(&main, &["pull"]));
+    ok(&gs(&main, &["sync"]));
 
     let store_root = repo.join(".bare/gitscale/repos");
     assert!(
@@ -59,13 +59,13 @@ fn normal_002_a_bare_root_shares_one_store_across_its_worktrees() {
     // A second root worktree: its child is a worktree of the same store.
     run_git_pub(&repo, &["worktree", "add", "-q", "-b", "feat/x", "feature"]);
     let feature = repo.join("feature");
-    ok(&gs(&feature, &["pull"]));
+    ok(&gs(&feature, &["sync"]));
     let other = feature.join("imports/core");
     assert_eq!(common_dir(&other), common_dir(&child));
     assert_eq!(std::fs::read_dir(&store_root).unwrap().count(), 1);
 
-    // A branch developed in one worktree is visible from the other's child.
-    ok(&gs(&feature, &["develop", "imports/core"]));
+    // A topic branch joined in one worktree is visible from the other's child.
+    ok(&gs(&feature, &["topic", "join", "imports/core"]));
     identity(&other);
     std::fs::write(other.join("lib.txt"), "work").unwrap();
     run_git_pub(&other, &["commit", "-q", "-am", "work"]);
@@ -73,7 +73,7 @@ fn normal_002_a_bare_root_shares_one_store_across_its_worktrees() {
 }
 
 /// The store keeps the remote's branches apart from its own: a fetch never
-/// touches the branches checkouts are developed on, and no other refs come.
+/// touches the branches joined checkouts are on, and no other refs come.
 #[test]
 fn normal_003_a_store_maps_the_remote_branches_to_remote_tracking_refs() {
     let env = TestEnv::new("store_refspec");
@@ -84,7 +84,7 @@ fn normal_003_a_store_maps_the_remote_branches_to_remote_tracking_refs() {
         "[repos]\n\"libs/mylib\" = {{ url = \"{}\", revision = \"main\" }}\n",
         url
     ));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
 
     let store = env.store(&url);
     let refs = git_stdout(&store, &["for-each-ref", "--format=%(refname)"]);
@@ -97,9 +97,9 @@ fn normal_003_a_store_maps_the_remote_branches_to_remote_tracking_refs() {
 // Edge cases
 // ---------------------------------------------------------------------------
 
-/// `git clone --bare` sets no fetch refspec; status says what that costs.
+/// `git clone --bare` sets no fetch refspec; `ls` says what that costs.
 #[test]
-fn edge_004_status_warns_about_a_root_without_a_fetch_refspec() {
+fn edge_004_ls_warns_about_a_root_without_a_fetch_refspec() {
     let f = fixture("wt_refspec", "");
     let repo = f.env.repos_remote.join("repo");
     std::fs::create_dir_all(&repo).unwrap();
@@ -110,8 +110,8 @@ fn edge_004_status_warns_about_a_root_without_a_fetch_refspec() {
     std::fs::write(repo.join(".git"), "gitdir: ./.bare\n").unwrap();
     run_git_pub(&repo, &["worktree", "add", "-q", "main", "main"]);
     let main = repo.join("main");
-    ok(&gs(&main, &["pull"]));
-    let out = gs(&main, &["status"]);
+    ok(&gs(&main, &["sync"]));
+    let out = gs(&main, &["ls"]);
     ok(&out);
     assert!(
         out.stdout
@@ -127,7 +127,7 @@ fn edge_004_status_warns_about_a_root_without_a_fetch_refspec() {
             "+refs/heads/*:refs/remotes/origin/*",
         ],
     );
-    let out = gs(&main, &["status"]);
+    let out = gs(&main, &["ls"]);
     assert!(!out.stdout.contains("warning:"), "{}", out.stdout);
 }
 
@@ -151,8 +151,8 @@ fn edge_005_a_deleted_root_worktree_does_not_lock_its_topic() {
             other.to_str().unwrap(),
         ],
     );
-    ok(&gs(&other, &["pull"]));
-    ok(&gs(&other, &["develop", "imports/core"]));
+    ok(&gs(&other, &["sync"]));
+    ok(&gs(&other, &["topic", "join", "imports/core"]));
     let work = commit_in(&other.join("imports/core"), "lib.txt", "work");
     std::fs::remove_dir_all(&other).unwrap();
     run_git_pub(&ws, &["worktree", "prune"]);
@@ -160,7 +160,7 @@ fn edge_005_a_deleted_root_worktree_does_not_lock_its_topic() {
     // The same topic, in the main worktree: its branch must not be held by
     // the deleted one.
     run_git_pub(&ws, &["switch", "-q", "feat/x"]);
-    let out = gs(&ws, &["pull"]);
+    let out = gs(&ws, &["sync"]);
     ok(&out);
     assert_eq!(branch(&ws.join("imports/core")).as_deref(), Some("feat/x"));
     // The work committed in the deleted worktree's checkout is in the store,
@@ -169,9 +169,9 @@ fn edge_005_a_deleted_root_worktree_does_not_lock_its_topic() {
 }
 
 /// Moving a plain-clone root breaks its children's links to the store, which
-/// is inside it; pull repairs them.
+/// is inside it; sync repairs them.
 #[test]
-fn edge_006_pull_repairs_children_after_the_root_moves() {
+fn edge_006_sync_repairs_children_after_the_root_moves() {
     let f = fixture("wt_moved", "");
     let ws = f.clone_root("ws");
     // Absolute links whatever git this is: git 2.48 and later write relative
@@ -188,7 +188,7 @@ fn edge_006_pull_repairs_children_after_the_root_moves() {
 
     let moved = f.env.repos_remote.join("moved");
     std::fs::rename(&ws, &moved).unwrap();
-    let out = gs(&moved, &["pull"]);
+    let out = gs(&moved, &["sync"]);
     ok(&out);
     let child = moved.join("imports/core");
     let link = std::fs::read_to_string(child.join(".git")).unwrap();
@@ -224,11 +224,12 @@ fn edge_007_a_foreign_checkout_is_reported_and_left_alone() {
         &ws,
         &["clone", "-q", f.core.to_str().unwrap(), "imports/core"],
     );
-    let out = gs(&ws, &["pull"]);
+    let out = gs(&ws, &["sync"]);
     assert!(!out.success);
     assert!(
-        out.stderr
-            .contains("not a gitscale worktree; move your changes out, delete it and run pull"),
+        out.stderr.contains(
+            "not a gitscale worktree; move your changes out, delete it and run git scale sync"
+        ),
         "{}",
         out.stderr
     );
@@ -251,7 +252,7 @@ fn edge_008_a_deleted_store_leaves_its_checkouts_alone_and_says_so() {
     crate::support::edit(&child.join("lib.txt"), "unsaved work");
     std::fs::remove_dir_all(store_for(&ws, &f.core)).unwrap();
 
-    let out = gs(&ws, &["pull"]);
+    let out = gs(&ws, &["sync"]);
     assert!(!out.success);
     assert!(
         out.stderr.contains("imports/core: not a gitscale worktree"),
@@ -264,26 +265,26 @@ fn edge_008_a_deleted_store_leaves_its_checkouts_alone_and_says_so() {
     );
 }
 
-/// A developed checkout deleted by hand comes back, on its topic branch with
-/// its commits, on the next pull: the work was in the store all along.
+/// A joined checkout deleted by hand comes back, on its topic branch with
+/// its commits, on the next sync: the work was in the store all along.
 #[test]
-fn edge_009_a_deleted_developed_checkout_comes_back_on_its_topic_branch() {
+fn edge_009_a_deleted_joined_checkout_comes_back_on_its_topic_branch() {
     let f = fixture("stores_deleted_checkout", "");
     let ws = f.clone_root("ws");
     let child = ws.join("imports/core");
     run_git_pub(&ws, &["switch", "-q", "-c", "feat/x"]);
-    ok(&gs(&ws, &["develop", "imports/core"]));
+    ok(&gs(&ws, &["topic", "join", "imports/core"]));
     let work = commit_in(&child, "lib.txt", "work");
     std::fs::remove_dir_all(&child).unwrap();
 
-    ok(&gs(&ws, &["pull"]));
+    ok(&gs(&ws, &["sync"]));
     assert_eq!(branch(&child).as_deref(), Some("feat/x"));
     assert_eq!(head(&child), work);
     assert!(writable(&child.join("lib.txt")));
 }
 
 /// A store whose creation was interrupted leaves a staging directory, never
-/// a half-made store: the next pull builds the store afresh.
+/// a half-made store: the next sync builds the store afresh.
 #[test]
 fn edge_010_an_interrupted_store_creation_is_redone() {
     let f = fixture("stores_staging", "");
@@ -302,7 +303,7 @@ fn edge_010_an_interrupted_store_creation_is_redone() {
     std::fs::create_dir_all(staging.join("objects")).unwrap();
     std::fs::write(staging.join("HEAD"), "garbage").unwrap();
 
-    ok(&gs(&ws, &["pull"]));
+    ok(&gs(&ws, &["sync"]));
     assert!(!staging.exists());
     assert!(store.join("HEAD").is_file());
     assert_eq!(
@@ -311,17 +312,17 @@ fn edge_010_an_interrupted_store_creation_is_redone() {
     );
 }
 
-/// An unreadable checkout record is rebuilt by the next pull from what is on
+/// An unreadable checkout record is rebuilt by the next sync from what is on
 /// disk, so `sync` can still remove a checkout nothing needs any more.
 #[test]
-fn edge_011_a_corrupt_checkout_record_is_rebuilt_by_pull() {
+fn edge_011_a_corrupt_checkout_record_is_rebuilt_by_sync() {
     let f = fixture("stores_ledger_corrupt", "");
     let ws = f.clone_root("ws");
     let ledger = ws.join(".git/gitscale/checkouts.json");
     assert!(ledger.is_file());
     std::fs::write(&ledger, "{ not json").unwrap();
 
-    ok(&gs(&ws, &["pull"]));
+    ok(&gs(&ws, &["sync"]));
     let text = std::fs::read_to_string(&ledger).unwrap();
     let record: serde_json::Value = serde_json::from_str(&text).expect("valid JSON again");
     assert_eq!(record["checkouts"]["imports/core"], "git", "{}", text);
@@ -360,7 +361,7 @@ fn edge_012_a_root_worktrees_sync_leaves_another_worktrees_checkouts_alone() {
             other.to_str().unwrap(),
         ],
     );
-    ok(&gs(&other, &["pull"]));
+    ok(&gs(&other, &["sync"]));
     let config = std::fs::read_to_string(other.join(".gitscale.toml"))
         .unwrap()
         .replace("imports/core", "imports/core2");
@@ -375,10 +376,10 @@ fn edge_012_a_root_worktrees_sync_leaves_another_worktrees_checkouts_alone() {
     assert!(git_ok(&mine, &["status"]), "still a working checkout");
 }
 
-/// Two root worktrees pulled at the same moment share one store: each waits
+/// Two root worktrees synced at the same moment share one store: each waits
 /// for the other's fetch, and both end up with a worktree of it.
 #[test]
-fn edge_013_concurrent_pulls_in_two_root_worktrees_both_succeed() {
+fn edge_013_concurrent_syncs_in_two_root_worktrees_both_succeed() {
     let f = fixture("stores_concurrent", "");
     let ws = f.env.repos_remote.join("ws");
     run_git_pub(
@@ -405,7 +406,7 @@ fn edge_013_concurrent_pulls_in_two_root_worktrees_both_succeed() {
 
     let pulls: Vec<_> = [ws.clone(), other.clone()]
         .into_iter()
-        .map(|dir| std::thread::spawn(move || gs_bin(&dir, &["pull"], &[])))
+        .map(|dir| std::thread::spawn(move || gs_bin(&dir, &["sync"], &[])))
         .collect();
     for pull in pulls {
         ok(&pull.join().unwrap());
@@ -426,7 +427,7 @@ fn edge_013_concurrent_pulls_in_two_root_worktrees_both_succeed() {
 // Errors and refusals
 // ---------------------------------------------------------------------------
 
-/// A store directory that lost its `HEAD` is no store: the pull fails that
+/// A store directory that lost its `HEAD` is no store: the sync fails that
 /// entry, names the directory, and deletes nothing — the directory may still
 /// hold the records of other checkouts.
 #[test]
@@ -436,7 +437,7 @@ fn error_014_a_half_deleted_store_is_reported_and_left_alone() {
     let store = store_for(&ws, &f.core);
     std::fs::remove_file(store.join("HEAD")).unwrap();
 
-    let out = gs(&ws, &["pull"]);
+    let out = gs(&ws, &["sync"]);
     assert!(!out.success);
     assert!(
         out.stderr.contains("cannot move the new store into"),
@@ -448,7 +449,7 @@ fn error_014_a_half_deleted_store_is_reported_and_left_alone() {
 }
 
 /// A store keeps its `origin` pointing at the entry's URL: one whose remote
-/// was removed by hand gets it back on the next pull instead of failing every
+/// was removed by hand gets it back on the next sync instead of failing every
 /// fetch from then on.
 #[test]
 #[ignore = "bug: a store whose origin was removed is never given one back"]
@@ -458,7 +459,7 @@ fn error_015_a_store_whose_origin_was_removed_gets_it_back() {
     let store = store_for(&ws, &f.core);
     run_git_pub(&store, &["remote", "remove", "origin"]);
 
-    let out = gs(&ws, &["pull"]);
+    let out = gs(&ws, &["sync"]);
     ok(&out);
     assert_eq!(
         git(&store, &["remote", "get-url", "origin"]),
@@ -471,9 +472,9 @@ fn error_015_a_store_whose_origin_was_removed_gets_it_back() {
 // ---------------------------------------------------------------------------
 
 /// Two checkouts of one repository — two majors — share its store, and a
-/// pull fetches that store once, not once per checkout.
+/// sync fetches that store once, not once per checkout.
 #[test]
-fn perf_016_a_pull_fetches_a_store_shared_by_two_majors_once() {
+fn perf_016_a_sync_fetches_a_store_shared_by_two_majors_once() {
     let env = TestEnv::new("stores_fetch_once");
     let d = env.create_bare_repo("d", "main", &[("d.txt", "v1")]);
     run_git_pub(&d, &["tag", "v1.0.0", "main"]);
@@ -494,7 +495,7 @@ fn perf_016_a_pull_fetches_a_store_shared_by_two_majors_once() {
 
     let out = gs_bin(
         &ws,
-        &["pull"],
+        &["sync"],
         &[("GIT_TRACE2_EVENT", trace.to_str().unwrap())],
     );
     ok(&out);

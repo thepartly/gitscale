@@ -1,93 +1,115 @@
+//! What `git scale fetch` does after git's own fetch in each repository:
+//! refresh every store of the root, and each artefact entry's commit and
+//! image. Nothing is placed: the next placement uses what this brought.
+
 use anyhow::Result;
 use std::io::Write;
 use std::path::Path;
 
 use crate::artefact::Artefacts;
-use crate::config::{filter_entries, load_workspace};
-use crate::progress::{run_entries, RepoStatus};
+use crate::config::GitScaleConfig;
+use crate::progress::{run_parallel, RepoStatus};
 use crate::store::Sources;
 
-pub fn run(
-    root: Option<&Path>,
-    names: &[String],
+pub fn refresh(
+    config: &GitScaleConfig,
+    config_root: &Path,
     verbose: bool,
     no_cache: bool,
     interactive: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
-    let (config, config_root) = load_workspace(root)?;
-    if config.repos.is_empty() {
-        writeln!(out, "Nothing to fetch.")?;
-        return Ok(());
-    }
-
-    let sources = Sources::new(&config_root, no_cache)?;
-    let artefacts = Artefacts::new(&config, &config_root, sources.images());
-    // Resolving online is the fetch: every store resolution reads is brought
-    // up to date on the way, so the next offline `status` sees what the
-    // remotes have now — implicit dependencies included. A fetch changes no
-    // checkout, so a graph that will not resolve — a remote that cannot be
-    // reached, a conflict — still gets the declared entries fetched, and the
-    // command fails afterwards with the reason.
+    let sources = Sources::new(config_root, no_cache)?;
+    let artefacts = Artefacts::new(config, config_root, sources.images());
+    // Resolving online is most of the fetch: every store resolution reads is
+    // brought up to date on the way, implicit dependencies included. A graph
+    // that will not resolve — a remote that cannot be reached, a conflict —
+    // still gets every store fetched, and fails afterwards with the reason.
     let resolved = crate::resolve::workspace(
-        &config,
-        &config_root,
+        config,
+        config_root,
         true,
         &sources,
         Some(&artefacts),
         verbose,
     );
-    let (selected, unresolved) = match resolved {
-        Ok(resolution) => (resolution.select(names)?, None),
-        Err(e) => (filter_entries(&config.repos, names)?, Some(e)),
-    };
+    // One job per artefact entry and per store, each named as the workspace
+    // knows it: a store by the checkouts made from it, else by its own name.
+    enum Job {
+        Artefact(crate::config::RepoEntry),
+        Store(std::path::PathBuf),
+    }
+    let mut jobs: Vec<(String, Job)> = Vec::new();
+    let slots = resolved
+        .as_ref()
+        .map(|r| r.slots.as_slice())
+        .unwrap_or_default();
+    for slot in slots {
+        let entry = slot.entry();
+        if entry.is_artefact() && !config_root.join(&entry.directory).is_symlink() {
+            jobs.push((entry.directory.clone(), Job::Artefact(entry)));
+        }
+    }
+    if let Some(stores) = &sources.stores {
+        for path in stores.all() {
+            let label = slots
+                .iter()
+                .filter(|s| !s.entry().is_artefact())
+                .find(|s| stores.repo_path(&crate::ci::remote_url(&s.url)) == path)
+                .map(|s| s.directory.clone())
+                .unwrap_or_else(|| {
+                    path.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                });
+            jobs.push((label, Job::Store(path)));
+        }
+    }
+    let names: Vec<String> = jobs.iter().map(|(label, _)| label.clone()).collect();
+    let by_name: std::collections::HashMap<&str, &Job> = jobs
+        .iter()
+        .map(|(label, job)| (label.as_str(), job))
+        .collect();
 
-    let fetched = run_entries(
+    let failed = run_parallel(
         "Fetching...",
-        "fetch",
-        &selected,
+        &names,
         interactive,
-        |entry| {
-            let name = entry.directory.as_str();
-            if config_root.join(&entry.directory).is_symlink() {
-                return RepoStatus::Skip(format!("{} (symlink)", name));
-            }
-            if entry.is_artefact() {
-                return match artefacts.fetch(entry) {
-                    Ok(commit) => RepoStatus::Ok(format!(
-                        "{} (artefact {})",
-                        name,
-                        crate::git::short_sha(&commit)
-                    )),
-                    Err(e) => RepoStatus::Fail(format!("{}: {}", name, e)),
-                };
-            }
-            match &sources.stores {
-                // Already fetched by resolution; once per command.
-                Some(stores) => match stores.update(&crate::git::remote_url(entry)) {
-                    Ok(_) => RepoStatus::Ok(name.to_string()),
-                    Err(e) => RepoStatus::Fail(format!("{}: {:#}", name, e)),
-                },
-                // CI keeps no history to fetch into: the next pull takes the
-                // commit it needs.
-                None => RepoStatus::Skip(format!("{} (no history in CI)", name)),
-            }
+        |name| match by_name[name] {
+            Job::Artefact(entry) => match artefacts.fetch(entry) {
+                Ok(commit) => RepoStatus::Ok(format!(
+                    "{} (artefact {})",
+                    name,
+                    crate::git::short_sha(&commit)
+                )),
+                Err(e) => RepoStatus::Fail(format!("{}: {}", name, e)),
+            },
+            Job::Store(path) => match sources.stores.as_ref().map(|s| s.update_path(path)) {
+                Some(Ok(())) => RepoStatus::Ok(name.to_string()),
+                Some(Err(e)) => RepoStatus::Fail(format!("{}: {:#}", name, e)),
+                None => RepoStatus::Skip(name.to_string()),
+            },
         },
         out,
         err,
-    );
+    )?;
     // The reasons in the message itself: the CLI prints only the outermost
     // error of a chain, and neither failure may hide the other.
-    match (fetched, unresolved) {
-        (fetched, None) => fetched,
-        (Ok(()), Some(e)) => Err(anyhow::anyhow!(
+    match (failed, resolved) {
+        (0, Ok(_)) => Ok(()),
+        (n, Ok(_)) => anyhow::bail!(
+            "{} failed to fetch",
+            crate::cache::plural(n, "repo", "repos")
+        ),
+        (0, Err(e)) => Err(anyhow::anyhow!(
             "cannot resolve the workspace's dependencies: {:#}",
             e
         )),
-        (Err(failed), Some(e)) => Err(anyhow::anyhow!(
-            "{:#}; and cannot resolve the workspace's dependencies: {:#}",
-            failed,
+        (n, Err(e)) => Err(anyhow::anyhow!(
+            "{} failed to fetch; and cannot resolve the workspace's dependencies: {:#}",
+            crate::cache::plural(n, "repo", "repos"),
             e
         )),
     }

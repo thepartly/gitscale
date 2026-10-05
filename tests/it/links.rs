@@ -1,6 +1,6 @@
 //! Dependency links: a repository's dependency on another root checkout is a
 //! symlink to it. Relinking a clone that replaced one, removing orphaned
-//! links, and how status shows both.
+//! links, and how `ls` shows both.
 
 use crate::support;
 use crate::support::resolution::*;
@@ -44,7 +44,7 @@ fn normal_001_a_dependency_of_a_dependency_links_to_the_root_checkout() {
         bare_b.display(),
     ));
 
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "stderr: {}", out.stderr);
 
     // repoA/libs/b should be a symlink pointing to ../../repoB
@@ -147,10 +147,10 @@ fn normal_007_sync_relinks_a_clone_holding_only_ignored_files() {
 }
 
 #[test]
-fn normal_009_status_shows_an_unlinked_clone() {
+fn normal_009_ls_shows_an_unlinked_clone() {
     let (env, _link) = setup_unlinked_env("status_shows_unlinked");
 
-    let out = env.run(&["status"]);
+    let out = env.run(&["ls"]);
     assert!(out.success, "stderr: {}", out.stderr);
 
     let plain = strip_ansi(&out.stdout);
@@ -162,14 +162,14 @@ fn normal_009_status_shows_an_unlinked_clone() {
 }
 
 #[test]
-fn normal_010_status_shows_an_unlinked_clone_as_modified() {
+fn normal_010_ls_shows_an_unlinked_clone_as_modified() {
     let (env, link) = setup_unlinked_env("status_shows_unlinked_modified");
 
     // Make dirty
     std::fs::write(link.join("dirty.txt"), "change").unwrap();
     support::run_git_pub(&link, &["add", "."]);
 
-    let out = env.run(&["status"]);
+    let out = env.run(&["ls"]);
     assert!(out.success, "stderr: {}", out.stderr);
 
     let plain = strip_ansi(&out.stdout);
@@ -178,10 +178,10 @@ fn normal_010_status_shows_an_unlinked_clone_as_modified() {
 }
 
 #[test]
-fn normal_013_status_shows_an_orphan() {
+fn normal_013_ls_shows_an_orphan() {
     let (env, _orphan) = setup_orphan_env("status_shows_orphan", true);
 
-    let out = env.run(&["status"]);
+    let out = env.run(&["ls"]);
     assert!(out.success, "stderr: {}", out.stderr);
 
     let plain = strip_ansi(&out.stdout);
@@ -345,7 +345,7 @@ fn edge_008_sync_with_names_leaves_other_repos_links_alone() {
         bare_c.display()
     ));
     std::fs::write(&config_path, config).unwrap();
-    assert!(env.run(&["pull", "repoC"]).success);
+    assert!(env.run(&["sync", "repoC"]).success);
 
     std::fs::write(link.join("dirty.txt"), "local change").unwrap();
     support::run_git_pub(&link, &["add", "."]);
@@ -365,10 +365,10 @@ fn edge_008_sync_with_names_leaves_other_repos_links_alone() {
 /// The repo that owns a replaced link is the declared entry it sits under,
 /// however many path components that entry spans.
 #[test]
-fn edge_011_status_shows_unlinked_under_a_nested_entry() {
+fn edge_011_ls_shows_unlinked_under_a_nested_entry() {
     let (env, _link) = setup_unlinked_env_at("status_unlinked_nested", "apps/a");
 
-    let out = env.run(&["status"]);
+    let out = env.run(&["ls"]);
     assert!(out.success, "stderr: {}", out.stderr);
 
     let plain = strip_ansi(&out.stdout);
@@ -379,49 +379,55 @@ fn edge_011_status_shows_unlinked_under_a_nested_entry() {
     assert!(row.contains("unlinked"), "expected 'unlinked': {}", row);
 }
 
-/// The links gitscale plants in a checkout are not its owner's work: they do
-/// not make it dirty, but where they are not ignored, status says so and how
-/// to fix it.
+/// The links GitScale plants in a checkout are not its owner's work: they
+/// are kept out of git's sight, in the checkout's `info/exclude`, so they make
+/// nothing dirty and `git add -A` stages none. Should that block go, `ls`
+/// flags them apart from dirty, and the next placement puts it back.
 #[test]
-fn edge_012_links_a_repository_does_not_ignore_are_flagged_apart_from_dirty() {
+fn edge_012_planted_links_are_kept_out_of_gits_sight() {
     let env = TestEnv::new("res_untracked_links");
     let (b, d) = diamond(&env);
     env.write_config(&repos(&[
         ("imports/b", &b, ", revision = \"v1.0.0\""),
         ("imports/d", &d, ", revision = \"v1.2.0\""),
     ]));
-    assert!(env.run(&["pull"]).success);
-
-    let out = env.run(&["status"]);
-    let text = strip_ansi(&out.stdout);
-    let row = text.lines().find(|l| l.contains("imports/b")).unwrap();
-    assert!(row.contains("untracked-links"), "{}", text);
-    assert!(!row.contains("dirty"), "{}", text);
-    assert!(
-        text.contains("hint: imports/b: ") && text.contains("add /libs/ to its .gitignore"),
-        "{}",
-        text
-    );
+    assert!(env.run(&["sync"]).success);
+    let checkout = env.playground.join("imports/b");
+    assert!(checkout.join("libs/d").is_symlink());
+    assert_eq!(git_stdout(&checkout, &["status", "--porcelain"]), "");
+    let row = status_row(&env, "imports/b");
+    assert!(row.ends_with(" ok") || row.contains(" ok "), "{}", row);
 
     // Real work in the same checkout is still dirty.
-    support::edit(&env.playground.join("imports/b/README.md"), "edited");
-    let row = status_row(&env, "imports/b");
-    assert!(row.contains("dirty, untracked-links"), "{}", row);
-
-    // Ignored, the links are nobody's business.
-    let checkout = env.playground.join("imports/b");
-    run_git_pub(&checkout, &["checkout", "--", "README.md"]);
-    // A worktree's exclude file is its store's, shared by every worktree.
-    let exclude = git_stdout(&checkout, &["rev-parse", "--git-path", "info/exclude"]);
-    let exclude = checkout.join(exclude);
-    std::fs::create_dir_all(exclude.parent().unwrap()).unwrap();
-    std::fs::write(&exclude, "/libs/\n").unwrap();
+    support::edit(&checkout.join("README.md"), "edited");
     let row = status_row(&env, "imports/b");
     assert!(
-        !row.contains("untracked-links") && !row.contains("dirty"),
+        row.contains("dirty") && !row.contains("untracked-links"),
         "{}",
         row
     );
+    run_git_pub(&checkout, &["checkout", "--", "README.md"]);
+
+    // The block removed by hand: flagged, with the fix; the next placement
+    // puts it back.
+    let exclude = git_stdout(&checkout, &["rev-parse", "--git-path", "info/exclude"]);
+    let exclude = checkout.join(exclude);
+    std::fs::write(&exclude, "").unwrap();
+    let out = env.run(&["ls"]);
+    let text = strip_ansi(&out.stdout);
+    let row = text.lines().find(|l| l.contains("imports/b")).unwrap();
+    assert!(
+        row.contains("untracked-links") && !row.contains("dirty"),
+        "{}",
+        text
+    );
+    assert!(text.contains("hint: imports/b: "), "{}", text);
+    assert!(env.run(&["sync"]).success);
+    assert!(std::fs::read_to_string(&exclude)
+        .unwrap()
+        .contains("/libs/d"));
+    let row = status_row(&env, "imports/b");
+    assert!(!row.contains("untracked-links"), "{}", row);
 }
 
 #[test]
@@ -460,19 +466,19 @@ fn edge_015a_sync_skips_an_orphan_with_a_valid_target_without_force() {
     );
 }
 
-/// Inside a child repository, a dep is the outer workspace's dedup symlink.
-/// The outer root decides that checkout's revision: a pull from the child
-/// leaves the link and the checkout alone, rather than moving it to the
-/// revision the child's own config names.
+/// A child is never a workspace: `sync` typed inside one places the whole
+/// workspace, whose root decides the dependency's revision — the link inside
+/// the child stays, and the checkout it points at stays at the root's pin.
 #[test]
-fn edge_016_pull_inside_a_child_leaves_the_outer_workspace_link_alone() {
+fn edge_016_sync_inside_a_child_places_the_workspace_and_keeps_the_link() {
     let env = TestEnv::new("pull_child_outer_link");
     let (child, main_tip) = child_with_outer_link(&env);
     let link = child.join("libs/b");
 
-    let out = run_in(&child, "pull", &[]);
+    let out = run_in(&child, "sync", &[]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
-    assert!(out.stdout.contains("libs/b (symlink)"), "{}", out.stdout);
+    assert!(out.stdout.contains("ok    repoA"), "{}", out.stdout);
+    assert!(out.stdout.contains("ok    repoB"), "{}", out.stdout);
     assert!(link.is_symlink(), "the dedup link must survive");
     assert_eq!(
         git_stdout(&env.playground.join("repoB"), &["rev-parse", "HEAD"]),
@@ -481,39 +487,31 @@ fn edge_016_pull_inside_a_child_leaves_the_outer_workspace_link_alone() {
     );
 }
 
-/// `sync` from inside a child keeps the outer links too; naming the entry to
-/// `pull` is how one dependency is unlinked into a checkout of its own.
+/// A link path named from inside a child names the checkout it points at:
+/// that checkout is placed, at the root's revision, and the link is not
+/// replaced by a checkout of its own.
 #[test]
-fn edge_017_sync_inside_a_child_keeps_the_links_and_a_named_pull_unlinks() {
+fn edge_017_naming_a_link_inside_a_child_places_its_checkout_and_keeps_the_link() {
     let env = TestEnv::new("child_unlink_named");
     let (child, main_tip) = child_with_outer_link(&env);
     let link = child.join("libs/b");
 
-    for subcommand in ["pull", "sync"] {
-        let out = run_in(&child, subcommand, &[]);
-        assert!(out.success, "{}: {}{}", subcommand, out.stdout, out.stderr);
-        assert!(link.is_symlink(), "{} must keep the dedup link", subcommand);
-    }
+    let out = run_in(&child, "sync", &["libs/b"]);
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    assert!(out.stdout.contains("ok    repoB"), "{}", out.stdout);
+    assert!(!out.stdout.contains("repoA"), "{}", out.stdout);
+    assert!(link.is_symlink(), "naming a link does not unlink it");
     assert_eq!(
         git_stdout(&env.playground.join("repoB"), &["rev-parse", "HEAD"]),
         main_tip
     );
-
-    let out = run_in(&child, "pull", &["libs/b"]);
-    assert!(out.success, "{}{}", out.stdout, out.stderr);
-    assert!(!link.is_symlink(), "a named pull unlinks");
-    assert_eq!(
-        std::fs::read_to_string(link.join("b.txt")).unwrap(),
-        "B develop",
-        "at the child's own revision"
-    );
 }
 
-/// Any other symlink at an entry path is replaced by a real checkout: pull
+/// Any other symlink at an entry path is replaced by a real checkout: placement
 /// lands where a fresh one would, and the checkout the link pointed at is left
 /// untouched.
 #[test]
-fn edge_018_pull_replaces_an_in_workspace_symlink_with_a_clone() {
+fn edge_018_placement_replaces_an_in_workspace_symlink_with_a_checkout() {
     let env = TestEnv::new("pull_inner_symlink");
     let bare = env.create_bare_repo("mylib", "main", &[("a.txt", "v1")]);
     let other = env.create_bare_repo("other", "main", &[("o.txt", "o")]);
@@ -525,12 +523,12 @@ fn edge_018_pull_replaces_an_in_workspace_symlink_with_a_clone() {
         bare.display(),
         other.display(),
     ));
-    let out = env.run(&["pull", "libs/mylib"]);
+    let out = env.run(&["sync", "libs/mylib"]);
     assert!(out.success, "stderr: {}", out.stderr);
     std::os::unix::fs::symlink("mylib", env.playground.join("libs/alias")).unwrap();
     let before = git_stdout(&env.playground.join("libs/mylib"), &["rev-parse", "HEAD"]);
 
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     let alias = env.playground.join("libs/alias");
     assert!(!alias.is_symlink(), "the symlink should be replaced");
@@ -630,7 +628,7 @@ fn edge_021_sync_leaves_a_symlink_the_repository_tracks() {
         "[repos]\n\"repoA\" = {{ url = \"{}\", revision = \"main\" }}\n",
         bare.display()
     ));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     let tracked = env.playground.join("repoA/notes");
     let is_link = || std::fs::symlink_metadata(&tracked).is_ok_and(|m| m.file_type().is_symlink());
     assert!(is_link());

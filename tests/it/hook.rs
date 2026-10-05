@@ -1,4 +1,5 @@
-//! `gitscale hook`: install, uninstall, the shim it writes, and status.
+//! `gitscale hook`: install, uninstall, the shim it writes, status, and the
+//! hook firing in a child.
 //!
 //! `--local` is exercised in-process. `--global` writes to the user's git
 //! config, so those tests run the binary as a subprocess under an isolated HOME
@@ -272,11 +273,11 @@ fn normal_021_global_install_keeps_each_repositorys_own_git_hooks_running() {
     );
 }
 
-/// `on_pull_error` decides whether a failed hook-triggered pull fails the git
-/// operation: unset, CI fails fast and a developer machine only warns; set,
-/// it means what it says either way. Every failure leaves a breadcrumb.
+/// `on_pull_error` decides whether a failed hook-triggered placement fails the
+/// git operation: unset, CI fails fast and a developer machine only warns;
+/// set, it means what it says either way. Every failure leaves a breadcrumb.
 #[test]
-fn normal_022_on_pull_error_decides_whether_a_failed_hook_pull_fails_the_checkout() {
+fn normal_022_on_pull_error_decides_whether_a_failed_hook_placement_fails_the_checkout() {
     let env = TestEnv::new("hook_on_pull_error");
     let missing = env.repos_remote.join("missing.git");
     for (policy, ci, fails) in [
@@ -303,7 +304,7 @@ fn normal_022_on_pull_error_decides_whether_a_failed_hook_pull_fails_the_checkou
             case, out.stdout, out.stderr
         );
         assert!(
-            out.stderr.contains("post-checkout hook — pull failed"),
+            out.stderr.contains("post-checkout hook — placement failed"),
             "{}: {}",
             case,
             out.stderr
@@ -325,10 +326,10 @@ fn normal_022_on_pull_error_decides_whether_a_failed_hook_pull_fails_the_checkou
 }
 
 /// The breadcrumb is what lets a later, more confusing failure be traced back:
-/// `hook status` shows the failed pull until a hook-triggered pull succeeds,
-/// which removes it.
+/// `hook status` shows the failed placement until a hook-triggered one
+/// succeeds, which removes it.
 #[test]
-fn normal_023_status_reports_a_failed_hook_pull_until_one_succeeds() {
+fn normal_023_status_reports_a_failed_hook_placement_until_one_succeeds() {
     let env = TestEnv::new("hook_breadcrumb");
     let home = isolated_home(&env);
     let root = env.playground.to_str().unwrap();
@@ -342,14 +343,16 @@ fn normal_023_status_reports_a_failed_hook_pull_until_one_succeeds() {
     let status = cli_isolated(&home, &["hook", "status", "-C", root]);
     assert!(status.success, "{}", status.stderr);
     assert!(
-        status.stdout.contains("Last hook-triggered pull FAILED"),
+        status
+            .stdout
+            .contains("Last hook-triggered placement FAILED"),
         "{}",
         status.stdout
     );
     assert!(
         status
             .stdout
-            .contains("`gitscale pull` triggered by the post-checkout hook failed"),
+            .contains("the placement the post-checkout hook ran failed"),
         "{}",
         status.stdout
     );
@@ -431,9 +434,9 @@ fn normal_025_shim_passes_its_arguments_to_the_chained_hook_and_returns_its_stat
 }
 
 /// `git merge` and `git pull` fire `post-merge`, not `post-checkout`: a merge
-/// that brings in a new declared checkout gets it pulled.
+/// that brings in a new declared checkout gets it placed.
 #[test]
-fn normal_026_git_merge_runs_the_pull_through_post_merge() {
+fn normal_026_git_merge_places_the_workspace_through_post_merge() {
     let env = TestEnv::new("hook_post_merge");
     let bare = env.create_bare_repo("lib", "main", &[("a.txt", "from lib")]);
     let repo = repo_with(&env, Some("[repos]\n"));
@@ -640,8 +643,8 @@ fn edge_012_shim_ignores_a_file_checkout() {
     };
 
     // An in-process install bakes in the test binary rather than gitscale, so
-    // what the shim reaches cannot run a real pull here. Whether it reaches it
-    // at all is the question: silence means the shim stopped first.
+    // what the shim reaches cannot run a real placement here. Whether it
+    // reaches it at all is the question: silence means the shim stopped first.
     let file_checkout = run("0");
     assert!(
         file_checkout.trim().is_empty(),
@@ -1129,7 +1132,7 @@ fn edge_035_status_outside_a_repository_says_so() {
 }
 
 /// `hook run` re-checks the opt-in the shim makes: a repository with no
-/// `.gitscale.toml` at its root gets no pull and no output.
+/// `.gitscale.toml` at its root gets no placement and no output.
 #[test]
 fn edge_036_run_in_a_repo_without_a_config_does_nothing() {
     let env = TestEnv::new("hook_run_no_config");
@@ -1175,9 +1178,9 @@ fn edge_037_allow_patterns_reach_gitscale_verbatim_and_never_run() {
     }
 }
 
-/// A `post_sync` the allowlist refuses is a failed hook pull like any other:
-/// it leaves a breadcrumb, and `on_pull_error` decides — off CI the checkout
-/// goes on, in CI it fails. The command never runs either way.
+/// A `post_sync` the allowlist refuses is a failed hook placement like any
+/// other: it leaves a breadcrumb, and `on_pull_error` decides — off CI the
+/// checkout goes on, in CI it fails. The command never runs either way.
 #[test]
 fn edge_038_a_refused_post_sync_leaves_a_breadcrumb_and_follows_the_policy() {
     let env = support::workspace::hook_env(
@@ -1209,7 +1212,7 @@ fn edge_038_a_refused_post_sync_leaves_a_breadcrumb_and_follows_the_policy() {
 /// there must not end up running gitscale twice on every checkout — once from
 /// the displaced copy and again from the new shim.
 #[test]
-#[ignore = "bug: install displaces a repository's own gitscale copy and chains to it, so every checkout pulls twice"]
+#[ignore = "bug: install displaces a repository's own gitscale copy and chains to it, so every checkout is placed twice"]
 fn edge_039_install_beside_a_repositorys_own_copy_runs_gitscale_once() {
     let env = TestEnv::new("hook_vendored_double_run");
     let repo = repo_with(&env, Some("[repos]\n"));
@@ -1547,10 +1550,10 @@ fn error_043_status_never_prints_credentials_from_the_origin() {
 // Performance
 // ---------------------------------------------------------------------------
 
-/// One clone runs gitscale once. The pull it starts checks out every declared
-/// repository with git, which fires the same global hook in each — and each
-/// carries a `.gitscale.toml` here, so only the recursion guard stops that
-/// from recursing.
+/// One clone runs gitscale once. The placement it starts checks out every
+/// declared repository with git, which fires the same global hook in each —
+/// and each carries a `.gitscale.toml` here, so only the recursion guard
+/// stops that from recursing.
 #[test]
 fn perf_044_a_hooked_clone_runs_gitscale_exactly_once() {
     let env = TestEnv::new("hook_clone_once");
@@ -1609,4 +1612,241 @@ fn perf_044_a_hooked_clone_runs_gitscale_exactly_once() {
         "gitscale ran {:?} for one clone",
         calls(&log)
     );
+}
+
+// ---------------------------------------------------------------------------
+// The hook in a child
+// ---------------------------------------------------------------------------
+
+/// `hook run` as the shim runs it in a child: `--child` and `-C` its top,
+/// the allowlist set.
+fn child_hook(child: &std::path::Path, hook: &str, allow: &str) -> support::CliOutput {
+    let out = Command::new(env!("CARGO_BIN_EXE_gitscale"))
+        .args(["hook", "run", hook, "--child"])
+        .arg(child)
+        .arg("-C")
+        .arg(child)
+        .env("GITSCALE_HOOK", hook)
+        .env(ALLOW_ENV, allow)
+        .output()
+        .expect("failed to run the gitscale binary");
+    support::CliOutput {
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        success: out.status.success(),
+    }
+}
+
+/// d at v1.0.0; b asking for d at v1.0.0; a root clone declaring both, on
+/// topic `feat` with b joined. Returns the clone, b and d.
+fn child_hook_workspace(
+    env: &TestEnv,
+    extra: &str,
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    use support::resolution::{repos, tagged};
+    use support::worktrees::{gs, identity, ok};
+    let d = tagged(env, "d", &[("v1.0.0", "")]);
+    let b = tagged(
+        env,
+        "b",
+        &[(
+            "v1.0.0",
+            &repos(&[("libs/d", &d, ", revision = \"v1.0.0\"")]),
+        )],
+    );
+    let config = format!(
+        "{}{}",
+        extra,
+        repos(&[
+            ("imports/b", &b, ", revision = \"v1.0.0\""),
+            ("imports/d", &d, ", revision = \"v1.0.0\""),
+        ])
+    );
+    let root = env.create_bare_repo(
+        "root",
+        "main",
+        &[(".gitscale.toml", &config), (".gitignore", "imports/\n")],
+    );
+    let ws = env.repos_remote.join("ws");
+    support::run_git_pub(
+        &env.repos_remote,
+        &["clone", "-q", root.to_str().unwrap(), ws.to_str().unwrap()],
+    );
+    identity(&ws);
+    ok(&gs(&ws, &["sync"]));
+    support::run_git_pub(&ws, &["switch", "-q", "-c", "feat"]);
+    ok(&gs(&ws, &["topic", "join", "imports/b"]));
+    identity(&ws.join("imports/b"));
+    (ws, b, d)
+}
+
+/// A pull in a child that changes what it asks for places its siblings —
+/// fetching the tag their store lacks — and leaves the child where the pull
+/// put it.
+#[test]
+fn normal_045_a_git_pull_in_a_child_places_its_siblings_fetching_on_miss() {
+    use support::worktrees::{head, ok};
+    let env = TestEnv::new("hook_child_pull");
+    let (ws, b, d) = child_hook_workspace(&env, "");
+    let v11 = env.push_commit(&d, "main", "d.txt", "1.1");
+    support::run_git_pub(&d, &["tag", "v1.1.0", &v11]);
+    // A colleague raises d on b's topic branch.
+    support::run_git_pub(&b, &["branch", "feat", "v1.0.0"]);
+    let theirs = env.push_commit(
+        &b,
+        "feat",
+        ".gitscale.toml",
+        &support::resolution::repos(&[("libs/d", &d, ", revision = \"v1.1.0\"")]),
+    );
+    let child = ws.join("imports/b");
+    support::run_git_pub(&child, &["pull", "-q", "--no-rebase", "origin", "feat"]);
+
+    let out = child_hook(&child, "post-merge", "*");
+    ok(&out);
+    assert!(
+        out.stdout.contains("imports/b (left where git put it)"),
+        "{}",
+        out.stdout
+    );
+    assert_eq!(head(&ws.join("imports/d")), v11, "{}", out.stdout);
+    assert!(
+        support::git_stdout(&child, &["merge-base", "--is-ancestor", &theirs, "HEAD"]).is_empty()
+    );
+}
+
+/// Switched with plain git to its slot's topic branch, a child is made
+/// writable, as `git topic join` makes it; switched anywhere else it stays,
+/// with a warning that the next placement moves it back.
+#[test]
+fn normal_046_a_child_switched_to_its_topic_is_writable_and_elsewhere_warned() {
+    use support::worktrees::{branch, ok, writable};
+    let env = TestEnv::new("hook_child_switch");
+    let (ws, _, _) = child_hook_workspace(&env, "");
+    let d = ws.join("imports/d");
+    assert!(!writable(&d.join("VERSION")));
+    support::run_git_pub(&d, &["switch", "-q", "-c", "feat"]);
+    let out = child_hook(&d, "post-checkout", "*");
+    ok(&out);
+    assert_eq!(branch(&d).as_deref(), Some("feat"));
+    assert!(writable(&d.join("VERSION")));
+
+    support::run_git_pub(&d, &["switch", "-q", "-c", "elsewhere"]);
+    let out = child_hook(&d, "post-checkout", "*");
+    ok(&out);
+    assert_eq!(branch(&d).as_deref(), Some("elsewhere"));
+    assert!(
+        out.stderr.contains(
+            "imports/d is on elsewhere, not the topic feat; the next placement moves it back to \
+             its pin"
+        ),
+        "{}",
+        out.stderr
+    );
+}
+
+/// A child with no config of its own, and one the root declares with
+/// `recursive = false`, place the workspace like any other.
+#[test]
+fn edge_047_a_child_without_a_config_or_not_recursive_places_the_workspace() {
+    use support::worktrees::ok;
+    for (name, extra) in [("hook_child_plain", ""), ("hook_child_not_recursive", "")] {
+        let env = TestEnv::new(name);
+        let (ws, _, _) = child_hook_workspace(&env, extra);
+        if name == "hook_child_not_recursive" {
+            let config = std::fs::read_to_string(ws.join(".gitscale.toml"))
+                .unwrap()
+                .replace(
+                    "revision = \"v1.0.0\" }",
+                    "revision = \"v1.0.0\", recursive = false }",
+                );
+            std::fs::write(ws.join(".gitscale.toml"), config).unwrap();
+        }
+        let d = ws.join("imports/d");
+        assert!(!d.join(".gitscale.toml").exists());
+        let out = child_hook(&d, "post-checkout", "*");
+        ok(&out);
+        assert!(
+            out.stdout.contains("imports/d (left where git put it)"),
+            "{}",
+            out.stdout
+        );
+        assert!(out.stdout.contains("ok    imports/b"), "{}", out.stdout);
+    }
+}
+
+/// In the middle of a rebase, a merge or a bisect, the child is not where it
+/// will end: the hook does nothing.
+#[test]
+fn edge_048_nothing_happens_mid_rebase_or_at_a_bisect_step() {
+    let env = TestEnv::new("hook_child_mid_op");
+    let (ws, _, _) = child_hook_workspace(&env, "");
+    let d = ws.join("imports/d");
+    support::run_git_pub(&d, &["bisect", "start"]);
+    let out = child_hook(&d, "post-checkout", "*");
+    assert!(out.success, "{}", out.stderr);
+    assert_eq!(out.stdout, "", "{}", out.stdout);
+    support::run_git_pub(&d, &["bisect", "reset"]);
+
+    let merge_head = std::path::PathBuf::from(support::git_stdout(
+        &d,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "MERGE_HEAD",
+        ],
+    ));
+    std::fs::write(&merge_head, "0000000000000000000000000000000000000000\n").unwrap();
+    let out = child_hook(&d, "post-merge", "*");
+    assert!(out.success, "{}", out.stderr);
+    assert_eq!(out.stdout, "", "{}", out.stdout);
+}
+
+/// The allowlist is matched against the workspace root's remote — whose
+/// `post_sync` runs — not the child's.
+#[test]
+fn normal_049_the_allowlist_is_matched_on_the_roots_remote() {
+    let env = TestEnv::new("hook_child_allow");
+    let marker = env.repos_remote.join("post_sync_ran");
+    let (ws, _, _) = child_hook_workspace(
+        &env,
+        &format!("[hooks]\npost_sync = \"touch '{}'\"\n\n", marker.display()),
+    );
+    let root_remote = support::git_stdout(&ws, &["remote", "get-url", "origin"]);
+    let d = ws.join("imports/d");
+    let child_remote = support::git_stdout(&d, &["remote", "get-url", "origin"]);
+
+    // The fixture's own sync ran it, typed.
+    std::fs::remove_file(&marker).unwrap();
+    // The child's own remote allowed: not enough.
+    let out = child_hook(&d, "post-checkout", &child_remote);
+    assert!(!marker.exists(), "{}{}", out.stdout, out.stderr);
+    assert!(
+        out.stderr.contains("refusing to run the post_sync hook"),
+        "{}",
+        out.stderr
+    );
+
+    let out = child_hook(&d, "post-checkout", &root_remote);
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    assert!(marker.exists(), "{}{}", out.stdout, out.stderr);
+}
+
+/// End to end: the installed shim recognises a child by its common dir and
+/// hands it to `hook run --child`, so `git switch` to the topic in a child
+/// makes it writable.
+#[test]
+fn normal_050_the_installed_shim_fires_in_a_child() {
+    use support::worktrees::{branch, writable};
+    let env = TestEnv::new("hook_child_shim");
+    let (ws, _, _) = child_hook_workspace(&env, "");
+    let home = isolated_home(&env);
+    let out = cli_isolated(&home, &["hook", "install", "--global", "--allow", "*"]);
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+
+    let d = ws.join("imports/d");
+    let said = git_ok(&home, &d, &["switch", "-c", "feat"]);
+    assert_eq!(branch(&d).as_deref(), Some("feat"));
+    assert!(writable(&d.join("VERSION")), "{}", said);
+    assert!(said.contains("left where git put it"), "{}", said);
 }

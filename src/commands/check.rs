@@ -1,4 +1,4 @@
-//! `gitscale check`: the merge gate. It fails while any checkout resolves
+//! `git scale check`: the merge gate. It fails while any checkout resolves
 //! from a topic branch rather than a revision written in a config — what a
 //! merge of this repository would ship is then not what its pipeline tested.
 //! A merge request into a branch the root does not pin is not gated: that
@@ -69,8 +69,8 @@ pub fn run(root: Option<&Path>, verbose: bool, no_cache: bool, out: &mut dyn Wri
             "{dir} was taken from branch {branch}, not from {pinned}.\n  \
              {what} tested {dir} at {branch} ({sha}), so merging now would ship a pin that was \
              not tested.\n  \
-             - {dir}'s change not merged yet: merge it first, then run gitscale upgrade here and \
-             push.\n  \
+             - {dir}'s change not merged yet: merge it first, then run git upgrade --commit here \
+             and push.\n  \
              - already merged and pinned: delete branch {branch} in {url}, then rerun {rerun}.",
             dir = slot.directory,
             branch = topic.branch,
@@ -81,7 +81,7 @@ pub fn run(root: Option<&Path>, verbose: bool, no_cache: bool, out: &mut dyn Wri
             rerun = if crate::git::is_ci() {
                 "this pipeline"
             } else {
-                "gitscale check"
+                "git scale check"
             },
         ));
     }

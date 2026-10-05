@@ -1,4 +1,4 @@
-# 2.2 Status
+# 2.2 The workspace: `git scale ls` and `git explain`
 
 - [Reading the table](#reading-the-table)
 - [Columns](#columns)
@@ -7,24 +7,25 @@
 - [Topics](#topics)
 - [Warnings](#warnings)
 - [Icons and colour](#icons-and-colour)
-- [Why a checkout has its revision: --why](#why-a-checkout-has-its-revision---why)
+- [Why a checkout has its revision: `git explain`](#why-a-checkout-has-its-revision-git-explain)
 - [Fetching first](#fetching-first)
 - [JSON output](#json-output)
-- [What status does not cover](#what-status-does-not-cover)
+- [What `ls` does not cover](#what-ls-does-not-cover)
 
-`gitscale status` is the one command that answers "what state is this workspace
-in" for every checkout at once — the root's entries and the
-[implicit dependencies](recursive-dependencies.md#implicit-dependencies) its
-repositories bring in. It is read-only: it never fetches, clones or modifies
-anything unless you pass `--fetch`, and even then it changes no checkout: it
-updates the root's [stores](stores.md), and for artefacts the record of what
-the registry has and the small config layer resolution reads.
+`git scale ls` — or `git scale list` — is the one command that answers "what
+state is this workspace in" for every checkout at once — the root's entries and
+the [implicit dependencies](recursive-dependencies.md#implicit-dependencies)
+its repositories bring in. It is read-only. It resolves from what is on this
+machine — in CI, what the job's placement fetched — unless `--fetch` asks the
+remotes first; even then it changes no checkout: it updates the root's [stores](stores.md), and for
+artefacts the record of what the registry has and the small config layer
+resolution reads.
 
 ```
-gitscale status                 # table
-gitscale status --fetch         # fetch remote state first, then report
-gitscale status --format json   # machine-readable
-gitscale status --why           # how each shared checkout got its revision
+git scale ls                    # table
+git scale ls --fetch            # fetch remote state first, then report
+git scale ls --format json      # machine-readable
+git explain                     # how each shared checkout got its revision
 ```
 
 ## Reading the table
@@ -71,36 +72,37 @@ order.
 | Flag | Meaning |
 |---|---|
 | `ok` | Clean, and on the expected revision |
-| `missed` | No checkout yet: the directory does not exist, or holds no repository — run [`pull`](workflow.md#pull) |
+| `missed` | No checkout yet: the directory does not exist, or holds no repository — the next [placement](workflow.md#placement) checks it out |
 | `symlink` | Resolved as a symlink to a root-level checkout (a deduped [recursive dependency](recursive-dependencies.md)) |
-| `unlinked` | A dependency inside this repo that should be a symlink is a real clone instead. [`sync`](workflow.md#sync) relinks it |
-| `unlinked, modified` | …and that clone has uncommitted changes or unpushed commits, so relinking would lose work. `sync --force` overrides |
+| `unlinked` | A dependency inside this repo that should be a symlink is a real clone instead — see [unlinked checkouts](recursive-dependencies.md#unlinked-checkouts). The next [placement](workflow.md#placement) relinks it |
+| `unlinked, modified` | …and that clone has uncommitted changes or unpushed commits, so relinking would lose work. `git scale sync --force` overrides |
 | `unlinked, dirty` | …and the repo itself has uncommitted changes |
-| `untracked-links` | The dependency links GitScale planted here are untracked files, because the repository does not ignore where they live. Not `dirty`: they are not anyone's work |
+| `untracked-links` | Git sees the dependency links GitScale planted here as untracked files, though placement keeps them in `info/exclude` — see below. Not `dirty`: they are not anyone's work |
 | `dirty` | The working tree has uncommitted changes (`git status --porcelain` is non-empty, untracked files included — except the links GitScale planted, which are `untracked-links`) |
-| `foreign` | Not a worktree of the root's store: a clone made by hand or by an older GitScale. `pull` leaves it alone — see [stores](stores.md#checkouts-gitscale-did-not-make) |
+| `foreign` | Not a worktree of the root's store: a clone made by hand or by an older GitScale. Placement leaves it alone — see [stores](stores.md#checkouts-gitscale-did-not-make) |
 | `stale` | A CI checkout whose commit differs from upstream. A depth-1 checkout cannot produce an exact behind count, so this stands in for it |
 | `+N` | On a topic branch, N commits ahead of its upstream |
 | `-N` | On a topic branch, N commits behind its upstream |
 | `ref-mismatch` | The checkout is not where resolution puts it: detached at another commit, or not on the topic branch. For an artefact: installed for another revision than the config names now, or not at the commit a SHA revision pins |
 | `behind` | Artefact only: the revision has moved to another commit since this was installed, as the last fetch saw |
 | `missing` | Artefact only: that commit has no image in the registry (yet) |
-| `changed` | Artefact only: the installed commit's image was re-published with different files; [`pull`](workflow.md#pull) installs it |
+| `changed` | Artefact only: the installed commit's image was re-published with different files; the next [placement](workflow.md#placement) installs it |
 | `orphan` | A leftover GitScale symlink whose dependency is no longer declared; its target still resolves |
 | `orphan, broken` | …and its target no longer exists |
 | `override` | An override holds the checkout below a request it beat; `RESOLUTION` says which |
 | `unresolved` | Resolution could not settle this checkout; `RESOLUTION` says why |
 
 The symlinks GitScale plants for a repository's own dependencies are not its
-owner's work, so they never make it `dirty`. Where the repository does not
-ignore the directory they live in, git sees them as untracked files all the
-same: the row says `untracked-links`, and a line under the table names what to
-add to that repository's `.gitignore`:
+owner's work, so they never make it `dirty`, and placement keeps them out of
+git's sight in the repository's `info/exclude`. Should git see them anyway —
+that block removed, or a `.gitignore` of the repository's own taking a path
+back in — the row says `untracked-links`, and a line under the table says how
+to put them back:
 
 ```
     REPO        PATH   ARTEFACT   REF       EXPECTED   STATUS
 !   imports/b   -      -          1498d55   v2.0.0     untracked-links
-hint: imports/b: the dependency links gitscale planted are untracked files there; add /libs/ to its .gitignore
+hint: imports/b: git sees the dependency links GitScale planted there (libs/d); git scale sync puts them back in its info/exclude
 ```
 
 See [ignoring the checkout directory](dependencies.md#ignoring-the-checkout-directory).
@@ -113,7 +115,7 @@ wrong commit* is.
 An artefact entry has no working tree to be dirty and no history to count, so
 its row only ever carries `ok`, `missed`, `symlink`, `unlinked`, the artefact
 flags, or resolution's `override` and `unresolved`. They compare what is installed with what the last
-[`fetch`](workflow.md#fetch) — or `status --fetch` — saw; see
+`git scale fetch` — or `git scale ls --fetch` — saw; see
 [artefacts → status](artefacts.md#status).
 
 ## The RESOLUTION column
@@ -126,9 +128,9 @@ only — with a count when more than one repository asked:
     REPO         PATH   ARTEFACT   REF       EXPECTED   STATUS       RESOLUTION
 ✔   imports/d    -      -          3f2a9c1   v1.5.0     ok           raised from v1.2.0 by imports/c, 3 requests
 ↧   imports/f    -      -          9e01c44   v1.4.0     override     held at v1.4.0, imports/c wants v1.6.0, 2 requests
-?   imports/h    -      -          —         main       unresolved   not fetched yet: run status --fetch
+?   imports/h    -      -          —         main       unresolved   not fetched yet: run git scale ls --fetch
 ✔   imports/sh   -      -          77c0a1d   main       ok           implicit via imports/d
-hint: gitscale status --why <dir> lists every request behind a revision
+hint: git explain <dir> lists every request behind a revision
 ```
 
 | Text | Meaning |
@@ -140,14 +142,14 @@ hint: gitscale status --why <dir> lists every request behind a revision
 | `behind imports/c's v2026.09.30` | Won by position, but its commit is behind what that request asked for. Only where history is on local disk; the icon is `↧` when the row is otherwise `ok` |
 | `implicit via imports/b` | Not in the root config; brought in by the repository named |
 | `2 majors` | This repository has a checkout per major |
-| `3 requests` | That many repositories asked for it. `--why` lists them |
-| `not fetched yet: run status --fetch` | Resolution could not settle this checkout from what is on this machine (`unresolved` in STATUS) |
-| `its dependencies are not fetched yet: run status --fetch` | Its own revision is known, but its `.gitscale.toml` at that commit is not on this machine (`unresolved` in STATUS) |
+| `3 requests` | That many repositories asked for it. `git explain` lists them |
+| `not fetched yet: run git scale ls --fetch` | Resolution could not settle this checkout from what is on this machine (`unresolved` in STATUS) |
+| `its dependencies are not fetched yet: run git scale ls --fetch` | Its own revision is known, but its `.gitscale.toml` at that commit is not on this machine (`unresolved` in STATUS) |
 | `see the error above` | Resolution failed as a whole; the error is printed on stderr, as `error: …` |
 | `pinned by imports/b` | Held at its pin on a topic, because that repository pins the topic's branch — see [topics](topics.md#inside-a-topic) |
 
 When any row counts more than one request, a `hint:` line under the table
-points at [`--why`](#why-a-checkout-has-its-revision---why), which lists them
+points at [`git explain`](#why-a-checkout-has-its-revision-git-explain), which lists them
 all. A checkout with nothing on disk yet is only `missed`.
 
 ## Topics
@@ -165,12 +167,12 @@ topic feat/price-cache · next to merge: imports/d
 
 | Text | Meaning |
 |---|---|
-| `topic` | On the topic branch in its store: developed here or in another root worktree |
-| `topic, from remote` | Its remote has the topic branch; the next `pull` puts it on a local branch tracking that |
+| `topic` | On the topic branch in its store: joined here or in another root worktree |
+| `topic, from remote` | Its remote has the topic branch; the next placement puts it on a local branch tracking that |
 | `sources` / `image 3f2a9c1` | A `replace` artefact on the topic: checked out from source, or the image of the branch tip |
 | `waits on imports/d` | Asks, directly or further down, for a topic slot that is not promoted yet |
 | `behind v2026.09.30 wanted by imports/c: rebase it` | The topic branch lacks a release another repository now asks for |
-| `no change yet`, `not tagged yet`, `promoted → <tag>`, … | Where its change stands — see [promotion](topics.md#promotion-gitscale-upgrade) |
+| `no change yet`, `not tagged yet`, `promoted → <tag>`, … | Where its change stands — see [promotion](topics.md#promotion-git-upgrade) |
 
 The promotion states and `behind` need history, so they are worked out from
 the root's stores, and never in CI.
@@ -188,6 +190,10 @@ warning: the root repository has no fetch refspec, so origin/* is never updated
 ```
 
 ## Icons and colour
+
+The first column always holds an icon. Colour follows the [rule every command
+uses](cli.md#colour): on a terminal only, so piped output and CI logs get none;
+`--color always` forces it, `--color never` or `NO_COLOR` turns it off.
 
 The first matching rule wins, so a row with several flags takes the icon of the
 most serious one.
@@ -210,10 +216,10 @@ most serious one.
 The `REF` cell is also painted yellow on a `ref-mismatch`, so the wrong ref is
 visible without reading the last column.
 
-## Why a checkout has its revision: --why
+## Why a checkout has its revision: `git explain`
 
 ```
-$ gitscale status --why imports/d
+$ git explain imports/d
 imports/d  git@github.com:org/d.git  major 1  source
   selected  v1.5.0 (3f2a9c1)  tag, highest semver
   requests
@@ -228,19 +234,21 @@ semver`, `highest calendar version`, `asked for by a repository above the
 other`, `same commit`, `override`, `only request`. `override`, `no such revision`,
 `overruled by` and `selected` mark the requests they apply to.
 
-Name directories to see those; `--why` alone shows every checkout more than
-one repository asks for.
+Name directories to see those — paths from the current directory, `.` inside
+a checkout; see [directory arguments](cli.md#directory-arguments). `git
+explain` alone shows every checkout more than one repository asks for. Like
+`ls`, it resolves from what is on this machine unless `--fetch` is given.
 
 ## Fetching first
 
-Without `--fetch`, status reports what is already on disk: ahead/behind counts
+Without `--fetch`, `ls` reports what is already on disk: ahead/behind counts
 come from the remote-tracking refs as they stand, which may be old.
 
 `--fetch` updates them first: one fetch per [store](stores.md), however many
 checkouts and root worktrees use it. Artefact entries resolve their revision with `ls-remote` and ask
 the registry whether that commit has an image, and record both. A fetch that
 fails is reported on stderr as
-`fetch <directory>: <reason> (showing the last fetched state)`, and status still
+`fetch <directory>: <reason> (showing the last fetched state)`, and `ls` still
 reports, on whatever it has.
 
 Add `-v` to see which repository is being fetched.
@@ -338,13 +346,14 @@ last:
 { "warnings": ["the root repository has no fetch refspec, …"] }
 ```
 
-## What status does not cover
+## What `ls` does not cover
 
 - **The workspace repository itself** is not a row in the table. Its own state
-  is ordinary `git status` territory.
-- **The CI cache** has its own command — [`gitscale cache status`](stores.md#cache-status).
+  is ordinary `git status` territory; `git scale status` runs it in the root
+  and every checkout on the topic.
+- **The CI cache** has its own command — [`git scale cache status`](stores.md#cache-status).
 - **Nested repositories GitScale does not manage** — a clone somebody made by
-  hand inside a checkout — are invisible to status.
+  hand inside a checkout — are invisible to `ls`.
 
 ---
 

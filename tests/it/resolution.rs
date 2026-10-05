@@ -62,7 +62,7 @@ fn normal_001_a_root_entry_without_a_revision_takes_a_dependencys() {
         bare_b.display(),
     ));
 
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "stderr: {}", out.stderr);
 
     // B should be checked out on "develop"
@@ -109,7 +109,7 @@ fn normal_002_the_root_revision_wins() {
         bare_b.display(),
     ));
 
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(
         out.success,
         "root revision wins, no error: stderr: {}",
@@ -161,7 +161,7 @@ fn normal_003_a_tag_a_dependency_asks_for_lands_detached_and_readonly() {
         url_b,
     ));
 
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "stderr: {}", out.stderr);
 
     let dest = env.playground.join("repoB");
@@ -172,10 +172,10 @@ fn normal_003_a_tag_a_dependency_asks_for_lands_detached_and_readonly() {
     assert_eq!(mode & 0o222, 0, "b.txt should still be readonly");
 }
 
-/// A revision a child pins for a root entry that has none is applied by pull
-/// too, as a fresh clone would — including one the pull itself brings in.
+/// A revision a child pins for a root entry that has none is applied by sync
+/// too, as a fresh clone would — including one the sync itself brings in.
 #[test]
-fn normal_004_pull_moves_to_a_revision_a_dependency_starts_asking_for() {
+fn normal_004_sync_moves_to_a_revision_a_dependency_starts_asking_for() {
     let env = TestEnv::new("pull_dep_asks_later");
     let bare_b = env.create_bare_repo("repoB", "main", &[("b.txt", "B main")]);
     bare_git_stdout(&bare_b, &["branch", "develop", "main"]);
@@ -189,14 +189,14 @@ fn normal_004_pull_moves_to_a_revision_a_dependency_starts_asking_for() {
         bare_a.display(),
         bare_b.display(),
     ));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     let dest_b = env.playground.join("repoB");
     assert_eq!(
         std::fs::read_to_string(dest_b.join("b.txt")).unwrap(),
         "B main"
     );
 
-    // repoA starts pinning B at develop; only pulling repoA reveals that.
+    // repoA starts pinning B at develop; only syncing repoA reveals that.
     commit_to_bare(
         &bare_a,
         "main",
@@ -206,7 +206,7 @@ fn normal_004_pull_moves_to_a_revision_a_dependency_starts_asking_for() {
             bare_b.display()
         ),
     );
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(git_stdout(&dest_b, &["rev-parse", "HEAD"]), develop_tip);
     assert!(env.playground.join("repoA/libs/b").is_symlink());
@@ -246,7 +246,7 @@ fn normal_005_an_undeclared_dependency_is_checked_out_implicitly_where_allowed()
         bare_a.display(),
     ));
 
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success, "should fail when child dep is not allowed");
     assert!(
         out.stderr.contains("not on the allowlist"),
@@ -268,7 +268,7 @@ allow = ["{}/*"]
         env.repos_remote.display(),
         bare_a.display(),
     ));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "stderr: {}", out.stderr);
     let implicit = env.playground.join("imports/b");
     assert_eq!(
@@ -288,7 +288,7 @@ allow = ["{}/*"]
         std::path::PathBuf::from("../../imports/b")
     );
 
-    let status = strip_ansi(&env.run(&["status"]).stdout);
+    let status = strip_ansi(&env.run(&["ls"]).stdout);
     let row = status
         .lines()
         .find(|l| l.contains("imports/b"))
@@ -328,7 +328,7 @@ fn normal_006_an_artefact_config_layer_declares_dependencies() {
         bare_dep.display(),
     ));
 
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "stderr: {}", out.stderr);
 
     // Symlink inside artefact dir
@@ -338,7 +338,7 @@ fn normal_006_an_artefact_config_layer_declares_dependencies() {
 }
 
 #[test]
-fn normal_007_a_dependency_raises_the_root_and_status_says_why() {
+fn normal_007_a_dependency_raises_the_root_and_ls_and_explain_say_why() {
     let env = TestEnv::new("res_raise");
     let (b, d) = diamond(&env);
     env.write_config(&repos(&[
@@ -346,7 +346,7 @@ fn normal_007_a_dependency_raises_the_root_and_status_says_why() {
         ("imports/d", &d, ", revision = \"v1.2.0\""),
     ]));
 
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v1.5.0"));
     let link = env.playground.join("imports/b/libs/d");
@@ -362,19 +362,19 @@ fn normal_007_a_dependency_raises_the_root_and_status_says_why() {
         "{}",
         row
     );
-    let table = strip_ansi(&env.run(&["status"]).stdout);
+    let table = strip_ansi(&env.run(&["ls"]).stdout);
     assert!(
         table.lines().next().unwrap().ends_with("RESOLUTION"),
         "{}",
         table
     );
     assert!(
-        table.contains("hint: gitscale status --why <dir> lists every request"),
+        table.contains("hint: git explain <dir> lists every request"),
         "{}",
         table
     );
 
-    let why = env.run(&["status", "--why", "imports/d"]);
+    let why = env.run(&["explain", "imports/d"]);
     assert!(why.success, "{}", why.stderr);
     assert!(why.stdout.contains("selected  v1.5.0"), "{}", why.stdout);
     assert!(why.stdout.contains("highest semver"), "{}", why.stdout);
@@ -384,7 +384,7 @@ fn normal_007_a_dependency_raises_the_root_and_status_says_why() {
         why.stdout
     );
 
-    let json = env.run(&["status", "--format", "json"]);
+    let json = env.run(&["ls", "--format", "json"]);
     let rows: serde_json::Value = serde_json::from_str(&json.stdout).unwrap();
     let row = rows
         .as_array()
@@ -409,7 +409,7 @@ fn normal_008_an_override_at_the_root_holds_a_dependency_down() {
         ("imports/d", &d, ", revision = \"v1.2.0\", override = true"),
     ]));
 
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v1.2.0"));
     let row = status_row(&env, "imports/d");
     assert!(row.starts_with('↧'), "{}", row);
@@ -450,7 +450,7 @@ fn normal_009_two_majors_get_a_checkout_each_unless_one_is_a_singleton() {
         ])
     );
     env.write_config(&config);
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v1.5.0"));
     assert_eq!(head(&env, "imports/d_v2"), tag_commit(&d, "v2.0.0"));
@@ -484,7 +484,7 @@ fn normal_009_two_majors_get_a_checkout_each_unless_one_is_a_singleton() {
         ("imports/c", &c, ", revision = \"v1.0.0\""),
         ("imports/d", &d, ", singleton = true"),
     ]));
-    let out = fresh.run(&["pull"]);
+    let out = fresh.run(&["sync"]);
     assert!(!out.success);
     assert!(out.stderr.contains("singleton"), "{}", out.stderr);
 }
@@ -523,11 +523,11 @@ fn normal_010_calendar_versions_order_by_date_then_modifier() {
         ("imports/c", &c, ", revision = \"v1.0.0\""),
         ("imports/d", &d, ", revision = \"v2026.09.30\""),
     ]));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v2026.09.30-11"));
     // The reason is the calendar order, not position: b and c are siblings.
-    let why = env.run(&["status", "--why", "imports/d"]);
+    let why = env.run(&["explain", "imports/d"]);
     assert!(why.success, "{}", why.stderr);
     assert!(
         why.stdout.contains("highest calendar version"),
@@ -564,7 +564,7 @@ fn normal_011_an_artefact_brings_its_dependencies_in_its_config_layer() {
             ", revision = \"main\", artefact = \"replace\""
         )])
     ));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/dep"), tag_commit(&dep, "v1.0.0"));
     let link = env.playground.join("meta/app/vendor/dep");
@@ -579,7 +579,7 @@ fn normal_012_in_ci_resolution_reads_each_config_from_its_commit() {
     for cache in [true, false] {
         let env = TestEnv::new(&format!("res_ci_{}", cache));
         let (b, d) = implicit_d(&env);
-        let mut args = vec!["pull"];
+        let mut args = vec!["sync"];
         if !cache {
             args.push("--no-cache");
         }
@@ -596,13 +596,13 @@ fn normal_012_in_ci_resolution_reads_each_config_from_its_commit() {
         // A tracked change left by the last job does not stop the move.
         let _ = b;
         env.write_config(&repos(&[("imports/d", &d, ", revision = \"v1.2.0\"")]));
-        let out = env.run_with_env(&[("CI", "true")], &["pull"]);
+        let out = env.run_with_env(&[("CI", "true")], &["sync"]);
         assert!(out.success, "{}{}", out.stdout, out.stderr);
         let dest = env.playground.join("imports/d");
         set_writable(&dest.join("README.md"));
         std::fs::write(dest.join("README.md"), "left by the last job").unwrap();
         env.write_config(&repos(&[("imports/d", &d, ", revision = \"v1.5.0\"")]));
-        let out = env.run_with_env(&[("CI", "true")], &["pull"]);
+        let out = env.run_with_env(&[("CI", "true")], &["sync"]);
         assert!(out.success, "cache {}: {}{}", cache, out.stdout, out.stderr);
         assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v1.5.0"));
     }
@@ -657,7 +657,7 @@ fn normal_013_an_override_in_a_dependency_reaches_only_what_it_is_above() {
 
     // e is below b: b's override wins over it. c asks for less: it agrees.
     env.write_config(&config(&c_with("v1.3.1")));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v1.5.0"));
     let row = status_row(&env, "imports/d");
@@ -671,22 +671,22 @@ fn normal_013_an_override_in_a_dependency_reaches_only_what_it_is_above() {
     // c asks for more, and b is not above c: no order without the root.
     std::fs::remove_dir_all(env.playground.join("imports")).unwrap();
     env.write_config(&config(&c_with("v1.6.0")));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success);
     assert!(out.stderr.contains("override conflict"), "{}", out.stderr);
 }
 
 #[test]
-fn normal_014_why_shows_the_shared_checkouts_or_the_ones_named() {
+fn normal_014_explain_shows_the_shared_checkouts_or_the_ones_named() {
     let env = TestEnv::new("res_why");
     let (b, d) = diamond(&env);
     env.write_config(&repos(&[
         ("imports/b", &b, ", revision = \"v1.0.0\""),
         ("imports/d", &d, ", revision = \"v1.2.0\""),
     ]));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
 
-    let out = env.run(&["status", "--why"]);
+    let out = env.run(&["explain"]);
     assert!(out.success, "{}", out.stderr);
     assert!(out.stdout.starts_with("imports/d  "), "{}", out.stdout);
     assert!(
@@ -695,14 +695,15 @@ fn normal_014_why_shows_the_shared_checkouts_or_the_ones_named() {
         out.stdout
     );
 
-    let out = env.run(&["status", "--why", "imports/b"]);
+    let out = env.run(&["explain", "imports/b"]);
     assert!(out.stdout.starts_with("imports/b  "), "{}", out.stdout);
     assert!(out.stdout.contains("only request"), "{}", out.stdout);
 
-    let out = env.run(&["status", "--why", "nowhere"]);
+    let out = env.run(&["explain", "nowhere"]);
     assert!(!out.success);
     assert!(
-        out.stderr.contains("no checkout at nowhere"),
+        out.stderr
+            .contains("nowhere is not a checkout of this workspace"),
         "{}",
         out.stderr
     );
@@ -723,7 +724,7 @@ fn normal_015_placement_follows_the_hoist_dir_majors_kind_and_names() {
             ("imports/c", &c, ", revision = \"v1.0.0\""),
         ])
     ));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "vendor/d"), tag_commit(&d, "v0.3.0"));
     assert_eq!(head(&env, "vendor/d_v0.4"), tag_commit(&d, "v0.4.0"));
@@ -741,7 +742,7 @@ fn normal_015_placement_follows_the_hoist_dir_majors_kind_and_names() {
             ("imports/c", &c, ", revision = \"v1.0.0\""),
         ])
     ));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert!(env.playground.join("imports/d/VERSION").is_file());
 
@@ -759,7 +760,7 @@ fn normal_015_placement_follows_the_hoist_dir_majors_kind_and_names() {
             ("imports/c", &c, ", revision = \"v1.0.0\""),
         ])
     ));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success);
     assert!(
         out.stderr.contains("two repositories want imports/shared"),
@@ -786,7 +787,7 @@ fn normal_028_an_override_at_the_root_settles_a_singletons_two_majors() {
             ", revision = \"v1.5.0\", override = true, singleton = true",
         ),
     ]));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v1.5.0"));
     assert!(!env.playground.join("imports/d_v2").exists());
@@ -817,7 +818,7 @@ fn normal_029_the_root_declares_each_major_under_its_own_name() {
         ("imports/new", &d, ", revision = \"v2.0.0\""),
         ("imports/old", &d, ", revision = \"v1.5.0\""),
     ]));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/old"), tag_commit(&d, "v1.5.0"));
     assert_eq!(head(&env, "imports/new"), tag_commit(&d, "v2.0.0"));
@@ -845,7 +846,7 @@ fn normal_030_a_root_entry_without_a_revision_takes_the_lowest_major() {
         ("imports/c", &c, ", revision = \"v1.0.0\""),
         ("imports/d", &d, ""),
     ]));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v1.5.0"));
     assert_eq!(head(&env, "imports/d_v2"), tag_commit(&d, "v2.0.0"));
@@ -871,10 +872,10 @@ fn normal_031_two_streams_of_one_monorepo_are_ordered_by_position() {
         ("imports/b", &b, ", revision = \"v1.0.0\""),
         ("imports/mono", &mono, ", revision = \"api-v1.4.0\""),
     ]));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/mono"), tag_commit(&mono, "api-v1.4.0"));
-    let why = env.run(&["status", "--why", "imports/mono"]);
+    let why = env.run(&["explain", "imports/mono"]);
     assert!(
         why.stdout.contains("selected  api-v1.4.0")
             && why
@@ -895,7 +896,7 @@ fn normal_031_two_streams_of_one_monorepo_are_ordered_by_position() {
         ("imports/c", &c, ", revision = \"v1.0.0\""),
         ("imports/mono", &mono, ""),
     ]));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(out.stderr.contains("cannot order"), "{}", out.stderr);
 }
@@ -917,7 +918,7 @@ fn normal_032_semver_and_calendar_versions_of_one_repository_get_a_checkout_each
             ("imports/c", &c, ", revision = \"v1.0.0\""),
         ])
     ));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v2026.10.01"));
     assert_eq!(head(&env, "imports/d_v1"), tag_commit(&d, "v1.5.0"));
@@ -940,7 +941,7 @@ fn normal_033_a_pre_release_beats_the_version_before_it_and_loses_to_its_release
         ("imports/b", &b, ", revision = \"v1.0.0\""),
         ("imports/d", &d, ", revision = \"v1.4.0\""),
     ]));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v1.5.0-rc.1"));
 
@@ -949,10 +950,10 @@ fn normal_033_a_pre_release_beats_the_version_before_it_and_loses_to_its_release
         ("imports/c", &c, ", revision = \"v1.0.0\""),
         ("imports/d", &d, ", revision = \"v1.4.0\""),
     ]));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v1.5.0"));
-    let why = env.run(&["status", "--why", "imports/d"]);
+    let why = env.run(&["explain", "imports/d"]);
     assert!(why.stdout.contains("highest semver"), "{}", why.stdout);
 }
 
@@ -986,7 +987,7 @@ fn normal_034_the_roots_origin_allows_implicit_dependencies_from_its_owner() {
         ),
     ];
 
-    let out = env.run_with_env(&borrowed(&vars), &["pull"]);
+    let out = env.run_with_env(&borrowed(&vars), &["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(
         out.stderr.contains("not on the allowlist") && out.stderr.contains("example.com/org/*"),
@@ -995,7 +996,7 @@ fn normal_034_the_roots_origin_allows_implicit_dependencies_from_its_owner() {
     );
 
     env.set_playground_origin("https://example.com/org/root.git");
-    let out = env.run_with_env(&borrowed(&vars), &["pull"]);
+    let out = env.run_with_env(&borrowed(&vars), &["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v1.5.0"));
 }
@@ -1021,7 +1022,7 @@ fn normal_035_ssh_and_https_spellings_of_one_repository_share_a_checkout() {
         b.display()
     ));
     let vars = rewritten_to_local(&env, &["https://example.com/org/", "git@example.com:org/"]);
-    let out = env.run_with_env(&borrowed(&vars), &["pull"]);
+    let out = env.run_with_env(&borrowed(&vars), &["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v1.5.0"));
     assert_eq!(
@@ -1036,7 +1037,7 @@ fn normal_035_ssh_and_https_spellings_of_one_repository_share_a_checkout() {
     checkouts.sort();
     assert_eq!(checkouts, vec!["b", "d"]);
 
-    let out = env.run_with_env(&borrowed(&vars), &["status"]);
+    let out = env.run_with_env(&borrowed(&vars), &["ls"]);
     let table = strip_ansi(&out.stdout);
     let row = table.lines().find(|l| l.contains("imports/d")).unwrap();
     assert!(row.contains("raised from v1.2.0 by imports/b"), "{}", table);
@@ -1068,7 +1069,7 @@ fn normal_036_an_implicit_checkout_is_an_overlay_when_any_request_asks_for_one()
             ("imports/c", &c, ", revision = \"v1.0.0\""),
         ])
     ));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     let dest = env.playground.join("imports/art");
     assert!(dest.join(".git").is_file(), "a source checkout");
@@ -1079,15 +1080,15 @@ fn normal_036_an_implicit_checkout_is_an_overlay_when_any_request_asks_for_one()
     assert!(!env.playground.join("imports/art_artefact").exists());
 }
 
-/// `status --why` with nothing named and no checkout more than one
+/// `git explain` with nothing named and no checkout more than one
 /// repository asks for says so, rather than printing nothing.
 #[test]
-fn normal_056_why_says_when_no_checkout_is_shared() {
+fn normal_056_explain_says_when_no_checkout_is_shared() {
     let env = TestEnv::new("resolution_why_unshared");
     let d = tagged(&env, "d", &[("v1.0.0", "")]);
     env.write_config(&repos(&[("imports/d", &d, ", revision = \"v1.0.0\"")]));
-    assert!(env.run(&["pull"]).success);
-    let out = env.run(&["status", "--why"]);
+    assert!(env.run(&["sync"]).success);
+    let out = env.run(&["explain"]);
     assert!(out.success, "{}", out.stderr);
     assert!(
         out.stdout
@@ -1131,7 +1132,7 @@ fn edge_016_recursive_false_leaves_a_dependencys_config_unread() {
         bare_a.display(),
     ));
 
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(
         out.success,
         "should succeed because recursion is disabled: stderr: {}",
@@ -1176,7 +1177,7 @@ fn edge_017_a_revision_a_dependency_asks_for_leaves_the_workspace_repo_alone() {
         bare_art.display(),
     ));
 
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "stderr: {}", out.stderr);
     assert!(env.playground.join("meta/art/dist/art.bin").is_file());
     assert_eq!(
@@ -1204,7 +1205,7 @@ fn edge_018_an_override_from_above_works_around_a_missing_revision() {
         ("imports/b", &b, ", revision = \"v1.0.0\""),
         ("imports/d", &d, ", revision = \"v1.2.0\""),
     ]));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success);
     assert!(
         out.stderr
@@ -1218,7 +1219,7 @@ fn edge_018_an_override_from_above_works_around_a_missing_revision() {
         ("imports/b", &b, ", revision = \"v1.0.0\""),
         ("imports/d", &d, ", revision = \"v1.2.0\", override = true"),
     ]));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v1.2.0"));
     let row = status_row(&env, "imports/d");
@@ -1228,8 +1229,9 @@ fn edge_018_an_override_from_above_works_around_a_missing_revision() {
         row
     );
 
-    // --why marks the override, the winner and the broken pin it overruled.
-    let why = env.run(&["status", "--why", "imports/d"]);
+    // `git explain` marks the override, the winner and the broken pin it
+    // overruled.
+    let why = env.run(&["explain", "imports/d"]);
     assert!(why.success, "{}", why.stderr);
     let line = |needle: &str| {
         why.stdout
@@ -1251,7 +1253,7 @@ fn edge_018_an_override_from_above_works_around_a_missing_revision() {
         why.stdout
     );
     // So does the JSON output.
-    let json = env.run(&["status", "--format", "json"]);
+    let json = env.run(&["ls", "--format", "json"]);
     let rows: serde_json::Value = serde_json::from_str(&json.stdout).unwrap();
     let requests = rows
         .as_array()
@@ -1270,11 +1272,11 @@ fn edge_018_an_override_from_above_works_around_a_missing_revision() {
     assert_eq!(from_b["overruled_by"], "root", "{:#}", from_b);
 }
 
-/// Offline, status reads what is on this machine: a repository nothing has
-/// fetched yet is unresolved until `status --fetch`. In CI, where checkouts
-/// hold no history, that is the light stores resolution keeps.
+/// Offline, `ls` reads what is on this machine: a repository nothing has
+/// fetched yet is unresolved until `ls --fetch`. In CI, where checkouts hold
+/// no history, that is the light stores resolution keeps.
 #[test]
-fn edge_019_status_is_unresolved_until_fetched() {
+fn edge_019_ls_is_unresolved_until_fetched() {
     let env = TestEnv::new("res_offline");
     env.init_playground_git();
     let (b, d) = diamond(&env);
@@ -1287,20 +1289,20 @@ fn edge_019_status_is_unresolved_until_fetched() {
     assert!(row.ends_with("missed"), "{}", row);
 
     let ci = [("CI", "true")];
-    assert!(env.run_with_env(&ci, &["pull", "--no-cache"]).success);
+    assert!(env.run_with_env(&ci, &["sync", "--no-cache"]).success);
     // The workspace's own stores go; the checkouts stay.
     std::fs::remove_dir_all(env.playground.join(".git/gitscale/resolve")).unwrap();
-    let out = env.run_with_env(&ci, &["status"]);
+    let out = env.run_with_env(&ci, &["ls"]);
     let table = strip_ansi(&out.stdout);
     let row = table.lines().find(|l| l.contains("imports/d")).unwrap();
     assert!(row.contains("unresolved"), "{}", table);
     assert!(
-        row.contains("not fetched yet: run status --fetch"),
+        row.contains("not fetched yet: run git scale ls --fetch"),
         "{}",
         table
     );
 
-    let out = env.run_with_env(&ci, &["status", "--fetch", "--no-cache"]);
+    let out = env.run_with_env(&ci, &["ls", "--fetch", "--no-cache"]);
     let table = strip_ansi(&out.stdout);
     let row = table.lines().find(|l| l.contains("imports/d")).unwrap();
     assert!(!row.contains("unresolved"), "{}", table);
@@ -1317,7 +1319,7 @@ fn edge_020_an_uncommitted_config_edit_takes_effect() {
         ("imports/b", &b, ", revision = \"v1.0.0\""),
         ("imports/d", &d, ", revision = \"v1.2.0\""),
     ]));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     assert!(status_row(&env, "imports/d").contains("v1.5.0"));
 
     // b now asks for no more than the root does.
@@ -1356,7 +1358,7 @@ fn edge_021_an_artefact_beside_the_source_of_one_repository() {
             ("imports/c", &c, ", revision = \"v1.0.0\""),
         ])
     ));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert!(
         env.playground.join("imports/d/README.md").is_file(),
@@ -1386,7 +1388,7 @@ fn edge_022_a_winner_behind_a_request_is_flagged_where_history_is_local() {
         ("imports/c", &c, ", revision = \"v1.0.0\""),
         ("imports/d", &d, ", revision = \"stable\""),
     ]));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v1.3.1"));
     let row = status_row(&env, "imports/d");
@@ -1404,7 +1406,7 @@ fn edge_023_a_missed_row_has_no_resolution_text() {
         ("imports/b", &b, ", revision = \"v1.0.0\""),
         ("imports/d", &d, ", revision = \"v1.2.0\""),
     ]));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     std::fs::remove_dir_all(env.playground.join("imports/d")).unwrap();
     let row = status_row(&env, "imports/d");
     assert!(row.ends_with("missed"), "{}", row);
@@ -1427,13 +1429,13 @@ fn edge_037_two_requests_naming_one_commit_agree_whatever_they_name() {
             ("imports/c", &c, ", revision = \"v1.0.0\""),
         ])
     ));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v1.5.0"));
-    let why = env.run(&["status", "--why", "imports/d"]);
+    let why = env.run(&["explain", "imports/d"]);
     assert!(why.stdout.contains("same commit"), "{}", why.stdout);
     // The root asked for nothing: the highest request is what it gets.
-    let json = env.run(&["status", "--format", "json"]);
+    let json = env.run(&["ls", "--format", "json"]);
     let rows: serde_json::Value = serde_json::from_str(&json.stdout).unwrap();
     let row = rows
         .as_array()
@@ -1455,7 +1457,7 @@ fn edge_038_a_new_lower_major_takes_the_plain_name_without_losing_work() {
     let c = dependant(&env, "c", &[("libs/d", &d, ", revision = \"v2.0.0\"")]);
     let config = |entries: &[(&str, &Path, &str)]| format!("{}{}", allow(&env), repos(entries));
     env.write_config(&config(&[("imports/c", &c, ", revision = \"v1.0.0\"")]));
-    assert!(env.run(&["pull"]).success);
+    assert!(env.run(&["sync"]).success);
     assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v2.0.0"));
 
     let dest = env.playground.join("imports/d");
@@ -1478,7 +1480,7 @@ fn edge_038_a_new_lower_major_takes_the_plain_name_without_losing_work() {
         ("imports/b", &b, ", revision = \"v1.0.0\""),
         ("imports/c", &c, ", revision = \"v1.0.0\""),
     ]));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     let text = format!("{}{}", out.stdout, out.stderr);
     assert!(!out.success, "{}", text);
     assert!(text.contains("is on no branch"), "{}", text);
@@ -1488,7 +1490,7 @@ fn edge_038_a_new_lower_major_takes_the_plain_name_without_losing_work() {
         &dest,
         &["checkout", "--quiet", "--detach", &tag_commit(&d, "v2.0.0")],
     );
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v1.5.0"));
     assert_eq!(head(&env, "imports/d_v2"), tag_commit(&d, "v2.0.0"));
@@ -1518,7 +1520,7 @@ fn edge_039_a_branch_beats_a_tag_of_the_same_name_and_ref_prefixes_choose() {
             &d,
             &format!(", revision = \"{}\"", revision),
         )]));
-        let out = env.run(&["pull"]);
+        let out = env.run(&["sync"]);
         assert!(out.success, "{}: {}{}", revision, out.stdout, out.stderr);
         assert_eq!(&head(&env, "imports/d"), expected, "{}", revision);
     }
@@ -1538,7 +1540,7 @@ fn edge_040_a_branch_named_like_a_version_is_a_branch() {
         ("imports/b", &b, ", revision = \"v1.0.0\""),
         ("imports/d", &d, ", revision = \"v9.0.0\""),
     ]));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/d"), ahead);
     assert_eq!(
@@ -1547,7 +1549,7 @@ fn edge_040_a_branch_named_like_a_version_is_a_branch() {
     );
     assert!(!env.playground.join("imports/d_v1").exists());
     assert!(!env.playground.join("imports/d_v9").exists());
-    let why = env.run(&["status", "--why", "imports/d"]);
+    let why = env.run(&["explain", "imports/d"]);
     assert!(
         why.stdout
             .contains("branch, asked for by a repository above the other"),
@@ -1580,7 +1582,7 @@ fn edge_041_an_implicit_checkout_reads_its_dependencies_unless_every_request_say
     let config = |entries: &[(&str, &Path, &str)]| format!("{}{}", allow(&env), repos(entries));
 
     env.write_config(&config(&[("imports/b", &b, ", revision = \"v1.0.0\"")]));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert!(env.playground.join("imports/d/VERSION").is_file());
     assert!(!env.playground.join("imports/e").exists());
@@ -1590,7 +1592,7 @@ fn edge_041_an_implicit_checkout_reads_its_dependencies_unless_every_request_say
         ("imports/b", &b, ", revision = \"v1.0.0\""),
         ("imports/c", &c, ", revision = \"v1.0.0\""),
     ]));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert!(env.playground.join("imports/e/VERSION").is_file());
     assert!(env.playground.join("imports/d/libs/e").is_symlink());
@@ -1617,7 +1619,7 @@ fn edge_042_an_implicit_calendar_version_beside_a_root_major_is_placed_at_any() 
             ("imports/mylib", &d, ", revision = \"v2.0.0\""),
         ])
     ));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/mylib"), tag_commit(&d, "v2.0.0"));
     assert_eq!(
@@ -1642,7 +1644,7 @@ fn edge_053_a_chain_seventy_deep_settles() {
         allow(&env),
         repos(&[("imports/c000", &chain[0], ", revision = \"v1.0.0\"")])
     ));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert!(env.playground.join("imports/c069/VERSION").is_file());
 }
@@ -1652,7 +1654,7 @@ fn edge_053_a_chain_seventy_deep_settles() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn error_024_two_branches_nothing_orders_fail_the_pull() {
+fn error_024_two_branches_nothing_orders_fail_the_sync() {
     let env = TestEnv::new("recursive_revision_conflict");
 
     let bare_c = env.create_bare_repo("repoC", "main", &[("c.txt", "C")]);
@@ -1705,7 +1707,7 @@ fn error_024_two_branches_nothing_orders_fail_the_pull() {
 
     // Two branches are not versions, and neither A nor B is above the
     // other: without history to consult, nothing orders them.
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success, "should fail on conflicting revisions");
     assert!(
         out.stderr.contains("cannot order"),
@@ -1738,7 +1740,7 @@ fn error_025_a_cycle_fails_before_anything_is_cloned() {
         ("imports/b", &b, ", revision = \"v1.0.0\""),
         ("imports/c", &c, ", revision = \"v1.0.0\""),
     ]));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success);
     assert!(out.stderr.contains("cycle"), "{}", out.stderr);
     assert!(!env.playground.join("imports").exists());
@@ -1778,7 +1780,7 @@ fn error_026_bad_resolution_config_is_refused_when_read() {
         ),
     ] {
         env.write_config(&config);
-        let out = env.run(&["status"]);
+        let out = env.run(&["ls"]);
         assert!(!out.success, "{}", config);
         assert!(out.stderr.contains(message), "{}: {}", message, out.stderr);
     }
@@ -1799,7 +1801,7 @@ fn error_043_a_repository_depending_on_itself_is_a_cycle() {
         )],
     );
     env.write_config(&repos(&[("imports/b", &b, ", revision = \"v1.0.0\"")]));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(
         out.stderr
@@ -1828,7 +1830,7 @@ fn error_044_a_dependency_on_the_root_repository_is_a_cycle() {
         allow(&env),
         repos(&[("imports/b", &b, ", revision = \"v1.0.0\"")])
     ));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(
         out.stderr.contains("cycle: ")
@@ -1870,7 +1872,7 @@ fn error_045_conflicting_overrides_from_siblings_fail() {
             ("imports/c", &c, ", revision = \"v1.0.0\""),
         ])
     ));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(
         out.stderr.contains("conflicting overrides"),
@@ -1901,7 +1903,7 @@ fn error_046_a_missing_revision_is_not_covered_by_a_siblings_override() {
             ("imports/c", &c, ", revision = \"v1.0.0\""),
         ])
     ));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(
         out.stderr
@@ -1949,7 +1951,7 @@ fn error_047_requests_whose_pairwise_winners_go_round_in_a_circle_fail() {
         allow(&env),
         repos(&[("imports/x", &x, ", revision = \"v1.0.0\"")])
     ));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(out.stderr.contains("cannot order"), "{}", out.stderr);
     // Whichever request the pairs end on, some other request beats it: the
@@ -1975,7 +1977,7 @@ fn error_048_two_root_entries_of_one_major_are_refused() {
         ("imports/d", &d, ", revision = \"v1.2.0\""),
         ("imports/d2", &d, ", revision = \"v1.5.0\""),
     ]));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(
         out.stderr.contains("are both checkouts of"),
@@ -1999,7 +2001,7 @@ fn error_049_a_branch_asked_for_beside_two_majors_is_refused() {
         ("imports/c", &c, ", revision = \"v1.0.0\""),
         ("imports/d", &d, ", revision = \"main\""),
     ]));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(
         out.stderr.contains("which is not a version")
@@ -2030,7 +2032,7 @@ fn error_050_a_missing_commit_in_a_dependency_fails_reading_its_config() {
         allow(&env),
         repos(&[("imports/b", &b, ", revision = \"v1.0.0\"")])
     ));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(
         out.stderr
@@ -2048,7 +2050,7 @@ fn error_054_an_invalid_dependency_config_names_where_it_was_read() {
     let env = TestEnv::new("resolution_invalid_dependency_config");
     let b = tagged(&env, "b", &[("v1.0.0", "[repos\n\"libs/d\" = 1\n")]);
     env.write_config(&repos(&[("imports/b", &b, ", revision = \"v1.0.0\"")]));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(
         out.stderr.contains("imports/b@v1.0.0:.gitscale.toml")
@@ -2083,7 +2085,7 @@ fn error_055_a_cycle_at_a_revision_that_loses_still_fails() {
         ("imports/b", &b, ", revision = \"v1.0.0\""),
         ("imports/c", &c, ", revision = \"v1.0.0\""),
     ]));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(out.stderr.contains("cycle: "), "{}", out.stderr);
     assert!(!env.playground.join("imports").exists());
@@ -2109,7 +2111,7 @@ fn perf_027_resolving_in_ci_without_the_cache_fetches_no_history() {
         allow(&env),
         repos(&[("imports/b", &b, ", revision = \"v1.0.0\"")])
     ));
-    let out = env.run_with_env(&[("CI", "true")], &["pull", "--no-cache"]);
+    let out = env.run_with_env(&[("CI", "true")], &["sync", "--no-cache"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/d"), tag_commit(&_d, "v1.5.0"));
 
@@ -2140,8 +2142,8 @@ fn perf_027_resolving_in_ci_without_the_cache_fetches_no_history() {
         total
     );
 
-    // Offline afterwards: status reads what is on disk.
-    let out = env.run_with_env(&[("CI", "true")], &["status"]);
+    // Offline afterwards: `ls` reads what is on disk.
+    let out = env.run_with_env(&[("CI", "true")], &["ls"]);
     let table = strip_ansi(&out.stdout);
     let row = table.lines().find(|l| l.contains("imports/d")).unwrap();
     assert!(row.contains("implicit via imports/b"), "{}", row);
@@ -2184,7 +2186,7 @@ fn perf_051_a_wide_graph_fetches_each_repository_once() {
     env.write_config(&format!("{}{}", allow(&env), repos(&entries)));
 
     for run in ["first", "second"] {
-        let (out, argvs) = traced(&env, &[], &["pull"]);
+        let (out, argvs) = traced(&env, &[], &["sync"]);
         assert!(out.success, "{} pull: {}{}", run, out.stdout, out.stderr);
         for repo in deps.iter().chain(std::iter::once(&d)) {
             assert_eq!(
@@ -2220,7 +2222,7 @@ fn perf_052_a_deep_chain_fetches_each_repository_once() {
         allow(&env),
         repos(&[("imports/c000", &chain[0], ", revision = \"v1.0.0\"")])
     ));
-    let (out, argvs) = traced(&env, &[], &["pull"]);
+    let (out, argvs) = traced(&env, &[], &["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     for repo in &chain {
         assert_eq!(

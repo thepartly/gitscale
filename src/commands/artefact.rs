@@ -30,9 +30,10 @@ fn selected(config: &GitScaleConfig, names: &[String]) -> Result<Vec<RepoEntry>>
 /// `gitscale artefact show` — for each artefact entry, what the remote and
 /// the registry say right now and what is installed, changing nothing. The
 /// one place to answer "why does it say no artefact, missing or changed".
-pub fn show(root: Option<&Path>, names: &[String], out: &mut dyn Write) -> Result<()> {
+pub fn show(root: Option<&Path>, dirs: &[String], out: &mut dyn Write) -> Result<()> {
     let (config, config_root) = load_workspace(root)?;
-    let entries = selected(&config, names)?;
+    let names = crate::paths::relative_names(root, &config_root, dirs)?;
+    let entries = selected(&config, &names)?;
     if entries.is_empty() {
         writeln!(out, "No artefact entries declared.")?;
         return Ok(());
@@ -120,9 +121,10 @@ pub fn show(root: Option<&Path>, names: &[String], out: &mut dyn Write) -> Resul
 /// `gitscale artefact list` — the commits each artefact entry has images
 /// for in the registry, labelled with the branches and tags that point at
 /// them now, and which one is installed.
-pub fn list(root: Option<&Path>, names: &[String], out: &mut dyn Write) -> Result<()> {
+pub fn list(root: Option<&Path>, dirs: &[String], out: &mut dyn Write) -> Result<()> {
     let (config, config_root) = load_workspace(root)?;
-    let entries = selected(&config, names)?;
+    let names = crate::paths::relative_names(root, &config_root, dirs)?;
+    let entries = selected(&config, &names)?;
     if entries.is_empty() {
         writeln!(out, "No artefact entries declared.")?;
         return Ok(());

@@ -68,10 +68,10 @@ Every git checkout of the workspace is a worktree of its repository's store:
   read-only: the write bit is stripped from every file.
 - **On the topic**, on the topic branch and writable — see [topics](topics.md).
 
-Each `pull` fetches every store once, then moves each checkout where
-resolution puts it. A move never loses anything: uncommitted changes, or
-commits made at a pin that no branch holds, fail the entry and leave it where
-it is — see [`pull`](workflow.md#pull).
+Each [placement](workflow.md#placement) moves each checkout where resolution
+puts it, fetching each store it asks at most once. A move never loses
+anything: uncommitted changes, or commits made at a pin that no branch holds,
+fail the entry and leave it where it is.
 
 Because a store is shared, so is everything in it: a branch committed in one
 checkout of `imports/core` is visible from every other checkout of it, in every
@@ -79,26 +79,25 @@ worktree of the root, and one fetch updates them all.
 
 ## A root with worktrees
 
-A worktree of the root — `git worktree add` — gets worktrees of the same
-stores for its own checkouts: nothing is downloaded again, and branches
-developed in one root worktree are visible in the others. With the
-[git hook](hooks.md#git-hooks) installed, `git worktree add` runs the `pull`
-itself.
+A worktree of the root — `git topic start --worktree`, or `git worktree add`
+— gets worktrees of the same stores for its own checkouts: nothing is
+downloaded again, and branches developed in one root worktree are visible in
+the others. With the [git hook](hooks.md#git-hooks) installed, `git worktree
+add` runs the placement itself.
 
-The root can also be a bare repository whose every checkout is a worktree:
+The root can also be a bare repository with every topic a worktree beside it —
+the [worktree layout](topics.md#worktree-layout):
 
 ```
-mkdir repo && cd repo
-git clone --bare <root> .bare
-echo "gitdir: ./.bare" > .git
-git config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*' && git fetch
-git worktree add main                   # stores in repo/.bare/gitscale
-git worktree add -b feat/x feature      # this worktree's checkouts, from the same stores
+git clone --bare git@github.com:acme/app.git app/.git && cd app
+git topic switch main                   # app/main; stores in app/.git/gitscale
+git topic start PROJ-13-retry           # app/PROJ-13-retry, from the same stores
 ```
 
-`git clone --bare` sets no fetch refspec, so without the `git config` line
-`origin/*` is never updated and ahead/behind and upstreams are wrong;
-[`status`](status.md) warns about it. GitScale never sets it.
+`git clone --bare` sets no fetch refspec, so `origin/*` is never updated and
+ahead/behind and upstreams are wrong. The first `git topic` command in this
+layout sets it and fetches; a bare root that has never run one gets a warning
+from [`git scale ls`](status.md) with the command that sets it.
 
 A root worktree's checkouts are made, moved and pruned by GitScale; a worktree
 you add to a checkout yourself — an old release of `core` next to the rest, say
@@ -109,12 +108,13 @@ you add to a checkout yourself — an old release of `core` next to the rest, sa
 **Deleting a root worktree** — `git worktree remove`, or `rm -rf` — deletes its
 checkouts with it, but leaves an entry for each in its store. Git keeps such an
 entry's branch checked out, and refuses it to every other worktree, until the
-entry is pruned — so `pull`, `develop` and `clean` prune the stores before
-anything else.
+entry is pruned — so placement, `git topic join` and `leave`, `git scale
+clean` and `git scale gc` prune the stores before anything else.
 
 **Moving the root** moves its stores with it, and breaks the links between
-them and its checkouts. `pull` repairs them: each checkout it recorded still
-names its store, and the store is found by that name in the moved root. With
+them and its checkouts. The next placement repairs them: each checkout
+GitScale recorded still names its store, and the store is found by that name
+in the moved root. With
 git 2.48 or later the links are written relative to each other, and moving the
 whole root breaks nothing. A moved bare root needs its own worktrees repaired
 first — `git worktree repair` — as git requires of any worktree.
@@ -126,11 +126,11 @@ every worktree of the root, one layer stored once however many commits share
 it. Checkouts get copies of what they unpack, so nothing borrows from the store
 and removing an image never breaks a checkout.
 
-Each use of an image marks it, and **`pull` drops images nothing has used for
-three months**, then every layer no remaining image needs — at most once a
-day, so every other pull pays one `stat` for it. `[clean] keep_recent` changes
-the period; [`gitscale clean --gc`](clean.md#compacting) prunes now, and runs
-`git gc` in every store.
+Each use of an image marks it, and **placement drops images nothing has used
+for three months**, then every layer no remaining image needs — at most once a
+day, so every other placement pays one `stat` for it. `[clean] keep_recent`
+changes the period; [`git scale gc`](clean.md#compacting-git-scale-gc) prunes
+now, and runs `git gc` in every store.
 
 ## Checkouts GitScale did not make
 
@@ -138,17 +138,17 @@ A checkout that is not a worktree of its store — a clone made by an older
 GitScale, or by hand — is reported and never touched:
 
 ```
-  FAIL  imports/core: not a gitscale worktree; move your changes out, delete it and run pull
+  FAIL  imports/core: not a gitscale worktree; move your changes out, delete it and run git scale sync
 ```
 
-`status` flags it `foreign`. A store that is missing while nothing uses it is
-cloned again by the next `pull`.
+`git scale ls` flags it `foreign`. A store that is missing while nothing uses
+it is cloned again by the next placement.
 
 ## The CI cache
 
 CI is detected by `CI=1` or `CI=true`, which GitHub Actions, GitLab CI and most
-others set. There, `pull` and `fetch` use the per-user cache, unless
-`--no-cache` is given:
+others set. There, placement and `git scale fetch` use the per-user cache,
+unless `--no-cache` is given:
 
 ```
 <cache>/snapshots/<name>.git          one shallow commit per pin, as refs/heads/pin/<sha>
@@ -177,7 +177,7 @@ The `cache` commands work on the cache anywhere, `CI` set or not.
 ### cache status
 
 ```
-$ gitscale cache status
+$ git scale cache status
 cache  /home/runner/.local/share/gitscale  (2 entries, 3.2 MiB)
 
   REPO           SNAPSHOTS    IMAGES     TOTAL  REVS  LAST USED
@@ -195,8 +195,8 @@ is listed with its own age, since those are what `compact` drops one at a time.
 ### cache update
 
 ```
-gitscale cache update                 # every declared repository
-gitscale cache update imports/core    # one of them
+git scale cache update                 # every declared repository
+git scale cache update imports/core    # one of them
 ```
 
 Add the pins and images a CI job of this workspace would take, touching no
@@ -205,8 +205,8 @@ checkout: the way to warm a runner image ahead of time.
 ### cache compact
 
 ```
-gitscale cache compact
-gitscale cache compact --keep-recent 2weeks
+git scale cache compact
+git scale cache compact --keep-recent 2weeks
 ```
 
 Evict whole entries nothing has used within `--keep-recent` (default

@@ -6,6 +6,7 @@ Status: proposed, not started. Both changes land together: 1 is the default,
 - [The problem](#the-problem)
 - [1. A new tag must contain the pin](#1-a-new-tag-must-contain-the-pin)
 - [2. Opt-in: release branches](#2-opt-in-release-branches)
+- [With the other plans](#with-the-other-plans)
 - [Where the code changes](#where-the-code-changes)
 - [Tests](#tests)
 - [Docs](#docs)
@@ -87,6 +88,22 @@ branches = ["main", "release/*"]
   written, and picks no tags.
 - **`--major`** still applies the branch filter: a declared release branch is
   explicit, unlike 1's ancestry guess.
+
+## With the other plans
+
+- **Version tags** ([plan.demo.md, change 1](plan.demo.md#1-version-tags-semver-and-calendar-versions-with-a-major)):
+  tags have no prefix, so `newest`'s filter is the same kind and major, with no
+  stream. Calendar versions have a major (`v1-`, `v2-`), so `--major`'s
+  exception to rule 1 covers them as it does semver.
+- **No access to sources** ([plan.artefact-checkouts.md](plan.artefact-checkouts.md#no-access-to-a-repositorys-sources)):
+  a workspace that cannot read a repository has no store for it, and reads
+  its versions from the registry's tags. Rules 1 and 2 need the history, so for
+  such a repository a raise refuses: `imports/vault-client: choosing a release
+  needs access to its sources`. Promotion already says `cannot tell` there.
+- **`upgrade` edits only the topic** ([plan.demo.md, change 6](plan.demo.md#6-upgrade-edits-only-the-topic-git-topic-join---dependants)):
+  `git topic join --dependants <DIR>` joins the dependants asking for less
+  than the newest release; it takes the newest release by the same
+  `candidates`, so join and raise agree on the tag.
 
 ## Where the code changes
 

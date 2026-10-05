@@ -6,7 +6,7 @@ use crate::artefact::Artefacts;
 use crate::config::{GitScaleConfig, RepoEntry};
 use crate::resolution::{Engine, Resolution};
 use crate::store::Sources;
-use crate::stores::{GitStores, WorkspaceCheckouts};
+use crate::stores::{GitStores, OnMiss, WorkspaceCheckouts};
 
 /// A symlink to create after cloning.
 #[derive(Debug, Clone)]
@@ -50,6 +50,65 @@ pub fn workspace(
     Engine::new(config, root_url.as_deref(), &stores, &checkouts)
         .with_topic(topic.topic().map(str::to_string))
         .resolve()
+}
+
+/// How resolution reaches the remotes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Network {
+    /// Only what this machine has.
+    Offline,
+    /// Fetch every store resolution reads first.
+    Online,
+    /// Offline; then fetch each store that lacked something resolution asked
+    /// for, and resolve again, while new gaps appear. Each store is fetched at
+    /// most once.
+    OnMiss,
+}
+
+impl Network {
+    /// In CI everything is online: a runner keeps what an earlier job
+    /// fetched, and that must never decide a branch.
+    pub fn in_ci(self) -> Network {
+        if crate::git::is_ci() {
+            Network::Online
+        } else {
+            self
+        }
+    }
+}
+
+/// [`workspace`] reaching the remotes as `network` says.
+pub fn workspace_with(
+    config: &GitScaleConfig,
+    config_root: &Path,
+    network: Network,
+    sources: &Sources,
+    artefacts: Option<&Artefacts>,
+    verbose: bool,
+) -> Result<Resolution> {
+    match network {
+        Network::Offline => workspace(config, config_root, false, sources, artefacts, verbose),
+        Network::Online => workspace(config, config_root, true, sources, artefacts, verbose),
+        Network::OnMiss => {
+            let root_url = crate::git::origin_url(config_root);
+            let checkouts = WorkspaceCheckouts::new(config_root);
+            let topic = crate::topic::root(config, config_root, false);
+            let on_miss = OnMiss::default();
+            loop {
+                let stores = GitStores::new(config_root, sources, false, artefacts, verbose)
+                    .fetching_on_miss(&on_miss);
+                let resolved = Engine::new(config, root_url.as_deref(), &stores, &checkouts)
+                    .with_topic(topic.topic().map(str::to_string))
+                    .resolve();
+                // A revision a store did not have fails a round: one more,
+                // with that store fetched, may resolve. What is still
+                // missing then is the error.
+                if on_miss.next_round() == 0 {
+                    return resolved;
+                }
+            }
+        }
+    }
 }
 
 /// Create symlinks on disk. Skips entries whose target doesn't exist yet.

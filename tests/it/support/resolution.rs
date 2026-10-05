@@ -48,7 +48,7 @@ pub fn head(env: &TestEnv, dir: &str) -> String {
 }
 
 pub fn status_row(env: &TestEnv, dir: &str) -> String {
-    let out = env.run(&["status"]);
+    let out = env.run(&["ls"]);
     assert!(out.success, "{}", out.stderr);
     strip_ansi(&out.stdout)
         .lines()
@@ -96,7 +96,7 @@ pub fn dependant(env: &TestEnv, name: &str, entries: &[(&str, &Path, &str)]) -> 
 }
 
 /// A root repository whose `.gitscale.toml` is `config`, cloned to `ws` with
-/// an identity: a workspace on its default branch, not pulled yet. Topics
+/// an identity: a workspace on its default branch, not synced yet. Topics
 /// need one, since the root's branch is the topic.
 pub fn root_workspace(env: &TestEnv, config: &str) -> PathBuf {
     let root = env.create_bare_repo(

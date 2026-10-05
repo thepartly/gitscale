@@ -78,9 +78,9 @@ pub fn config_for(url: &str) -> String {
     )
 }
 
-/// A pull as a CI job would run it, against this test's own cache.
+/// A sync as a CI job would run it, against this test's own cache.
 pub fn ci_pull(env: &TestEnv) -> super::CliOutput {
-    env.run_with_env(&[("CI", "1")], &["pull"])
+    env.run_with_env(&[("CI", "1")], &["sync"])
 }
 
 /// A `gitscale cache …` command against this test's own cache, CI or not.

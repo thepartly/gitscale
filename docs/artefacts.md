@@ -57,7 +57,8 @@ follows from `url`:
 "imports/core"  = { url = "https://github.com/org/core.git", revision = "v2.0.0", artefact = "overlay" }
 ```
 
-`gitscale add <dir> <url> <revision> --artefact replace` writes one.
+`git scale require --artefact replace <dir> <url> [<revision>]` writes one —
+see [adding and removing entries](dependencies.md#adding-and-removing-entries).
 
 ## Which commit an entry gets
 
@@ -268,7 +269,7 @@ image or records anything.
 ### artefact show
 
 ```
-gitscale artefact show [-C DIR] [NAMES...]
+git scale artefact show [DIR...]
 ```
 
 For each artefact entry, everything there is to know right now: the image, the
@@ -288,7 +289,7 @@ meta/app
 
 A published commit lists its layers by group name, with size and digest. The
 status compares what is installed with what the remote has *now* — unlike
-[`gitscale status`](status.md), which compares it with what the last fetch saw:
+[`git scale ls`](status.md), which compares it with what the last fetch saw:
 
 | Status | Meaning |
 |---|---|
@@ -306,7 +307,7 @@ shown, and the command exits non-zero.
 ### artefact list
 
 ```
-gitscale artefact list [-C DIR] [NAMES...]
+git scale artefact list [DIR...]
 ```
 
 Every commit an artefact entry has an image for in the registry, from its tag
@@ -433,7 +434,7 @@ variables:
 
 test:
   script:
-    - gitscale pull
+    - gitscale sync
     - make test
 ```
 
@@ -468,7 +469,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: gitscale pull
+      - run: gitscale sync
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: make test
@@ -481,17 +482,18 @@ commit no branch will ever name.
 
 A `replace` entry's directory holds the image and nothing else.
 
-- **`pull`** resolves the revision, downloads every layer, checks each
-  against its digest, unpacks them in order, and strips the write bits of every
-  file at any depth. Once installed, it does nothing — and asks the registry
+- **[Placement](workflow.md#placement)** resolves the revision, downloads
+  every layer, checks each against its digest, unpacks them in order, and
+  strips the write bits of every file at any depth. Once installed, it does nothing — and asks the registry
   nothing — while the revision still names the installed commit. Otherwise it
   downloads the new image first and only then replaces the files, so a
   registry that fails part way leaves the installed version alone.
-- **`fetch`** resolves the revision and asks the registry whether that commit
-  has an image, and records both. Nothing is downloaded, and no directory is
-  created. A commit with no image is an error.
-- **`push`** and **`commit`** skip artefact entries; [`clean`](clean.md) keeps
-  them whole.
+- **`git scale fetch`** resolves the revision and asks the registry whether
+  that commit has an image, and records both. Nothing is downloaded, and no
+  directory is created. A commit with no image is an error.
+- **[Git commands](cli.md#git-commands-git-scale-git-command)** run across
+  the workspace skip them, since there is no repository to run in;
+  [`git scale clean`](clean.md) keeps them whole.
 
 The directory holds the artefact's files and nothing else — dot files
 included, all of them read-only, all of them replaced on update. GitScale
@@ -532,13 +534,13 @@ other:
 
 | Entry | Developed here | Following a remote branch |
 |---|---|---|
-| `replace` | A worktree of its source on the topic branch, writable: [`gitscale develop`](topics.md#gitscale-develop) takes the image away and checks the same commit out in its place | The image of the branch tip; with none — the producer does not publish on branches, or its pipeline has not finished — the source of the tip, detached and read-only |
+| `replace` | A worktree of its source on the topic branch, writable: [`git topic join`](topics.md#git-topic-join--leave) takes the image away and checks the same commit out in its place | The image of the branch tip; with none — the producer does not publish on branches, or its pipeline has not finished — the source of the tip, detached and read-only |
 | `overlay` | On the topic branch, writable, the overlay of its commit laid over it while there is one | On the branch, with the tip's overlay; with none, no overlay is laid, and the previous one's files stay |
 
 It never falls back to the pinned tag, which would test without the change, and
 never uses an older commit's image. A topic artefact's dependencies are read
-from its source. Taken off the topic — by [`develop --stop`](topics.md#gitscale-develop)
-or by [promotion](topics.md#promotion-gitscale-upgrade) — a `replace` entry gets
+from its source. Taken off the topic — by [`git topic leave`](topics.md#git-topic-join--leave)
+or by [promotion](topics.md#promotion-git-upgrade) — a `replace` entry gets
 its image back.
 
 ## Status
@@ -551,7 +553,7 @@ shows the installed commit. The flags:
 | `ok` | Installed at the commit the last fetch saw |
 | `behind` | The revision has moved to another commit since |
 | `missing` | That commit has no image (yet) |
-| `changed` | The installed commit's image was re-published with different files; `pull` installs it |
+| `changed` | The installed commit's image was re-published with different files; the next placement installs it |
 | `ref-mismatch` | Installed for a different revision than the config names now |
 
 `--format json` adds an `artefact` object to the row, with the commit and

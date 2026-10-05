@@ -19,7 +19,7 @@ fn normal_002_a_root_option_inside_the_workspace_finds_its_config() {
     ));
     let inside = env.playground.join("docs/deep");
     std::fs::create_dir_all(&inside).unwrap();
-    let out = env.run_in(&inside, &["pull"]);
+    let out = env.run_in(&inside, &["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert!(env.playground.join("libs/lib/a.txt").is_file());
     assert!(!inside.join("libs").exists());
@@ -42,7 +42,7 @@ fn edge_003_a_misspelt_entry_key_is_ignored_as_documented() {
         "[repos]\n\"libs/lib\" = {{ url = \"{}\", revison = \"v1\" }}\n",
         bare.display()
     ));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(
         git_stdout(&env.playground.join("libs/lib"), &["rev-parse", "HEAD"]),
@@ -61,7 +61,7 @@ fn error_001_a_config_outside_a_git_repository_is_refused() {
     let outside = env.repos_remote.join("plain-dir");
     std::fs::create_dir_all(&outside).unwrap();
     std::fs::write(outside.join(".gitscale.toml"), "[repos]\n").unwrap();
-    let out = env.run_in(&outside, &["status"]);
+    let out = env.run_in(&outside, &["ls"]);
     assert!(!out.success);
     assert!(
         out.stderr.contains("not the top of a git repository"),
@@ -76,7 +76,7 @@ fn error_001_a_config_outside_a_git_repository_is_refused() {
 fn error_004_invalid_toml_is_refused_naming_the_file() {
     let env = TestEnv::new("config_invalid_toml");
     env.write_config("[repos\n\"libs/a\" = { url = \"x\" }\n");
-    for command in ["status", "pull", "fetch", "sync", "push"] {
+    for command in ["ls", "pull", "fetch", "sync", "push"] {
         let out = env.run(&[command]);
         assert!(!out.success, "{}", command);
         assert!(
@@ -101,7 +101,7 @@ fn error_005_the_workspace_itself_or_its_git_directory_is_refused() {
             "[repos]\n\"{}\" = {{ url = \"https://example.com/a.git\", revision = \"main\" }}\n",
             directory
         ));
-        let out = env.run(&["status"]);
+        let out = env.run(&["ls"]);
         assert!(!out.success, "{:?} was accepted: {}", directory, out.stdout);
         assert!(
             out.stderr.contains(directory),
@@ -113,7 +113,7 @@ fn error_005_the_workspace_itself_or_its_git_directory_is_refused() {
 }
 
 /// Two entries that name one directory, spelt differently, would fight over
-/// one checkout on every pull. They are refused when the config is read.
+/// one checkout on every placement. They are refused when the config is read.
 #[test]
 #[ignore = "bug: entries are told apart by their spelling, so 'libs/x' and 'libs/x/' (or './libs/x') both load"]
 fn error_006_two_entries_naming_one_directory_are_refused() {
@@ -129,7 +129,7 @@ fn error_006_two_entries_naming_one_directory_are_refused() {
              \"{}\" = {{ url = \"https://example.com/b.git\", revision = \"v2\" }}\n",
             a, b
         ));
-        let out = env.run(&["status"]);
+        let out = env.run(&["ls"]);
         assert!(!out.success, "{:?} and {:?} both loaded", a, b);
     }
 }
@@ -149,7 +149,7 @@ fn error_007_a_refused_value_says_why() {
         ("[clean]\nkeep_recent = \"soon\"\n", "soon"),
     ] {
         env.write_config(config);
-        let out = env.run(&["status"]);
+        let out = env.run(&["ls"]);
         assert!(!out.success, "{}", config);
         assert!(out.stderr.contains(reason), "{}: {}", reason, out.stderr);
     }

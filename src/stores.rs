@@ -16,8 +16,10 @@
 //!   commit — or, in CI with the cache on, from the snapshot pin the checkout
 //!   will be built from anyway.
 //!
-//! Offline (`status` without `--fetch`), nothing is fetched: what is on disk
-//! answers, and what it cannot is [`Unavailable`].
+//! Offline (`ls` without `--fetch`), nothing is fetched: what is on disk
+//! answers, and what it cannot is [`Unavailable`]. Fetching on a miss starts
+//! offline and fetches only the stores that lacked something: see
+//! [`OnMiss`].
 
 use anyhow::{Context, Result};
 use std::collections::{BTreeMap, HashMap};
@@ -39,8 +41,32 @@ enum Store {
     Light,
 }
 
+/// What fetching on a miss shares between its rounds: the stores to fetch
+/// although the rest are read offline, the ones already fetched, and the
+/// ones the last round found lacking.
+#[derive(Default)]
+pub struct OnMiss {
+    fetch: Mutex<std::collections::BTreeSet<PathBuf>>,
+    fetched: Mutex<std::collections::BTreeSet<PathBuf>>,
+    missed: Mutex<std::collections::BTreeSet<PathBuf>>,
+}
+
+impl OnMiss {
+    /// The stores the last round lacked something in that are not fetched
+    /// yet, now marked to be: empty when another round would change nothing.
+    pub fn next_round(&self) -> usize {
+        let missed = std::mem::take(&mut *self.missed.lock().unwrap());
+        let mut fetch = self.fetch.lock().unwrap();
+        let before = fetch.len();
+        fetch.extend(missed);
+        fetch.len() - before
+    }
+}
+
 pub struct GitStores<'a> {
     online: bool,
+    /// Offline, but fetching each store that lacks something.
+    on_miss: Option<&'a OnMiss>,
     sources: &'a Sources,
     /// Where the workspace's light stores live.
     local: PathBuf,
@@ -60,11 +86,35 @@ impl<'a> GitStores<'a> {
     ) -> Self {
         GitStores {
             online,
+            on_miss: None,
             sources,
             local: local_dir(config_root),
             artefacts,
             verbose,
             refs: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Read offline, fetching only what `on_miss` marks.
+    pub fn fetching_on_miss(mut self, on_miss: &'a OnMiss) -> Self {
+        self.online = false;
+        self.on_miss = Some(on_miss);
+        self
+    }
+
+    /// Whether the store at `path` is asked online.
+    fn online_for(&self, path: &Path) -> bool {
+        self.online
+            || self
+                .on_miss
+                .is_some_and(|m| m.fetch.lock().unwrap().contains(path))
+    }
+
+    /// Note that the store at `path` lacked something: the next round of
+    /// fetching on a miss fetches it.
+    fn missed(&self, path: &Path) {
+        if let Some(on_miss) = self.on_miss {
+            on_miss.missed.lock().unwrap().insert(path.to_path_buf());
         }
     }
 
@@ -99,7 +149,12 @@ impl<'a> GitStores<'a> {
     fn load_refs(&self, url: &str, kind: Kind, path: &Path) -> Result<Refs> {
         let remote = crate::ci::remote_url(url);
         let store = self.store(url, kind);
-        if self.online {
+        // Fetched once however many rounds ask: a light store has no record
+        // of its own of being fetched by this command.
+        let done = self
+            .on_miss
+            .is_some_and(|m| m.fetched.lock().unwrap().contains(path));
+        if self.online_for(path) && !done {
             if self.verbose {
                 eprintln!("  resolve  {}", url);
             }
@@ -107,12 +162,17 @@ impl<'a> GitStores<'a> {
                 (Store::Repo, Some(stores)) => stores.update(&remote).map(|_| ()),
                 _ => refresh_light(&remote, path),
             };
+            if let Some(on_miss) = self.on_miss {
+                on_miss.fetched.lock().unwrap().insert(path.to_path_buf());
+            }
             if let Err(e) = fetched {
                 let had = match store {
                     Store::Repo => is_store(path),
                     Store::Light => path.join(REFS_FILE).is_file(),
                 };
-                if !had {
+                // In CI a runner keeps the build directory between jobs: the
+                // refs an earlier job fetched would build a stale commit.
+                if !had || crate::git::is_ci() {
                     return Err(e).with_context(|| format!("cannot fetch {}", url));
                 }
                 // What the last fetch saw still resolves, if not to the latest.
@@ -129,10 +189,13 @@ impl<'a> GitStores<'a> {
                 serde_json::from_str(&text)
                     .with_context(|| format!("{}: unreadable", path.join(REFS_FILE).display()))
             }
-            _ => Err(unavailable(format!(
-                "{} has not been fetched on this machine yet",
-                url
-            ))),
+            _ => {
+                self.missed(path);
+                Err(unavailable(format!(
+                    "{} has not been fetched on this machine yet",
+                    url
+                )))
+            }
         }
     }
 
@@ -141,7 +204,7 @@ impl<'a> GitStores<'a> {
     fn git(&self, store: &Path, args: &[&str]) -> Result<std::process::Output> {
         let dir = store.to_string_lossy().to_string();
         let mut full: Vec<&str> = vec!["-C", &dir];
-        if !self.online {
+        if !self.online_for(store) {
             full.extend_from_slice(&["-c", "protocol.allow=never"]);
         }
         full.extend_from_slice(args);
@@ -171,16 +234,17 @@ impl<'a> GitStores<'a> {
         Ok(None)
     }
 
-    fn not_here(&self, url: &str, commit: &str) -> anyhow::Error {
+    fn not_here(&self, url: &str, commit: &str, path: &Path) -> anyhow::Error {
         let what = format!(
             "{} at {} of {}",
             CONFIG_FILENAME,
             crate::git::short_sha(commit),
             url
         );
-        if self.online {
+        if self.online_for(path) {
             anyhow::anyhow!("cannot fetch {}", what)
         } else {
+            self.missed(path);
             unavailable(format!("{} is not on this machine", what))
         }
     }
@@ -213,9 +277,10 @@ impl Repos for GitStores<'_> {
         match self.store(url, Kind::Source) {
             Store::Repo => {
                 let path = self.repo_path(url);
+                let online = self.online_for(&path);
                 // An artefact on the topic is read as the source it then is,
                 // from a store nothing may have made yet.
-                if self.online && !is_store(&path) {
+                if online && !is_store(&path) {
                     if let Some(stores) = &self.sources.stores {
                         stores.update(&remote)?;
                     }
@@ -223,16 +288,18 @@ impl Repos for GitStores<'_> {
                 if let Some(found) = self.show(&path, commit)? {
                     return Ok(found);
                 }
-                if self.online {
+                if online {
                     // A commit no branch or tag reaches: ask for it by name.
                     let _ = self.git(&path, &["fetch", "--quiet", "origin", commit]);
                     if let Some(found) = self.show(&path, commit)? {
                         return Ok(found);
                     }
                 }
-                Err(self.not_here(url, commit))
+                Err(self.not_here(url, commit, &path))
             }
             Store::Light => {
+                let path = self.light_path(url);
+                let online = self.online_for(&path);
                 // CI with the cache on: the snapshot pin the checkout is built
                 // from holds exactly this commit.
                 if let Some(cache) = &self.sources.cache {
@@ -242,7 +309,7 @@ impl Repos for GitStores<'_> {
                             return Ok(found);
                         }
                     }
-                    if self.online {
+                    if online {
                         if let Ok(Some(pinned)) = cache.pin(&remote, commit) {
                             if let Some(found) = self.show(&pinned.entry, commit)? {
                                 return Ok(found);
@@ -250,20 +317,19 @@ impl Repos for GitStores<'_> {
                         }
                     }
                 }
-                let path = self.light_path(url);
                 if is_store(&path) {
                     if let Some(found) = self.show(&path, commit)? {
                         return Ok(found);
                     }
                 }
-                if !self.online {
-                    return Err(self.not_here(url, commit));
+                if !online {
+                    return Err(self.not_here(url, commit, &path));
                 }
                 ensure_light(&remote, &path)?;
                 fetch_one(&path, commit, revision);
                 match self.show(&path, commit)? {
                     Some(found) => Ok(found),
-                    None => Err(self.not_here(url, commit)),
+                    None => Err(self.not_here(url, commit, &path)),
                 }
             }
         }
@@ -276,15 +342,23 @@ impl Repos for GitStores<'_> {
                 url
             )));
         };
+        // Keyed apart from the git stores: the registry is asked, not git.
+        let key = PathBuf::from(format!("artefact:{}", crate::urls::normalize(url)));
+        let online = self.online_for(&key);
         // A commit whose pipeline has not published yet, a registry that is
         // down: the entry's own install reports that, in its own words. For
         // resolution it is a checkout whose dependencies cannot be read.
-        artefacts
-            .config_layer(url, commit, self.online)
-            .map_err(|e| match e.downcast_ref::<Unavailable>() {
-                Some(_) => e,
+        artefacts.config_layer(url, commit, online).map_err(|e| {
+            match e.downcast_ref::<Unavailable>() {
+                Some(_) => {
+                    if !online {
+                        self.missed(&key);
+                    }
+                    e
+                }
                 None => unavailable(format!("{:#}", e)),
-            })
+            }
+        })
     }
 
     fn default_branch(&self, url: &str, kind: Kind) -> Result<Option<String>> {
@@ -305,6 +379,13 @@ impl Repos for GitStores<'_> {
             Some(0) => Ok(true),
             Some(1) => Ok(false),
             _ => Err(unavailable("the history is not on this machine")),
+        }
+    }
+
+    fn unknown(&self, url: &str, kind: Kind) {
+        let path = self.path(url, kind);
+        if !self.online_for(&path) {
+            self.missed(&path);
         }
     }
 

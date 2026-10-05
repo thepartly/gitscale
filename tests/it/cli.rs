@@ -87,7 +87,7 @@ fn normal_001_help_and_version_succeed_on_stdout() {
     for args in [
         vec!["--help"],
         vec!["-h"],
-        vec!["pull", "--help"],
+        vec!["sync", "--help"],
         vec!["sync", "-h"],
     ] {
         let run = gitscale(&env, &env.playground, &args);
@@ -107,19 +107,20 @@ fn normal_001_help_and_version_succeed_on_stdout() {
     }
 }
 
-/// `-v` and `--no-cache` are global: accepted before the subcommand or after
-/// it, as docs/cli.md says.
+/// `-v`, `--no-cache`, `-C` and `--color` are global: accepted before the
+/// subcommand or after it, as docs/cli.md says.
 #[test]
 fn normal_002_global_flags_go_before_or_after_the_subcommand() {
     let env = TestEnv::new("cli_global_flags");
     one_entry(&env);
     let root = env.playground.to_str().unwrap();
     for args in [
-        vec!["-v", "pull", "-C", root],
-        vec!["pull", "-v", "-C", root],
-        vec!["pull", "-C", root, "--verbose"],
-        vec!["--no-cache", "pull", "-C", root],
-        vec!["pull", "--no-cache", "-C", root],
+        vec!["-v", "sync", "-C", root],
+        vec!["sync", "-v", "-C", root],
+        vec!["sync", "-C", root, "--verbose"],
+        vec!["--no-cache", "sync", "-C", root],
+        vec!["sync", "--no-cache", "-C", root],
+        vec!["-C", root, "--color", "never", "sync"],
     ] {
         let run = gitscale(&env, &env.playground, &args);
         assert_eq!(
@@ -134,11 +135,9 @@ fn normal_002_global_flags_go_before_or_after_the_subcommand() {
     assert!(env.playground.join("libs/lib/a.txt").is_file());
 }
 
-/// `-C` before the subcommand is what docs/cli.md shows
-/// (`gitscale -C /path/to/project status`), and its table says the global
-/// options are accepted before or after the subcommand.
+/// `-C` before the subcommand is what docs/cli.md shows, and where a git
+/// command needs it: everything after the git command is git's.
 #[test]
-#[ignore = "bug: -C is defined per subcommand, so `gitscale -C <dir> status` is a usage error"]
 fn normal_003_root_option_before_the_subcommand_is_accepted() {
     let env = TestEnv::new("cli_root_before");
     one_entry(&env);
@@ -146,7 +145,7 @@ fn normal_003_root_option_before_the_subcommand_is_accepted() {
     let run = gitscale(
         &env,
         &elsewhere,
-        &["-C", env.playground.to_str().unwrap(), "pull"],
+        &["-C", env.playground.to_str().unwrap(), "sync"],
     );
     assert_eq!(run.code, Some(0), "{}{}", run.stdout, run.stderr);
     assert!(env.playground.join("libs/lib/a.txt").is_file());
@@ -161,7 +160,7 @@ fn normal_004_the_config_is_found_upward_from_the_working_directory() {
     one_entry(&env);
     let inside = env.playground.join("some/where");
     std::fs::create_dir_all(&inside).unwrap();
-    let run = gitscale(&env, &inside, &["pull"]);
+    let run = gitscale(&env, &inside, &["sync"]);
     assert_eq!(run.code, Some(0), "{}{}", run.stdout, run.stderr);
     assert!(env.playground.join("libs/lib/a.txt").is_file());
     assert!(
@@ -187,7 +186,7 @@ fn normal_005_a_terminal_gets_progress_lines_and_the_same_exit_status() {
     // A directory holding something else: that one entry fails.
     std::fs::create_dir_all(env.playground.join("libs/stray")).unwrap();
     std::fs::write(env.playground.join("libs/stray/notes.txt"), "mine").unwrap();
-    let Some(run) = gitscale_in_a_terminal(&env, &["pull"]) else {
+    let Some(run) = gitscale_in_a_terminal(&env, &["sync"]) else {
         eprintln!("skipped: `script` is not available");
         return;
     };
@@ -200,7 +199,7 @@ fn normal_005_a_terminal_gets_progress_lines_and_the_same_exit_status() {
     assert!(
         run.stdout.contains("ok    libs/good")
             && run.stdout.contains("FAIL  libs/stray")
-            && run.stdout.contains("1 repo(s) failed to pull"),
+            && run.stdout.contains("1 repo(s) failed to place"),
         "{}",
         run.stdout
     );
@@ -223,7 +222,7 @@ fn edge_006_a_terminal_places_nested_entries_like_a_plain_run() {
             outer.display(),
             inner.display()
         ));
-        let Some(run) = gitscale_in_a_terminal(&env, &["pull"]) else {
+        let Some(run) = gitscale_in_a_terminal(&env, &["sync"]) else {
             eprintln!("skipped: `script` is not available");
             return;
         };
@@ -241,40 +240,48 @@ fn edge_006_a_terminal_places_nested_entries_like_a_plain_run() {
 // Errors and refusals
 // ---------------------------------------------------------------------------
 
-/// An unknown subcommand is a usage error: exit status 1, the reason on
-/// stderr, nothing on stdout.
+/// Any command GitScale does not know is a git command: one git does not
+/// know either fails there, with git's own words and the summary line.
 #[test]
-fn error_007_an_unknown_subcommand_fails_with_usage() {
+fn error_007_an_unknown_command_goes_to_git() {
     let env = TestEnv::new("cli_unknown_subcommand");
+    env.write_config("[repos]\n");
     let run = gitscale(&env, &env.playground, &["frobnicate"]);
     assert_eq!(run.code, Some(1));
-    assert!(run.stderr.contains("frobnicate"), "{}", run.stderr);
-    assert!(run.stderr.contains("Usage"), "{}", run.stderr);
-    assert!(run.stdout.is_empty(), "{}", run.stdout);
+    assert!(
+        run.stderr.contains("'frobnicate' is not a git command"),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.ends_with("1 of 1 repository failed: .\n"),
+        "{}",
+        run.stderr
+    );
 }
 
-/// `commit` needs `-m`: without it nothing runs and the usage error names the
-/// option.
+/// A GitScale command's own options are checked: one it does not take is a
+/// usage error, and nothing runs.
 #[test]
-fn error_008_commit_without_a_message_is_a_usage_error() {
+fn error_008_an_unknown_option_of_a_gitscale_command_is_a_usage_error() {
     let env = TestEnv::new("cli_commit_no_message");
     env.write_config("[repos]\n");
-    let run = gitscale(&env, &env.playground, &["commit"]);
+    let run = gitscale(&env, &env.playground, &["sync", "--bogus"]);
     assert_eq!(run.code, Some(1));
-    assert!(run.stderr.contains("--message"), "{}", run.stderr);
+    assert!(run.stderr.contains("--bogus"), "{}", run.stderr);
+    assert!(run.stderr.contains("Usage"), "{}", run.stderr);
 }
 
 /// A `-C` path that does not exist is named in the error, so the user can see
 /// which of their arguments was wrong.
 #[test]
-#[ignore = "bug: the error is only 'cannot resolve start path': the CLI prints the outermost context and the path is never in it"]
 fn error_009_a_nonexistent_root_path_is_named() {
     let env = TestEnv::new("cli_root_missing");
     let missing = env.playground.join("no/such/dir");
     let run = gitscale(
         &env,
         &env.playground,
-        &["status", "-C", missing.to_str().unwrap()],
+        &["ls", "-C", missing.to_str().unwrap()],
     );
     assert_eq!(run.code, Some(1));
     assert!(
@@ -284,23 +291,22 @@ fn error_009_a_nonexistent_root_path_is_named() {
     );
 }
 
-/// Outside any workspace there is nothing to act on: the command fails, says
-/// no config was found and where the search started, and creates nothing.
+/// Outside any workspace there is nothing to act on: the command fails,
+/// says so, and creates nothing — for GitScale's commands and git's alike.
 #[test]
-fn error_010_no_config_found_says_where_it_searched() {
+fn error_010_outside_a_workspace_says_so() {
     let env = TestEnv::new("cli_no_config");
     let outside = env.repos_remote.join("empty");
     std::fs::create_dir_all(&outside).unwrap();
-    for command in ["pull", "fetch", "sync", "push", "status"] {
+    for command in ["sync", "fetch", "push", "ls", "topic"] {
         let run = gitscale(
             &env,
             &env.playground,
-            &[command, "-C", outside.to_str().unwrap()],
+            &["-C", outside.to_str().unwrap(), command],
         );
         assert_eq!(run.code, Some(1), "{}", command);
         assert!(
-            run.stderr.contains("No .gitscale.toml config found")
-                && run.stderr.contains(outside.to_str().unwrap()),
+            run.stderr.contains("not inside a GitScale workspace"),
             "{}: {}",
             command,
             run.stderr

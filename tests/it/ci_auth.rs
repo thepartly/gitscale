@@ -34,7 +34,7 @@ fn normal_002_an_ssh_entry_on_the_ci_server_is_cloned_over_https() {
         CI_HOST
     ));
 
-    let out = run_in_ci_job(&env, &["pull"]);
+    let out = run_in_ci_job(&env, &["sync"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         !out.status.success(),
@@ -89,7 +89,7 @@ fn normal_005_a_gitlab_job_fetches_its_servers_repositories_with_the_job_token()
             ("CI_JOB_TOKEN", TOKEN),
             ("CI_SERVER_URL", &ci_server),
         ],
-        &["pull", "-C", env.playground.to_str().unwrap()],
+        &["sync", "-C", env.playground.to_str().unwrap()],
     );
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(
@@ -150,7 +150,7 @@ fn normal_006_a_github_actions_job_fetches_with_its_token() {
                 (token_var, TOKEN),
                 ("GITHUB_SERVER_URL", &ci_server),
             ],
-            &["pull", "-C", env.playground.to_str().unwrap()],
+            &["sync", "-C", env.playground.to_str().unwrap()],
         );
         assert!(out.success, "{}: {}{}", token_var, out.stdout, out.stderr);
         assert!(
@@ -205,7 +205,7 @@ fn edge_004_an_entry_on_another_host_keeps_its_ssh_url() {
 "#,
     );
 
-    let out = run_in_ci_job(&env, &["pull"]);
+    let out = run_in_ci_job(&env, &["sync"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success());
     assert!(
@@ -249,7 +249,7 @@ fn edge_007_the_job_token_never_reaches_another_host() {
             ("CI_JOB_TOKEN", TOKEN),
             ("CI_SERVER_URL", &ci_server),
         ],
-        &["pull", "-C", env.playground.to_str().unwrap()],
+        &["sync", "-C", env.playground.to_str().unwrap()],
     );
     assert!(
         !out.success,
@@ -275,7 +275,7 @@ fn edge_007_the_job_token_never_reaches_another_host() {
 
 /// The token is read from the environment when git asks, and lands nowhere
 /// on disk: not in a checkout's or the cache's git config, not in the
-/// breadcrumb a failed hook pull leaves, and not in the file of a
+/// breadcrumb a failed hook placement leaves, and not in the file of a
 /// `credential.helper = store` inherited from the user's git config — which
 /// git would hand every credential it approves, were the helper list not
 /// reset for the CI host.
@@ -299,14 +299,14 @@ fn edge_008_the_job_token_is_written_nowhere_on_disk() {
     env.write_config(
         "[repos]\n\"libs/lib\" = { url = \"git@localhost:lib.git\", revision = \"main\" }\n",
     );
-    let first = job(&env, &home, &vars, &["pull", "-C", root]);
+    let first = job(&env, &home, &vars, &["sync", "-C", root]);
     assert!(first.success, "{}{}", first.stdout, first.stderr);
     assert!(
         server.requests().iter().any(|r| r.credentials.is_some()),
         "the token was never used, so nothing could leak"
     );
 
-    // ...and a hook pull that fails, leaving a breadcrumb.
+    // ...and a hook placement that fails, leaving a breadcrumb.
     env.write_config(&format!(
         "[repos]\n\"libs/lib\" = {{ url = \"git@localhost:lib.git\", revision = \"main\" }}\n\"libs/other\" = {{ url = \"{}\", revision = \"main\" }}\n",
         server.url("127.0.0.1", "other.git")
@@ -379,7 +379,7 @@ fn edge_009_the_ci_server_url_decides_where_entries_on_its_host_are_fetched() {
             ("CI_JOB_TOKEN", TOKEN),
         ];
         vars.extend_from_slice(server);
-        let out = job(&env, &home, &vars, &["pull", "-C", root]);
+        let out = job(&env, &home, &vars, &["sync", "-C", root]);
         assert!(!out.success, "{:?}", server);
         match rewritten {
             Some(url) => {
@@ -421,7 +421,7 @@ fn edge_010_a_ci_server_under_a_path_keeps_the_path() {
             ("CI_JOB_TOKEN", TOKEN),
             ("CI_SERVER_URL", "https://gitlab.invalid/gitlab"),
         ],
-        &["pull", "-C", env.playground.to_str().unwrap()],
+        &["sync", "-C", env.playground.to_str().unwrap()],
     );
     assert!(
         out.stderr
@@ -449,7 +449,7 @@ fn edge_011_github_tokens_without_the_runner_marker_change_nothing() {
             ("GH_TOKEN", TOKEN),
             ("GITHUB_SERVER_URL", "https://github.invalid"),
         ],
-        &["pull", "-C", env.playground.to_str().unwrap()],
+        &["sync", "-C", env.playground.to_str().unwrap()],
     );
     assert!(!out.success);
     assert!(
@@ -490,7 +490,7 @@ fn edge_012_gitscale_no_ci_auth_turns_the_rewrite_off() {
             ("CI_SERVER_URL", "https://gitlab.invalid"),
             ("GITSCALE_NO_CI_AUTH", "1"),
         ],
-        &["pull", "-C", env.playground.to_str().unwrap()],
+        &["sync", "-C", env.playground.to_str().unwrap()],
     );
     assert!(!out.success);
     assert!(
@@ -521,7 +521,7 @@ fn edge_013_gitlab_wins_when_both_forges_are_detected() {
     env.write_config(
         "[repos]\n\"libs/x\" = { url = \"git@gitlab.invalid:acme/x.git\", revision = \"main\" }\n",
     );
-    let out = job(&env, &home, &vars, &["pull", "-C", root]);
+    let out = job(&env, &home, &vars, &["sync", "-C", root]);
     assert!(
         out.stderr.contains("https://gitlab.invalid/acme/x.git"),
         "{}",
@@ -531,7 +531,7 @@ fn edge_013_gitlab_wins_when_both_forges_are_detected() {
     env.write_config(
         "[repos]\n\"libs/y\" = { url = \"git@github.invalid:acme/y.git\", revision = \"main\" }\n",
     );
-    let out = job(&env, &home, &vars, &["pull", "-C", root]);
+    let out = job(&env, &home, &vars, &["sync", "-C", root]);
     assert!(
         out.stderr
             .contains("cannot fetch git@github.invalid:acme/y.git"),
@@ -576,7 +576,7 @@ fn edge_014_an_ssh_origin_left_in_a_checkout_is_repointed_before_fetching() {
     let lib = env.playground.join("libs/lib");
 
     pin("v1");
-    let out = job(&env, &home, &vars, &["pull", "-C", root]);
+    let out = job(&env, &home, &vars, &["sync", "-C", root]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     crate::support::run_git_pub(
         &lib,
@@ -584,7 +584,7 @@ fn edge_014_an_ssh_origin_left_in_a_checkout_is_repointed_before_fetching() {
     );
 
     pin("v2");
-    let out = job(&env, &home, &vars, &["pull", "-C", root]);
+    let out = job(&env, &home, &vars, &["sync", "-C", root]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(
         crate::support::git_stdout(&lib, &["log", "-1", "--format=%s"]),
@@ -636,7 +636,7 @@ fn error_015_a_403_from_the_ci_server_says_how_to_get_access() {
             &env,
             &home,
             &vars,
-            &["pull", "-C", env.playground.to_str().unwrap()],
+            &["sync", "-C", env.playground.to_str().unwrap()],
         );
         assert!(!out.success, "{}", forge);
         assert!(out.stderr.contains("403"), "{}: {}", forge, out.stderr);
@@ -665,7 +665,7 @@ fn error_016_a_403_in_a_repository_name_is_not_a_refused_token() {
             ("CI_JOB_TOKEN", TOKEN),
             ("CI_SERVER_URL", "https://gitlab.invalid"),
         ],
-        &["pull", "-C", env.playground.to_str().unwrap()],
+        &["sync", "-C", env.playground.to_str().unwrap()],
     );
     assert!(!out.success);
     assert!(out.stderr.contains("svc-403.git"), "{}", out.stderr);

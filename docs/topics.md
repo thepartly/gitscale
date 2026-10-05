@@ -2,15 +2,19 @@
 
 - [The idea](#the-idea)
 - [A change across three layers](#a-change-across-three-layers)
-- [Entering, joining and leaving a topic](#entering-joining-and-leaving-a-topic)
+- [Starting, switching and finishing topics](#starting-switching-and-finishing-topics)
+  - [Branch prefix](#branch-prefix)
+  - [Worktree layout](#worktree-layout)
+- [Joining and leaving a topic](#joining-and-leaving-a-topic)
   - [Which branches are not topics](#which-branches-are-not-topics)
   - [Where each checkout goes](#where-each-checkout-goes)
-  - [`gitscale develop`](#gitscale-develop)
+  - [`git topic join` / `leave`](#git-topic-join--leave)
   - [A new branch from a topic](#a-new-branch-from-a-topic)
 - [Inside a topic](#inside-a-topic)
-- [Promotion: `gitscale upgrade`](#promotion-gitscale-upgrade)
-- [Raising a dependency: `gitscale upgrade <dir>`](#raising-a-dependency-gitscale-upgrade-dir)
-- [Writing what resolution selected: `upgrade --resolved`](#writing-what-resolution-selected-upgrade---resolved)
+- [Where a topic stands: `git topic status`](#where-a-topic-stands-git-topic-status)
+- [Promotion: `git upgrade`](#promotion-git-upgrade)
+- [Raising a dependency: `git upgrade <dir>`](#raising-a-dependency-git-upgrade-dir)
+- [Writing what resolution selected: `git upgrade --resolved`](#writing-what-resolution-selected-git-upgrade---resolved)
 - [Topics in CI](#topics-in-ci)
 - [Branch flows](#branch-flows)
 - [Parallel topics](#parallel-topics)
@@ -21,13 +25,13 @@
 A change that spans several repositories is a **topic**: one branch name, the
 same in the root and in every repository the change touches. **The root's
 current branch is the topic**, so nothing about a topic is stored apart from
-the branches themselves, and `git switch` on the root is how one is entered
-and left.
+the branches themselves. `git topic start`, `switch` and `finish` begin, go to
+and end topics; plain `git switch` on the root works too.
 
 Inside a topic, GitScale checks out the topic's branches instead of the
 revisions the configs pin, and **no `.gitscale.toml` is edited** to test the
 change. A CI pipeline on the branch does the same. Pins change only once a
-layer is merged and released, and then `gitscale upgrade` writes the new tag
+layer is merged and released, and then `git upgrade` writes the new tag
 into the configs that ask for it, bottom layer first, until the root merges.
 
 The one rule behind every detail below: **no surprises between local and
@@ -39,43 +43,186 @@ The root pins B at `v2026.09.30`; B pins D at `v2026.09.28`. The change touches
 D and B.
 
 ```
-$ git switch -c feat/price-cache
-$ gitscale develop imports/d imports/b
+$ git topic start feat/price-cache
+started feat/price-cache from origin/main
+$ git topic join imports/d imports/b
 imports/d on feat/price-cache, from v2026.09.28 (6be5fd3)
 imports/b on feat/price-cache, from v2026.09.30 (1498d55)
 …edit, build and test in the workspace…
-$ gitscale commit -m "price cache"
-$ gitscale push
+$ git scale add -A
+$ git scale commit -m "price cache"
+$ git scale push
 ```
 
 D is merged and its pipeline tags `v2026.10.01`:
 
 ```
-$ gitscale upgrade --commit
+$ git upgrade --commit
 imports/b  not tagged yet
 imports/d  promoted → v2026.10.01
   imports/b/.gitscale.toml   libs/d  v2026.09.28 → v2026.10.01
   imports/d  left the topic: imports/d at v2026.10.01
   commit  imports/b/.gitscale.toml: pin imports/d v2026.10.01
 next to merge: imports/b
-$ gitscale push
+to push: imports/b — git scale push
+$ git scale push
 ```
 
-B is merged and tagged; `gitscale upgrade` bumps the root's pin of B; the root
-merges, and the topic is finished.
+B is merged and tagged; `git upgrade` bumps the root's pin of B; the root
+merges, and `git topic finish` ends the topic.
 
-## Entering, joining and leaving a topic
+## Starting, switching and finishing topics
 
 | Command | Does |
 |---|---|
-| `git switch -c <topic>` | Start a topic. Every checkout stays where it is until it is developed |
-| `gitscale develop <dir>...` | Put checkouts on the topic, writable, from the commit each is at |
-| `git switch <topic>` | Join a topic: every checkout whose store or remote has the branch goes onto it |
-| `git switch <pinned branch>` | Leave the topic: every checkout back at the revision its configs pin |
-| `gitscale develop --stop <dir>...` | Take checkouts off the topic, their topic branches deleted |
+| `git topic start <name>` | Begin a topic: a new branch of the root from the remote's default branch (`origin/main`, fetched first) — or a worktree of its own |
+| `git topic start --from <branch> <name>` | From another branch; from a topic, the checkouts joined to it come along |
+| `git topic switch <name>` | Go to an existing branch of the root: one of yours, a colleague's on the remote — tracking it — or a pinned one (`main`) |
+| `git topic` | Print the topic of the checkout the current directory is in; nothing, exit 1, off a topic |
+| `git topic list` | Every topic — each local branch the root does not pin, and the branch of each of its worktrees, `main` included — with its worktree, its joined checkouts, and `new` (nothing on it yet), `N not pushed`, `pushed` or `merged`; `-` for a pinned branch |
+| `git topic finish [<name>]` | End a merged topic; `--force` abandons one |
 
-With the [git hook](hooks.md#git-hooks) installed, a `git switch` of the root
-moves the checkouts itself; without it, run `gitscale pull` after the switch.
+After `start` and `switch`, the checkouts are placed: every one whose store or
+remote has the branch joins it, the rest stay at their pins.
+
+`start` refuses a name that exists here or on the remote (`NAME exists: git
+topic switch NAME`), a name the root pins (`NAME is pinned, not a topic`), and
+an existing directory for its worktree. `switch` refuses a name that exists
+nowhere (`NAME does not exist: git topic start NAME`). Both refuse in CI.
+
+`git topic` is for scripts, prompts and agents: in the root it prints the
+root's branch; in a child, its slot's topic branch, which differs from the
+root's for a slot with a checkout per major. It never uses the network.
+
+```
+git switch "$(git topic)"           # in a child: onto its topic branch
+git push -u origin "$(git topic)"
+```
+
+**`finish`** ends a topic — the current one, or the one named:
+
+1. **Merged?** The root's topic branch is merged when merging it into the
+   default branch (`origin/main`, fetched first) changes nothing — the content
+   test [promotion](#promotion-git-upgrade) uses, so squash and rebase merges
+   count. Not merged: `NAME is not merged into main; --force to drop it`.
+2. **Checkouts still on the topic** refuse it, naming each:
+   `imports/core is still on the topic: git upgrade, or git topic leave
+   imports/core`.
+3. **Uncommitted changes** refuse it, `--force` or not — in the root, in each
+   checkout going back to its pin, and in every checkout of a worktree being
+   removed: `uncommitted changes in imports/core: commit or stash them (git
+   scale stash -u), or discard them (git scale reset --hard && git scale clean
+   -fd)`.
+4. **Commits no remote has** refuse it: on a branch of the topic,
+   commits no remote branch or tag holds, whose changes the default branch
+   lacks — `feat@v7 in imports/core has 1 commit no remote has`, then `push
+   them first, or --force to drop them`.
+
+`--force` abandons a topic: it skips 1, 2 and 4, and the checkouts still on
+the topic go back to their pins.
+
+Then a plain clone goes back to the default branch and fast-forwards it, and
+every checkout returns to its pin; a topic's own worktree is removed, with its
+checkouts, and a `cd` to the main worktree when the command ran inside it.
+The topic's local branches are deleted — the root's, and each store's `NAME`
+and `NAME@vN` — and remote branches are never touched. A branch dropped with
+commits no remote had is named with the commit it was at, as `git branch -D`
+does:
+
+```
+switched to main
+deleted PROJ-12 in ., imports/b
+dropped PROJ-12 in imports/core (was 1a2b3c4): 2 commits no remote had
+```
+
+To come back to a topic later, do not finish it: `switch` to another, and its
+branches stay. A finished topic comes back from its remote branches: `git
+topic switch PROJ-12` tracks the root's, and each checkout follows its own.
+
+### Branch prefix
+
+A team that names branches after their author turns it on in the root's
+`.gitscale.toml`:
+
+```toml
+[topic]
+prefix = "{user}/"
+```
+
+- `{user}` is git config `gitscale.user`, else `$USER` (`USERNAME` on
+  Windows). Neither set: `start` fails with `set your name for branches: git
+  config --global gitscale.user NAME`. `gitscale.user` is for a login that
+  differs from the name used in branches, and for containers where `$USER` is
+  `vscode`, `codespace` or `root`.
+- `start NAME` creates branch `PREFIX` + `NAME`; a name already starting with
+  the prefix is used as it is. `switch` and `finish` take the name with or
+  without it. `list` shows full branch names.
+- No `[topic] prefix`: nothing is added or stripped.
+
+### Worktree layout
+
+The root is in the **worktree layout** when its git common dir is a bare
+repository, as `git clone --bare` makes it. Then `start`, `switch` and
+`finish` work on worktrees; otherwise on branches of the one clone.
+`--worktree` / `--no-worktree` choose for one command; git config
+`gitscale.topic.worktree` (`true` / `false`) is a personal default.
+
+From the **bare repository's parent** — `app/`, holding the bare `.git` and no
+working tree — `start`, `switch`, `list` and `finish` still work: the layout
+is recognised from `./.git` being bare, and `[topic] prefix` is read from
+`.gitscale.toml` on the default branch. Other commands need a worktree.
+
+`git clone --bare` sets no `remote.origin.fetch`, so later fetches bring in no
+new remote branches. The first topic command in the worktree layout sets it,
+fetches, and says so once: `configured origin to fetch remote branches`.
+
+A new worktree's directory is the branch name without the prefix, every
+remaining `/` a `-`, so all topics sit at one level: `andrey/feature-blah` →
+`feature-blah`, `andrey/feature/blah` → `feature-blah`; with no prefix
+configured, `andrey/feature-blah` → `andrey-feature-blah`. When two branches
+map to one name, `start` refuses the second: `DIR exists; choose another with
+--dir`. `--dir DIR` sets the directory, from the current directory.
+
+| Layout | Directory |
+|---|---|
+| Bare repository at `app/.git` | `app/NAME` |
+| Plain clone at `projects/app`, with `--worktree` | `projects/app-NAME` |
+
+```
+app/                               bare layout, [topic] prefix = "{user}/"
+├── .git/                          bare repository, shared by every worktree
+│   ├── gitscale/repos/            one store per dependency, shared too
+│   └── worktrees/                 git's records of each worktree
+├── main/
+├── feature-blah/                  git topic start feature-blah  → branch andrey/feature-blah
+└── hotfix-retry/                  git topic start hotfix/retry  → branch andrey/hotfix/retry
+
+projects/                          plain clone with --worktree
+├── app/                           the clone; stores in app/.git/gitscale/repos
+├── app-feature-blah/              git topic start --worktree feature-blah
+└── app-hotfix-retry/
+```
+
+Not inside the clone (`app/.worktrees/…`): that needs a `.gitignore` entry, and
+editors, build tools and test runners scanning the clone would pick the
+worktrees up.
+
+A topic's worktree deleted by hand leaves its branches behind: `git topic
+list` shows the topic with `-` for its worktree, and `git topic switch NAME`
+makes the worktree again, each joined checkout back on its branch.
+
+## Joining and leaving a topic
+
+| Command | Does |
+|---|---|
+| `git topic join <dir>...` | Put checkouts on the topic, writable, from the commit each is at |
+| `git topic leave <dir>...` | Take checkouts off the topic, their topic branches deleted |
+| `git topic switch <topic>` | Every checkout whose store or remote has the branch goes onto it |
+| `git topic switch <pinned branch>` | Every checkout back at the revision its configs pin |
+
+`git switch` on the root does the same as `git topic switch` once the
+[git hook](hooks.md#git-hooks) places the checkouts; without the hook, run
+`git scale sync` after it.
 
 ### Which branches are not topics
 
@@ -95,55 +242,70 @@ topic either.
 
 ### Where each checkout goes
 
-On a topic, every `pull` places each checkout by the first of:
+On a topic, every [placement](workflow.md#placement) places each checkout by
+the first of:
 
 1. **A local branch of the topic** in its store: on it, writable. This is a
-   checkout someone developed — here, or in another worktree of the root.
+   checkout someone joined — here, or in another worktree of the root.
 2. **The remote's branch of the topic**: on a local branch tracking it,
    writable. This is how a colleague's `feat/price-cache` in E is used, and it
    is what CI does.
 3. **Neither**: detached at its pin, read-only.
 
 A checkout with uncommitted changes is never moved: the entry fails, the rest
-carry on, and `pull` exits non-zero. Leaving a topic works the same way, so a
+carry on, and the command exits non-zero. Leaving a topic works the same way, so a
 dirty checkout stays on the topic branch until its changes are committed or
 discarded. Commits are never lost by a move: they stay on the topic branch in
 the store, and `git switch` back brings them out again.
 
 A slot the root holds with `override = true` never joins a topic, locally or
-in CI. A slot whose repository has a checkout per major develops each major
-on its own branch — see [two majors](#inside-a-topic).
+in CI. A slot whose repository has a checkout per major puts each major on its
+own branch — see [two majors](#inside-a-topic).
 
-### `gitscale develop`
+### `git topic join` / `leave`
 
 ```
-gitscale develop imports/d
-gitscale develop imports/b/libs/d     # the same checkout, named by B's link to it
-gitscale develop --stop imports/d
+git topic join imports/d
+git topic join imports/b/libs/d     # the same checkout, named by B's link to it
+git topic join .                    # inside imports/d
+git topic leave imports/d
 ```
 
-`develop` puts each named checkout on a branch of the topic's name, starting
-from the commit it is at — its pin — and makes it writable. It is the only way
-a checkout gets onto a topic branch that does not exist yet; nothing is
-inferred from edits.
+`join` puts each named checkout on a branch of the topic's name, starting
+from the commit it is at — its pin — and makes it writable. Directories are
+paths from the current directory; see [directory arguments](cli.md#directory-arguments).
 
 - An **artefact** checkout becomes a worktree of its source at the same commit,
   in place; see [artefacts → on a topic](artefacts.md#an-artefact-on-a-topic).
 - An entry the root **overrides** is refused: `imports/d is held by override in
   .gitscale.toml; remove the override first`.
 - A slot [held at its pin](#inside-a-topic) is refused.
-- Off a topic, `develop` says to create a branch first: `git switch -c
-  <topic>`.
+- Off a topic, `join` says to start one: `git topic start <name>`.
+- With no directory it fails, as `git add` does: `no checkout named`, with a
+  hint to use `.` when the current directory is inside a checkout.
 
-`--stop` takes a checkout back to its pin and deletes its topic branch. It
-refuses while the remote still has the branch — `pull` would follow it again
-— and while the branch holds work no remote has.
+`leave` takes a checkout back to its pin and deletes its topic branch. It
+refuses while the remote still has the branch — placement would follow it
+again — and while the branch holds work no remote has.
+
+**Plain git gets there too.** Switched to its topic branch with git, a child
+is made writable by the [hook in the child](hooks.md#the-hook-in-a-child):
+
+| The topic branch, in the child's store or on its remote | Plain git, in the child |
+|---|---|
+| exists nowhere | `git switch -c "$(git topic)"`: from the commit it is at, the pin |
+| exists locally | `git switch "$(git topic)"` |
+| exists on the remote only | `git switch "$(git topic)"`, tracking it |
+
+`join` saves knowing which case applies, turns an artefact into a source
+checkout, and makes its refusals.
 
 ### A new branch from a topic
 
 `git switch -c feat/y` while on topic `feat/x` carries the topic along: every
-checkout developed on `feat/x` gets a `feat/y` branch at the same commit, so a
-change can be split or renamed without redeveloping each repository.
+checkout joined to `feat/x` gets a `feat/y` branch at the same commit, so a
+change can be split or renamed without joining each repository again. `git
+topic start --from feat/x feat/y` does the same from any branch.
 
 ```
 $ git switch -c feat/price-cache-2
@@ -154,8 +316,9 @@ Pulling latest changes...
   ok    imports/d
 ```
 
-The carry happens in the pull the [git hook](hooks.md#git-hooks) runs after the
-switch; without the hook, run `gitscale pull` next. GitScale tells this from git's own records — the new branch's reflog holds
+The carry happens in the placement the [git hook](hooks.md#git-hooks) runs after
+the switch; without the hook, run `git scale sync` next. GitScale tells this
+from git's own records — the new branch's reflog holds
 nothing but its creation, and the root's last move was from the old branch to
 it — so a branch created any other way starts empty, like any new topic.
 
@@ -174,26 +337,24 @@ only it asks for, and everything below that, stays put, and status says
 `pinned by imports/b`. Any other requester's view is unchanged.
 
 **Two majors.** When a repository has a checkout per major, the highest major
-develops on the topic's own branch and every other on `<topic>@v<major>` —
+is on the topic's own branch and every other on `<topic>@v<major>` —
 `feat/x@v1`, `feat/x@v0.4` — since one branch cannot say which major it means.
 CI matches the same names.
 
-**`commit` and `push` act on the topic.** `commit` commits, on the topic
-branch, the root and every topic checkout that has changes. Off the topic it
-commits only the root. A checkout with changes that is not on the topic is
-skipped and says how to bring it in:
+**Git commands act on the topic.** `git scale <git command>` runs in the root
+and every checkout on the topic, dependencies first — see
+[git commands](cli.md#git-commands-git-scale-git-command). `git scale commit`
+skips a repository with nothing to commit; `git scale push` sets each branch's
+upstream on its first push. A checkout with changes that is not on the topic
+gets a line saying how to bring it in:
 
 ```
-  skip  imports/e (not on topic feat/x; run gitscale develop imports/e)
+imports/e has changes but is not on the topic: git topic join imports/e
 ```
 
-`push` pushes the topic branch of the root and every topic checkout as `git
-push -u origin <branch>`: the remote branch gets the same name and becomes the
-upstream.
-
-**`status` follows the topic.** The table starts with the topic and what may
-merge next, and each topic row says where its change stands and what it waits
-on — see [status → topics](status.md#topics):
+**`ls` follows the topic.** The table starts with the topic and what may merge
+next, and each topic row says where its change stands and what it waits on —
+see [ls → topics](status.md#topics):
 
 ```
 topic feat/price-cache · next to merge: imports/d
@@ -206,9 +367,41 @@ A topic branch cut from an older release than another repository now asks for
 gets `behind v2026.09.30 wanted by imports/c: rebase it`. That needs history,
 so it is worked out from the store, and never in CI.
 
-## Promotion: `gitscale upgrade`
+## Where a topic stands: `git topic status`
 
-`gitscale upgrade` finds which topic slots have reached a release, writes those
+The current topic only: the root and every joined checkout.
+
+```
+topic PROJ-12-price-cache
+
+  REPO           BRANCH                AHEAD  PUSHED  STATE
+  .              PROJ-12-price-cache   2      no      waits on imports/core
+  imports/core   PROJ-12-price-cache   3      yes     not tagged yet
+  imports/b      PROJ-12-price-cache   1      yes     promoted → v2026.10.04
+
+next to merge: imports/core
+then: git upgrade --commit, git scale push
+```
+
+- `BRANCH`: the slot's topic branch — per-major slots differ.
+- `AHEAD`: commits on the branch its pin does not have; for the root, commits
+  the default branch does not have.
+- `PUSHED`: `yes` when the remote has every commit; `-` when there is nothing
+  to push.
+- `STATE`: for a checkout, its [promotion state](#promotion-git-upgrade); for
+  the root, `waits on REPOS` while a joined checkout with a change is not
+  promoted, else `ready to merge`, and `merged into main` once it is.
+- **Footer:** `next to merge`, as `upgrade` prints it; `then:` the next
+  commands — `git upgrade --commit` once a checkout is promoted, `git scale
+  push` when something is not pushed, `git topic finish` once the root is
+  merged and no checkout is still on the topic.
+
+Offline; `--fetch` fetches the joined repositories first. `--format json` is
+for scripts and agents. Off a topic: `not on a topic`, exit 1.
+
+## Promotion: `git upgrade`
+
+`git upgrade` finds which topic slots have reached a release, writes those
 releases into the topic's configs that ask for less, and takes the promoted
 slots off the topic.
 
@@ -226,7 +419,7 @@ has the history; never in CI.
 | `not tagged yet` | The newest release does not hold the change: not merged, or its tag pipeline has not run | Nothing |
 | `tagged <tag>, no image yet` | Released, but consumed as an artefact and the tag's commit has no image yet | Nothing |
 | `promoted → <tag>` | The tag holds the change | Edits the configs, then the slot leaves the topic |
-| `cannot tell` | Merging conflicts: a later commit in the tag rewrote the same lines | Nothing; bump it explicitly with `gitscale upgrade <dir>` |
+| `cannot tell` | Merging conflicts: a later commit in the tag rewrote the same lines | Nothing; bump it explicitly with `git upgrade <dir>` |
 | `held (… uncommitted)` | Work no tag can hold | Nothing; commit or discard it first |
 
 Commits on the branch that nobody pushed do not hold a slot back: once the tag
@@ -241,57 +434,58 @@ so comments and key order survive.
 
 **Leaving.** The slot's topic branch is deleted and it is checked out detached
 at the tag, read-only; an artefact gets the tag's image back. If the topic
-branch still exists on the slot's remote, `upgrade` warns: `pull` and CI keep
-matching it by name until it is deleted — which is why merged topic branches
+branch still exists on the slot's remote, `upgrade` warns: placement and CI
+keep matching it by name until it is deleted — which is why merged topic branches
 are expected to be deleted, a setting GitLab ("Delete source branch") and
 GitHub ("Automatically delete head branches") both have.
 
 **The merge order.** A topic repository is ready to merge when no topic slot it
 asks for, directly or further down, is still unpromoted; the root merges last.
-`upgrade` and `status` print the next ones.
+`upgrade`, `git topic status` and `git scale ls` print the next ones.
 
 | Option | Meaning |
 |---|---|
 | `--commit` | Commit each edited `.gitscale.toml` — that file alone, whatever else the repository has changed — as `pin <dir> <tag>` |
 | `--dry-run` | Print the plan; change nothing |
 
-Pushing is left to [`gitscale push`](#inside-a-topic): `gitscale upgrade
---commit && gitscale push`.
+Pushing is left to `git scale push`; with `--commit`, the last line names what
+to push: `to push: imports/b, . — git scale push`.
 
-## Raising a dependency: `gitscale upgrade <dir>`
+## Raising a dependency: `git upgrade <dir>`
 
-`gitscale upgrade imports/d` raises D wherever it is asked for, topic or not:
+`git upgrade imports/d` — or `git upgrade .` inside it — raises D wherever it
+is asked for, topic or not:
 
 1. The new revision is the **newest release on D's stream**: the newest calver,
    or for semver the newest of the current major; `--major` crosses majors. A
    pre-release is picked only when the current pin is already a pre-release —
    the rule npm and Cargo follow.
 2. **Every requester is edited**: the root directly, every other one after
-   it is [developed](#gitscale-develop) — an artefact requester becomes a
-   checkout of its source first, to edit its config.
+   it [joins](#git-topic-join--leave) the topic — an artefact requester becomes
+   a checkout of its source first, to edit its config.
 3. A requester asking for no version (a branch) is reported, not changed. A
-   requester the root overrides cannot be developed, and is reported. If D
-   itself is overridden, nothing is edited.
+   requester the root overrides cannot join, and is reported. If D itself is
+   overridden, nothing is edited.
 4. With no topic and a repository other than the root to edit, `upgrade`
-   creates the root's branch with `git switch -c` and develops the requesters
-   on it: `upgrade/d-v2026.10.01`, or `upgrade/<date>` for several
-   dependencies. `-c <branch>` names it.
+   creates the root's branch and joins the requesters to it:
+   `upgrade/d-v2026.10.01`, or `upgrade/<date>` for several dependencies.
+   `-c <branch>` names it.
 
 ```
-$ gitscale upgrade imports/d
+$ git upgrade imports/d
 imports/d   v2026.09.28 → v2026.10.01
-  topic upgrade/d-v2026.10.01 (created): imports/b, imports/c developed
+  topic upgrade/d-v2026.10.01 (created): imports/b, imports/c joined
   imports/b/.gitscale.toml   libs/d  v2026.09.28 → v2026.10.01
   imports/c/.gitscale.toml   libs/d  v2026.09.30 → v2026.10.01
 next to merge: imports/b, imports/c
 ```
 
 The cascade then runs as for any change: B and C merge and are tagged, and
-`gitscale upgrade` bumps the root's pins of them.
+`git upgrade` bumps the root's pins of them.
 
-## Writing what resolution selected: `upgrade --resolved`
+## Writing what resolution selected: `git upgrade --resolved`
 
-`gitscale upgrade --resolved [<dir>...]` writes the revision resolution already
+`git upgrade --resolved [<dir>...]` writes the revision resolution already
 selected into the root's own entries, with no tag lookup — so the diff of
 `.gitscale.toml` shows what the workspace is really built from.
 
@@ -334,7 +528,7 @@ that the root does not override, is taken from that branch's tip — detached
 and read-only, like every CI checkout. Resolution already lists every
 repository's refs, so matching costs no extra round trip.
 
-**The merge gate: `gitscale check`.** It fails while any slot resolves from a
+**The merge gate: `git scale check`.** It fails while any slot resolves from a
 topic branch rather than a revision written in a config — what a merge would
 ship is then not what the pipeline tested. It needs no history, so it runs on
 shallow checkouts. In a merge request pipeline it applies only when the target
@@ -351,7 +545,7 @@ ship, and the fix for each case:
 ```
 Error: imports/d was taken from branch feat/x, not from v2026.10.01 pinned in imports/b/.gitscale.toml.
   This pipeline tested imports/d at feat/x (4f2a9c1), so merging now would ship a pin that was not tested.
-  - imports/d's change not merged yet: merge it first, then run gitscale upgrade here and push.
+  - imports/d's change not merged yet: merge it first, then run git upgrade --commit here and push.
   - already merged and pinned: delete branch feat/x in git@github.com:org/d.git, then rerun this pipeline.
 ```
 
@@ -389,30 +583,30 @@ it, `staging` builds from pins like `main`.
 Two topics at once are two worktrees of the root:
 
 ```
-git worktree add ../app-other -b feat/other
+git topic start --worktree feat/other     # beside the clone: ../app-feat-other
 ```
 
-The git hook populates it; without the hook, run `gitscale pull` in it.
-
-Its checkouts are worktrees of the same [stores](stores.md), so nothing is
+or, in a [bare clone](#worktree-layout), every `git topic start` adds one. Its
+checkouts are worktrees of the same [stores](stores.md), so nothing is
 downloaded again. Git checks a branch out in one worktree at a time, so each
 root worktree is on its own topic, and every topic's branches are visible from
-all of them.
+all of them. `git topic list` shows them all; `git topic finish` removes a
+finished one's worktree.
 
 ## Things to know
 
 - **Matching is by name only.** An unrelated `fix-login` branch in another
-  repository joins the topic, in CI and on `pull`. Use topic names that carry a
-  ticket ID; `status` notes a slot that joined from its remote as `topic, from
-  remote` until the first `pull` puts it on a local branch, so a surprise match
-  shows.
+  repository joins the topic, in CI and on placement. Use topic names that
+  carry a ticket ID; `ls` notes a slot that joined from its remote as `topic,
+  from remote` until the first placement puts it on a local branch, so a
+  surprise match shows.
 - **The gate protects only when it is required** on every repository that
   consumes others.
 - **Content detection can be inconclusive** when a later commit rewrote the
   same lines; `upgrade` says so and never guesses.
 - **A busy long-lived branch may never be wholly in a tag**: by the time
-  `staging` is tagged, new commits have landed on it. `upgrade <dir>` is the way
-  out.
+  `staging` is tagged, new commits have landed on it. `git upgrade <dir>` is the
+  way out.
 
 ---
 

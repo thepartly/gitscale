@@ -25,14 +25,14 @@ post_sync = "touch .hook-ran"
         bare.display()
     ));
 
-    let out = env.run_as_hook("github.com/thepartly/*", &["pull"]);
+    let out = env.run_as_hook("github.com/thepartly/*", &["sync"]);
     assert!(out.success, "stderr: {}", out.stderr);
 
     // Hook should have created this file
     assert!(env.playground.join(".hook-ran").exists());
 }
 
-/// A `gitscale pull` the user typed is not a drive-by: they chose the
+/// A `git scale sync` the user typed is not a drive-by: they chose the
 /// directory and the moment, so the allowlist — which belongs to the installed
 /// hook — does not apply.
 #[test]
@@ -43,14 +43,14 @@ fn normal_002_runs_when_the_user_invoked_gitscale() {
     );
     env.write_config("[hooks]\npost_sync = \"touch .hook-ran\"\n");
 
-    let out = env.run_binary_plain(&["pull"]);
+    let out = env.run_binary_plain(&["sync"]);
     assert!(out.success, "stderr: {}", out.stderr);
     assert!(env.playground.join(".hook-ran").exists());
 }
 
-/// `sync` pulls internally, and the docs promise `post_sync` runs once, not
-/// twice: a command that installs or migrates something must not run again
-/// on top of itself.
+/// `sync` places the checkouts as one of its steps, and the docs promise
+/// `post_sync` runs once, not twice: a command that installs or migrates
+/// something must not run again on top of itself.
 #[test]
 fn normal_009_sync_runs_it_exactly_once() {
     let env = TestEnv::new("post_sync_once_per_sync");
@@ -69,7 +69,7 @@ fn normal_009_sync_runs_it_exactly_once() {
     let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(count(), 1, "sync ran post_sync {} times", count());
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(count(), 2, "pull ran post_sync {} times", count() - 1);
 }
@@ -95,7 +95,7 @@ fn normal_010_every_spelling_of_an_allowed_repository_is_allowed() {
     ] {
         run_git_pub(&env.playground, &["remote", "set-url", "origin", origin]);
         let _ = std::fs::remove_file(env.playground.join(".hook-ran"));
-        let out = env.run_as_hook("github.com/thepartly/gitscale", &["pull"]);
+        let out = env.run_as_hook("github.com/thepartly/gitscale", &["sync"]);
         assert!(out.success, "{}: {}", origin, out.stderr);
         assert!(env.playground.join(".hook-ran").exists(), "{}", origin);
     }
@@ -123,7 +123,7 @@ allow = "*"
 "#,
     );
 
-    let out = env.run_as_hook("github.com/thepartly/*", &["pull"]);
+    let out = env.run_as_hook("github.com/thepartly/*", &["sync"]);
     assert!(!env.playground.join("pwned").exists());
     assert!(
         out.stderr.contains("refusing to run the post_sync hook"),
@@ -143,7 +143,7 @@ fn edge_004_a_lookalike_owner_is_refused() {
 
     env.write_config("[hooks]\npost_sync = \"touch pwned\"\n");
 
-    let out = env.run_as_hook("github.com/thepartly/*", &["pull"]);
+    let out = env.run_as_hook("github.com/thepartly/*", &["sync"]);
     assert!(!out.success);
     assert!(!env.playground.join("pwned").exists());
     // Refused by the allowlist, not failed for some other reason.
@@ -169,7 +169,7 @@ fn edge_005_a_workspace_without_a_remote_matches_on_its_path() {
     env.init_playground_git();
     env.write_config("[hooks]\npost_sync = \"touch .hook-ran\"\n");
 
-    let out = env.run_as_hook("github.com/*", &["pull"]);
+    let out = env.run_as_hook("github.com/*", &["sync"]);
     assert!(!out.success);
     assert!(!env.playground.join(".hook-ran").exists());
     assert!(
@@ -179,7 +179,7 @@ fn edge_005_a_workspace_without_a_remote_matches_on_its_path() {
     );
 
     let pattern = format!("{}/*", env.playground.parent().unwrap().display());
-    let out = env.run_as_hook(&pattern, &["pull"]);
+    let out = env.run_as_hook(&pattern, &["sync"]);
     assert!(out.success, "stderr: {}", out.stderr);
     assert!(env.playground.join(".hook-ran").exists());
 }
@@ -194,7 +194,7 @@ fn edge_006_an_empty_allowlist_refuses_everything() {
     );
     env.write_config("[hooks]\npost_sync = \"touch pwned\"\n");
 
-    let out = env.run_as_hook("", &["pull"]);
+    let out = env.run_as_hook("", &["sync"]);
     assert!(!out.success);
     assert!(!env.playground.join("pwned").exists());
     assert!(
@@ -218,7 +218,7 @@ fn edge_011_verbose_output_names_the_pattern_and_the_command() {
         "https://github.com/thepartly/gitscale.git",
     );
     env.write_config("[hooks]\npost_sync = \"touch .hook-ran\"\n");
-    let out = env.run_as_hook("github.com/other/*,github.com/thepartly/*", &["pull", "-v"]);
+    let out = env.run_as_hook("github.com/other/*,github.com/thepartly/*", &["sync", "-v"]);
     assert!(out.success, "stderr: {}", out.stderr);
     assert!(
         out.stdout
@@ -242,7 +242,7 @@ fn edge_012_a_blank_command_runs_nothing_and_is_never_refused() {
         "https://gitlab.example.com/attacker/payload.git",
     );
     env.write_config("[hooks]\npost_sync = \"   \"\n");
-    let out = env.run_as_hook("", &["pull"]);
+    let out = env.run_as_hook("", &["sync"]);
     assert!(out.success, "stderr: {}", out.stderr);
     assert!(!out.stderr.contains("refusing"), "{}", out.stderr);
 }
@@ -259,7 +259,7 @@ fn edge_013_a_path_pattern_also_admits_a_workspace_that_has_a_remote() {
     );
     env.write_config("[hooks]\npost_sync = \"touch .hook-ran\"\n");
     let pattern = format!("{}/*", env.playground.parent().unwrap().display());
-    let out = env.run_as_hook(&pattern, &["pull"]);
+    let out = env.run_as_hook(&pattern, &["sync"]);
     assert!(out.success, "stderr: {}", out.stderr);
     assert!(
         env.playground.join(".hook-ran").exists(),
@@ -272,7 +272,7 @@ fn edge_013_a_path_pattern_also_admits_a_workspace_that_has_a_remote() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn error_007_a_failing_command_fails_the_pull() {
+fn error_007_a_failing_command_fails_the_sync() {
     let env = hook_env(
         "hooks_post_sync_failure",
         "https://github.com/thepartly/gitscale.git",
@@ -289,7 +289,7 @@ post_sync = "exit 1"
         bare.display()
     ));
 
-    let out = env.run_as_hook("*", &["pull"]);
+    let out = env.run_as_hook("*", &["sync"]);
     assert!(!out.success);
     assert!(out.stderr.contains("post_sync hook failed"));
 }
@@ -306,7 +306,7 @@ fn error_008_is_refused_for_an_unlisted_repository() {
 
     env.write_config("[hooks]\npost_sync = \"touch pwned\"\n");
 
-    let out = env.run_as_hook("github.com/thepartly/*", &["pull"]);
+    let out = env.run_as_hook("github.com/thepartly/*", &["sync"]);
     assert!(!out.success);
     assert!(
         !env.playground.join("pwned").exists(),
@@ -325,16 +325,16 @@ fn error_008_is_refused_for_an_unlisted_repository() {
     );
 }
 
-/// `post_sync` runs after a pull that worked. When the pull fails it does not
+/// `post_sync` runs after a sync that worked. When the sync fails it does not
 /// run — a build step must not run over checkouts that are not there.
 #[test]
-fn error_014_is_skipped_after_a_failed_pull() {
+fn error_014_is_skipped_after_a_failed_sync() {
     let env = TestEnv::new("post_sync_after_failed_pull");
     env.write_config(&format!(
         "[hooks]\npost_sync = \"touch .hook-ran\"\n\n[repos]\n\"libs/x\" = {{ url = \"{}\", revision = \"main\" }}\n",
         env.repos_remote.join("missing.git").display()
     ));
-    let out = env.run(&["pull"]);
+    let out = env.run(&["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(!env.playground.join(".hook-ran").exists());
 }
@@ -362,7 +362,7 @@ fn error_015_disguised_remotes_are_refused() {
         "https://github.com/thepartly-evil/x.git",
     ] {
         run_git_pub(&env.playground, &["remote", "set-url", "origin", origin]);
-        let out = env.run_as_hook("github.com/thepartly/*", &["pull"]);
+        let out = env.run_as_hook("github.com/thepartly/*", &["sync"]);
         assert!(!out.success, "{} was allowed", origin);
         assert!(
             out.stderr.contains("refusing to run the post_sync hook"),
@@ -386,7 +386,7 @@ fn error_016_an_encoded_slash_does_not_pass_for_a_path_under_the_owner() {
         "https://github.com/thepartly/x%2F..%2F..%2Fevil%2Fy.git",
     );
     env.write_config("[hooks]\npost_sync = \"touch pwned\"\n");
-    let out = env.run_as_hook("github.com/thepartly/*", &["pull"]);
+    let out = env.run_as_hook("github.com/thepartly/*", &["sync"]);
     assert!(!env.playground.join("pwned").exists());
     assert!(
         out.stderr.contains("refusing to run the post_sync hook"),
@@ -406,7 +406,7 @@ fn error_017_a_star_owner_pattern_does_not_admit_a_subgroup_named_like_the_owner
         "https://gitlab.com/evil/acme/payload.git",
     );
     env.write_config("[hooks]\npost_sync = \"touch pwned\"\n");
-    let out = env.run_as_hook("*/acme/*", &["pull"]);
+    let out = env.run_as_hook("*/acme/*", &["sync"]);
     assert!(
         !env.playground.join("pwned").exists(),
         "an attacker's subgroup passed for owner acme"
@@ -428,7 +428,7 @@ fn error_018_the_refusal_never_prints_credentials_from_the_origin() {
         "https://gitlab-ci-token:S3CRET-TOKEN@gitlab.example.com/acme/app.git",
     );
     env.write_config("[hooks]\npost_sync = \"touch pwned\"\n");
-    let out = env.run_as_hook("github.com/*", &["pull"]);
+    let out = env.run_as_hook("github.com/*", &["sync"]);
     assert!(!out.success);
     assert!(
         out.stderr.contains(
@@ -464,7 +464,7 @@ fn error_019_the_refusal_escapes_and_shortens_the_command() {
         "[hooks]\npost_sync = \"echo \\u001b[2Jhidden {}\"\n",
         long
     ));
-    let out = env.run_as_hook("github.com/*", &["pull"]);
+    let out = env.run_as_hook("github.com/*", &["sync"]);
     assert!(!out.success);
     assert!(!out.stderr.contains('\u{1b}'), "raw escape in the refusal");
     assert!(out.stderr.contains("echo \\x1b[2Jhidden"), "{}", out.stderr);
@@ -483,7 +483,7 @@ fn error_020_a_host_that_only_folds_to_an_allowed_one_is_refused() {
         "git@git.\u{212A}nown.example:acme/app.git",
     );
     env.write_config("[hooks]\npost_sync = \"touch pwned\"\n");
-    let out = env.run_as_hook("git.known.example/*", &["pull"]);
+    let out = env.run_as_hook("git.known.example/*", &["sync"]);
     assert!(
         !env.playground.join("pwned").exists(),
         "a Kelvin-sign host passed for git.known.example"
