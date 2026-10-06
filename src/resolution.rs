@@ -3,8 +3,9 @@
 //!
 //! Every repository that declares a dependency — the root included — makes
 //! one *request* for it. Requests land in *slots*: one checkout each, keyed by
-//! the repository, its compatibility class (the semver major) and whether it
-//! is source or an artefact. In each slot the highest request wins, unless an
+//! the repository and its compatibility class (the major) — how the checkout
+//! arrives, as source or artefact, is the workspace's choice and no part of
+//! resolution. In each slot the highest request wins, unless an
 //! override says otherwise. Only revisions that are selected make requests of
 //! their own, so the configs of the checkouts the workspace ends up with are
 //! exactly what decided the result.
@@ -16,9 +17,9 @@
 //! `.gitscale.toml` is read from disk — the same file, plus any edit not yet
 //! committed.
 //!
-//! Nothing here reads git history. Two versions of one stream compare as
-//! versions; anything else — a branch, a commit, tags of different streams —
-//! is decided by position in the graph: the request from the repository that
+//! Nothing here reads git history. Two versions of one kind compare as
+//! versions; anything else — a branch, a commit, semver against a calendar
+//! version — is decided by position in the graph: the request from the repository that
 //! dominates the other wins, and two that neither dominates are an error. So a
 //! shallow CI checkout resolves exactly as a developer machine does. The one
 //! use of history is a warning, computed only where history is on local disk:
@@ -34,9 +35,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::config::{
-    parse_dependency_config, ArtefactUse, GitScaleConfig, RepoEntry, CONFIG_FILENAME,
-};
+use crate::config::{parse_dependency_config, GitScaleConfig, RepoEntry, CONFIG_FILENAME};
+use crate::prefer::{Form, Reason as FormReason};
 use crate::resolve::SymlinkEntry;
 use crate::version::{self, Class, Version};
 
@@ -75,55 +75,36 @@ pub struct Refs {
     pub default_branch: Option<String>,
 }
 
-/// Source or artefact: a built artefact and the source tree are different
-/// files, so they never share a checkout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Kind {
-    Source,
-    Artefact,
-}
-
-impl Kind {
-    /// An entry that replaces its checkout with an image is an artefact; one
-    /// that overlays an image is a source checkout like any other.
-    pub fn of(entry: &RepoEntry) -> Kind {
-        if entry.is_artefact() {
-            Kind::Artefact
-        } else {
-            Kind::Source
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Kind::Source => "source",
-            Kind::Artefact => "artefact",
-        }
-    }
-}
-
 /// The repositories resolution reads, by URL. Every method may fail with
 /// [`Unavailable`] when the answer is not on this machine.
 pub trait Repos {
-    fn refs(&self, url: &str, kind: Kind) -> Result<Refs>;
-    /// The `.gitscale.toml` of a source checkout at `commit`, `None` when
-    /// that commit has none. `revision` is what names the commit, for a
-    /// remote that serves refs but not bare commits.
+    fn refs(&self, url: &str) -> Result<Refs>;
+    /// The `.gitscale.toml` of the repository at `commit`, `None` when that
+    /// commit has none. `revision` is what names the commit, for a remote
+    /// that serves refs but not bare commits.
     fn config_at(&self, url: &str, commit: &str, revision: &str) -> Result<Option<String>>;
-    /// The `.gitscale.toml` an artefact's image for `commit` carries.
-    fn artefact_config(&self, url: &str, commit: &str) -> Result<Option<String>>;
     /// The remote's default branch: what a checkout nobody gives a revision
     /// follows. Asked only when such a checkout does not exist yet, since one
     /// that does is read at its own HEAD.
-    fn default_branch(&self, url: &str, kind: Kind) -> Result<Option<String>>;
+    fn default_branch(&self, url: &str) -> Result<Option<String>>;
     /// Whether `ancestor` is `descendant` or in its history — asked only for
     /// a warning, and [`Unavailable`] wherever history is not on local disk.
-    fn is_ancestor(&self, url: &str, kind: Kind, ancestor: &str, descendant: &str) -> Result<bool>;
+    fn is_ancestor(&self, url: &str, ancestor: &str, descendant: &str) -> Result<bool>;
+    /// The commit the build of `url` with the source hash `hash` was made
+    /// from, as its registry records it.
+    fn build(&self, url: &str, hash: &str) -> Result<String> {
+        bail!("no build of {} is looked up here: {}", url, hash)
+    }
+    /// Whether `url`'s sources cannot be read, so its refs and configs came
+    /// from its registry. Optional.
+    fn sourceless(&self, _url: &str) -> bool {
+        false
+    }
     /// Make the repositories ready, in parallel where that helps. Optional.
-    fn prepare(&self, _wanted: &[(String, Kind)]) {}
+    fn prepare(&self, _wanted: &[String]) {}
     /// A revision was asked of `url` that its refs do not have: when they
     /// were read offline, a fetch may bring it. Optional.
-    fn unknown(&self, _url: &str, _kind: Kind) {}
+    fn unknown(&self, _url: &str) {}
     /// The commit a branch of this workspace's own — not the remote's —
     /// points at: where a topic is developed. `None` where there are no
     /// local branches, as in CI.
@@ -137,7 +118,7 @@ pub trait Checkouts {
     /// The `.gitscale.toml` of the checkout at `directory`, when that
     /// checkout sits exactly at `commit`: `Some(None)` when it has none,
     /// `None` when the checkout is missing or elsewhere.
-    fn config_if_at(&self, directory: &str, kind: Kind, commit: &str) -> Option<Option<String>>;
+    fn config_if_at(&self, directory: &str, commit: &str) -> Option<Option<String>>;
     /// HEAD of the git checkout at `directory`.
     fn head(&self, directory: &str) -> Option<String>;
 }
@@ -153,6 +134,8 @@ pub enum RevKind {
     Branch,
     Tag,
     Sha,
+    /// `hash:<source hash>`: one build, found in the registry.
+    Build,
 }
 
 impl RevKind {
@@ -161,6 +144,7 @@ impl RevKind {
             RevKind::Branch => "branch",
             RevKind::Tag => "tag",
             RevKind::Sha => "sha",
+            RevKind::Build => "build",
         }
     }
 }
@@ -291,11 +275,13 @@ pub struct SlotTopic {
 pub struct Slot {
     pub directory: String,
     pub url: String,
-    /// How the root's entry uses the repository's artefact; `None` for a
-    /// plain source checkout, and for every implicit one but an artefact.
-    pub artefact: Option<ArtefactUse>,
+    /// The form this workspace prefers it in, other than its sources: see
+    /// [`crate::prefer`].
+    pub preferred: Option<Form>,
+    /// Its sources cannot be read: it resolved from its registry, and is
+    /// its artefact whatever is preferred.
+    pub sourceless: bool,
     pub recursive: bool,
-    pub kind: Kind,
     pub class: Class,
     /// The root entry's own revision; `None` for an implicit slot.
     pub declared: Option<String>,
@@ -337,10 +323,25 @@ impl Slot {
                 (None, None, Some(declared)) if self.unresolved.is_some() => declared.clone(),
                 _ => String::new(),
             },
-            artefact: self.artefact,
             recursive: self.recursive,
             ..RepoEntry::default()
         }
+    }
+
+    /// How the checkout arrives, and why: on the topic, its sources; else
+    /// its artefact when its sources cannot be read; else its preference,
+    /// else its sources. See [`crate::prefer`].
+    pub fn arrival(&self) -> (Form, FormReason) {
+        match (&self.topic, self.preferred) {
+            (Some(_), _) => (Form::Source, FormReason::Topic),
+            _ if self.sourceless => (Form::Artefact, FormReason::NoAccess),
+            (_, Some(form)) => (form, FormReason::Preferred),
+            (_, None) => (Form::Source, FormReason::Default),
+        }
+    }
+
+    pub fn form(&self) -> Form {
+        self.arrival().0
     }
 
     /// What the slot is held at off the topic: the selected revision, or the
@@ -355,6 +356,19 @@ impl Slot {
             }),
             _ => None,
         }
+    }
+
+    /// The slot taken off the topic, at `revision`, which is `commit`: what
+    /// a checkout leaving the topic is placed as.
+    pub fn off_topic(&self, revision: &str, commit: &str) -> Slot {
+        let mut off = self.clone();
+        off.topic = None;
+        off.commit = Some(commit.to_string());
+        if let Some(chosen) = &mut off.chosen {
+            chosen.revision = revision.to_string();
+            chosen.commit = commit.to_string();
+        }
+        off
     }
 
     /// The first repository that asked for this one, for `implicit via`.
@@ -397,6 +411,31 @@ impl Resolution {
         })
     }
 
+    /// The slots of the repository at `url`, in any class.
+    pub fn slots_of<'a>(&'a self, url: &str) -> impl Iterator<Item = &'a Slot> + 'a {
+        let url = crate::urls::normalize(url);
+        self.slots
+            .iter()
+            .filter(move |s| crate::urls::normalize(&s.url) == url)
+    }
+
+    /// How many paths of the root at `root` have uncommitted changes, not
+    /// counting its checkouts, which are untracked there — or `None` when
+    /// none do.
+    pub fn root_changes(&self, root: &Path) -> Option<usize> {
+        let changed = crate::git::porcelain(root)?
+            .iter()
+            .filter(|(untracked, path)| {
+                !(*untracked
+                    && self.slots.iter().any(|slot| {
+                        Path::new(path).starts_with(&slot.directory)
+                            || Path::new(&slot.directory).starts_with(path.trim_end_matches('/'))
+                    }))
+            })
+            .count();
+        (changed > 0).then_some(changed)
+    }
+
     /// The links planted inside the checkout at `directory`, relative to it:
     /// gitscale's, not the checkout owner's work.
     pub fn planted_in(&self, directory: &str) -> Vec<String> {
@@ -431,7 +470,6 @@ struct SlotKey {
     /// Normalized.
     url: String,
     class: Class,
-    kind: Kind,
 }
 
 /// Who made a request: the root, or the checkout of a slot.
@@ -491,7 +529,6 @@ struct Req {
     requester: Node,
     entry: RepoEntry,
     url: String,
-    kind: Kind,
     info: Info,
     /// The topic's own request: no repository made it.
     topic: bool,
@@ -658,7 +695,7 @@ impl<'a> Engine<'a> {
         self.repos.prepare(
             &roots
                 .iter()
-                .map(|r| (r.entry.repo_url.clone(), r.kind))
+                .map(|r| r.entry.repo_url.clone())
                 .collect::<Vec<_>>(),
         );
 
@@ -699,7 +736,6 @@ impl<'a> Engine<'a> {
         Req {
             requester,
             url: crate::urls::normalize(&entry.repo_url),
-            kind: Kind::of(entry),
             entry: entry.clone(),
             info: Info::Empty,
             topic: false,
@@ -810,7 +846,7 @@ impl<'a> Engine<'a> {
                     );
                 }
                 self.edge(&key.url, &req.url)?;
-                wanted.push((entry.repo_url.clone(), req.kind));
+                wanted.push(entry.repo_url.clone());
                 requests.push(req);
             }
         }
@@ -841,22 +877,11 @@ impl<'a> Engine<'a> {
             return cached.clone().map_err(|e| anyhow!(e));
         }
         let url = &state.requests[0].entry.repo_url;
-        // A topic branch is source: its commits need not have an image, and
-        // whatever the checkout holds, its dependencies are the source's.
-        let kind = if state.topic.is_some() {
-            Kind::Source
-        } else {
-            key.kind
-        };
-        let text = match self.checkouts.config_if_at(&state.directory, kind, commit) {
+        let text = match self.checkouts.config_if_at(&state.directory, commit) {
             Some(on_disk) => Ok(on_disk),
-            None => match kind {
-                Kind::Source => {
-                    self.repos
-                        .config_at(url, commit, state.chosen_revision().unwrap_or_default())
-                }
-                Kind::Artefact => self.repos.artefact_config(url, commit),
-            },
+            None => self
+                .repos
+                .config_at(url, commit, state.chosen_revision().unwrap_or_default()),
         };
         let parsed = match text {
             Ok(Some(text)) => {
@@ -908,7 +933,7 @@ impl<'a> Engine<'a> {
             };
             return Ok(());
         }
-        match self.lookup(&req.entry.repo_url, req.kind, &req.entry.revision) {
+        match self.lookup(&req.entry.repo_url, &req.entry.revision) {
             Ok(info) => {
                 self.classified
                     .borrow_mut()
@@ -917,7 +942,7 @@ impl<'a> Engine<'a> {
             }
             Err(e) if is_unavailable(&e) => req.info = Info::Unavailable(e.to_string()),
             Err(e) if e.downcast_ref::<UnknownRevision>().is_some() => {
-                self.repos.unknown(&req.entry.repo_url, req.kind);
+                self.repos.unknown(&req.entry.repo_url);
                 let message = e.to_string();
                 self.classified
                     .borrow_mut()
@@ -935,8 +960,20 @@ impl<'a> Engine<'a> {
         Ok(())
     }
 
-    fn lookup(&self, url: &str, kind: Kind, revision: &str) -> Result<RevInfo> {
-        let refs = self.repos.refs(url, kind)?;
+    fn lookup(&self, url: &str, revision: &str) -> Result<RevInfo> {
+        // Read for a build too: they say whether the sources can be read.
+        let refs = self.repos.refs(url)?;
+        if let Some(hash) = revision.strip_prefix("hash:") {
+            if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+                bail!("hash: takes a source hash, 64 hex digits");
+            }
+            return Ok(RevInfo {
+                commit: self.repos.build(url, &hash.to_lowercase())?,
+                kind: RevKind::Build,
+                version: None,
+                class: None,
+            });
+        }
         let branch = revision.strip_prefix("refs/heads/");
         let tag = revision.strip_prefix("refs/tags/");
         let (rev_kind, commit, tag_name) = if let Some(name) = branch {
@@ -958,14 +995,17 @@ impl<'a> Engine<'a> {
             // Not checked here: that needs the commit, and reading its
             // config fetches it — failing then, with this revision named.
             (RevKind::Sha, revision.to_lowercase(), None)
+        } else if self.repos.sourceless(url) {
+            bail!(
+                "{} needs access to its sources: without it only the released versions its \
+                 registry has resolve",
+                revision
+            );
         } else {
             return Err(unknown(url, revision));
         };
-        let _ = kind;
         let version = tag_name.and_then(version::parse);
-        let class = version
-            .as_ref()
-            .map(|v| if v.is_semver() { v.class() } else { Class::Any });
+        let class = version.as_ref().map(Version::class);
         Ok(RevInfo {
             commit,
             kind: rev_kind,
@@ -1001,13 +1041,12 @@ impl<'a> Engine<'a> {
         let mut pending = Vec::new();
         let mut joining = Vec::new();
         for req in requests {
-            let single = singletons.contains(&(req.url.clone(), req.kind));
+            let single = singletons.contains(&req.url);
             match req.known().map(|i| i.class) {
                 Some(Some(class)) => {
                     let key = SlotKey {
                         url: req.url.clone(),
                         class: if single { Class::Any } else { class },
-                        kind: req.kind,
                     };
                     slots.entry(key).or_default().push(req);
                 }
@@ -1015,7 +1054,6 @@ impl<'a> Engine<'a> {
                     let key = SlotKey {
                         url: req.url.clone(),
                         class: Class::Any,
-                        kind: req.kind,
                     };
                     slots.entry(key).or_default().push(req);
                 }
@@ -1026,16 +1064,12 @@ impl<'a> Engine<'a> {
         // A branch or commit joins the one checkout its repository's versions
         // are in — or makes the first, when nobody asks for a version.
         for req in joining {
-            let classes: Vec<SlotKey> = slots
-                .keys()
-                .filter(|k| k.url == req.url && k.kind == req.kind)
-                .cloned()
-                .collect();
+            let classes: Vec<SlotKey> =
+                slots.keys().filter(|k| k.url == req.url).cloned().collect();
             let key = match classes.as_slice() {
                 [] => SlotKey {
                     url: req.url.clone(),
                     class: Class::Any,
-                    kind: req.kind,
                 },
                 [only] => only.clone(),
                 many => bail!(
@@ -1056,12 +1090,11 @@ impl<'a> Engine<'a> {
         for req in pending {
             let key = slots
                 .keys()
-                .find(|k| k.url == req.url && k.kind == req.kind)
+                .find(|k| k.url == req.url)
                 .cloned()
                 .unwrap_or(SlotKey {
                     url: req.url.clone(),
                     class: Class::Any,
-                    kind: req.kind,
                 });
             slots.entry(key).or_default().push(req);
         }
@@ -1070,8 +1103,8 @@ impl<'a> Engine<'a> {
         let mut states = BTreeMap::new();
         for (key, reqs) in slots {
             let root_entry = self.root_entry_of(&key, &reqs)?;
-            let single = singletons.contains(&(key.url.clone(), key.kind));
-            let choice = self.select(&key, &reqs, &dominators, single, previous)?;
+            let single = singletons.contains(&key.url);
+            let choice = self.select(&reqs, &dominators, single, previous)?;
             states.insert(
                 key,
                 SlotState {
@@ -1093,12 +1126,12 @@ impl<'a> Engine<'a> {
         };
         self.place(&mut round, previous)?;
         self.apply_topic(&mut round, previous);
-        for (key, state) in round.slots.iter_mut() {
+        for state in round.slots.values_mut() {
             state.commit = match &state.choice {
                 Choice::Picked { winner, .. } => {
                     state.requests[*winner].known().map(|i| i.commit.clone())
                 }
-                Choice::Follow => self.follow_commit(key, state),
+                Choice::Follow => self.follow_commit(state),
                 Choice::Unresolved(_) => None,
             };
         }
@@ -1122,7 +1155,7 @@ impl<'a> Engine<'a> {
         for key in &keys {
             let highest = keys
                 .iter()
-                .filter(|k| k.url == key.url && k.kind == key.kind)
+                .filter(|k| k.url == key.url)
                 .map(|k| k.class)
                 .max()
                 == Some(key.class);
@@ -1142,7 +1175,7 @@ impl<'a> Engine<'a> {
             let developed = local.is_some();
             let commit = match local {
                 Some(commit) => commit,
-                None => match self.repos.refs(&url, key.kind) {
+                None => match self.repos.refs(&url) {
                     Ok(refs) => match refs.branches.get(&branch) {
                         Some(commit) => commit.clone(),
                         None => continue,
@@ -1158,10 +1191,6 @@ impl<'a> Engine<'a> {
                     .as_ref()
                     .map_or(first.repo_url.clone(), |e| e.repo_url.clone()),
                 revision: branch.clone(),
-                artefact: state
-                    .root_entry
-                    .as_ref()
-                    .map_or(first.artefact, |e| e.artefact),
                 ..RepoEntry::default()
             };
             let pinned = match &state.choice {
@@ -1171,7 +1200,6 @@ impl<'a> Engine<'a> {
             state.requests.push(Req {
                 requester: Node::Root,
                 url: key.url.clone(),
-                kind: key.kind,
                 entry,
                 info: Info::Known(RevInfo {
                     commit,
@@ -1226,7 +1254,7 @@ impl<'a> Engine<'a> {
                 ))
                 .and_then(|c| c.as_ref().ok().cloned())
                 .flatten()
-                .and_then(|c| c.develop.pinned)
+                .and_then(|c| c.branches.pinned)
                 .is_some_and(|patterns| crate::topic::pins(&patterns, topic));
             if pins {
                 return Some(state.directory.clone());
@@ -1237,15 +1265,10 @@ impl<'a> Engine<'a> {
 
     /// The commit a slot nobody gives a revision is read at and checked out
     /// at: the remote's default branch.
-    fn follow_commit(&self, key: &SlotKey, state: &SlotState) -> Option<String> {
+    fn follow_commit(&self, state: &SlotState) -> Option<String> {
         let url = &state.requests[0].entry.repo_url;
-        let branch = self.repos.default_branch(url, key.kind).ok()??;
-        self.repos
-            .refs(url, key.kind)
-            .ok()?
-            .branches
-            .get(&branch)
-            .cloned()
+        let branch = self.repos.default_branch(url).ok()??;
+        self.repos.refs(url).ok()?.branches.get(&branch).cloned()
     }
 
     /// The root entry a slot belongs to, if the root declares it.
@@ -1269,13 +1292,13 @@ impl<'a> Engine<'a> {
     /// The URLs that may be checked out only once, by what the requests and
     /// the repositories' own configs say — with `singleton = false` from a
     /// repository relaxing what the repositories it dominates say.
-    fn singletons(&self, requests: &[Req], previous: Option<&Round>) -> BTreeSet<(String, Kind)> {
+    fn singletons(&self, requests: &[Req], previous: Option<&Round>) -> BTreeSet<String> {
         let empty = Dominators::default();
         let dominators = previous.map_or(&empty, |p| &p.dominators);
-        let mut trues: BTreeMap<(String, Kind), Vec<Node>> = BTreeMap::new();
-        let mut falses: BTreeMap<(String, Kind), Vec<Node>> = BTreeMap::new();
+        let mut trues: BTreeMap<String, Vec<Node>> = BTreeMap::new();
+        let mut falses: BTreeMap<String, Vec<Node>> = BTreeMap::new();
         for req in requests {
-            let key = (req.url.clone(), req.kind);
+            let key = req.url.clone();
             match req.entry.singleton {
                 Some(true) => trues.entry(key).or_default().push(req.requester.clone()),
                 Some(false) => falses.entry(key).or_default().push(req.requester.clone()),
@@ -1296,7 +1319,7 @@ impl<'a> Engine<'a> {
                     .flatten();
                 if config.is_some_and(|c| c.singleton) {
                     trues
-                        .entry((key.url.clone(), key.kind))
+                        .entry(key.url.clone())
                         .or_default()
                         .push(Node::Slot(key.clone()));
                 }
@@ -1316,7 +1339,6 @@ impl<'a> Engine<'a> {
 
     fn select(
         &self,
-        key: &SlotKey,
         reqs: &[Req],
         dom: &Dominators,
         singleton: bool,
@@ -1440,7 +1462,7 @@ impl<'a> Engine<'a> {
                     reason: Reason::Override,
                     resolution: "override",
                     overruled,
-                    ahead: self.ahead_of(key, reqs, o, &known),
+                    ahead: self.ahead_of(reqs, o, &known),
                 });
             }
 
@@ -1511,7 +1533,7 @@ impl<'a> Engine<'a> {
                 reason,
                 resolution,
                 overruled: Vec::new(),
-                ahead: self.ahead_of(key, reqs, best, &known),
+                ahead: self.ahead_of(reqs, best, &known),
             })
         })();
         match result {
@@ -1520,8 +1542,8 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// How two requests in one slot order: as versions when both are, in
-    /// one stream; otherwise by position, the request from the repository
+    /// How two requests in one slot order: as versions when both are, of
+    /// one kind; otherwise by position, the request from the repository
     /// that dominates the other winning. No history is read: the answer is
     /// the same on a shallow CI checkout as on a full mirror.
     fn compare(&self, a: &Req, b: &Req, dom: &Dominators) -> Result<(Ordering, Reason)> {
@@ -1551,7 +1573,7 @@ impl<'a> Engine<'a> {
             }
         }
         bail!(
-            "cannot order {} against {}: they are not versions of one stream, and neither \
+            "cannot order {} against {}: they are not versions of one kind, and neither \
              repository is above the other. Ask for versions in both, or set the revision in a \
              repository above both, such as the root",
             a.entry.revision,
@@ -1562,7 +1584,7 @@ impl<'a> Engine<'a> {
     /// The requests asking for a commit `winner` turns out to be behind:
     /// only those compared by position, and only where history is on local
     /// disk. A warning; it changes nothing.
-    fn ahead_of(&self, key: &SlotKey, reqs: &[Req], winner: usize, known: &[usize]) -> Vec<usize> {
+    fn ahead_of(&self, reqs: &[Req], winner: usize, known: &[usize]) -> Vec<usize> {
         let w = reqs[winner].known().unwrap();
         known
             .iter()
@@ -1573,7 +1595,7 @@ impl<'a> Engine<'a> {
                     && r.commit != w.commit
                     && !matches!((&w.version, &r.version), (Some(a), Some(b)) if a.compare(b).is_some())
                     && matches!(
-                        self.repos.is_ancestor(&reqs[i].entry.repo_url, key.kind, &w.commit, &r.commit),
+                        self.repos.is_ancestor(&reqs[i].entry.repo_url, &w.commit, &r.commit),
                         Ok(true)
                     )
             })
@@ -1595,13 +1617,10 @@ impl<'a> Engine<'a> {
         for key in &keys {
             let lowest = keys
                 .iter()
-                .filter(|k| k.url == key.url && k.kind == key.kind)
+                .filter(|k| k.url == key.url)
                 .map(|k| k.class)
                 .min()
                 == Some(key.class);
-            let has_source = keys
-                .iter()
-                .any(|k| k.url == key.url && k.kind == Kind::Source);
             let state = round.slots.get_mut(key).unwrap();
             if let Some(entry) = &state.root_entry {
                 state.directory = entry.directory.clone();
@@ -1622,9 +1641,6 @@ impl<'a> Engine<'a> {
             };
             if !lowest {
                 name.push_str(&key.class.suffix());
-            }
-            if key.kind == Kind::Artefact && has_source {
-                name.push_str("_artefact");
             }
             let mut directory = hoist.join(&name).to_string_lossy().into_owned();
             // The plain name is the root's checkout of another major — the
@@ -1695,11 +1711,7 @@ impl<'a> Engine<'a> {
         let mut slots = Vec::new();
         let mut links = Vec::new();
         for (key, state) in &round.slots {
-            let majors = round
-                .slots
-                .keys()
-                .filter(|k| k.url == key.url && k.kind == key.kind)
-                .count();
+            let majors = round.slots.keys().filter(|k| k.url == key.url).count();
             let requests: Vec<RequestView> = state
                 .requests
                 .iter()
@@ -1771,18 +1783,10 @@ impl<'a> Engine<'a> {
                     .root_entry
                     .as_ref()
                     .map_or(first.repo_url.clone(), |e| e.repo_url.clone()),
-                artefact: match (&state.root_entry, key.kind) {
-                    (Some(entry), _) => entry.artefact,
-                    (None, Kind::Artefact) => Some(ArtefactUse::Replace),
-                    // Overlaid when any repository asks for it overlaid.
-                    (None, Kind::Source) => state
-                        .requests
-                        .iter()
-                        .any(|r| r.entry.is_overlay())
-                        .then_some(ArtefactUse::Overlay),
-                },
+                // This workspace's to choose, after resolution.
+                preferred: None,
+                sourceless: self.repos.sourceless(&first.repo_url),
                 recursive: self.expands(state),
-                kind: key.kind,
                 class,
                 declared: state.root_entry.as_ref().map(|e| e.revision.clone()),
                 implicit: state.root_entry.is_none(),
@@ -2140,7 +2144,7 @@ mod tests {
     }
 
     impl Repos for Fake {
-        fn refs(&self, url: &str, _: Kind) -> Result<Refs> {
+        fn refs(&self, url: &str) -> Result<Refs> {
             let repo = self.get(url)?;
             Ok(Refs {
                 branches: repo.branches.clone(),
@@ -2151,13 +2155,10 @@ mod tests {
         fn config_at(&self, url: &str, commit: &str, _: &str) -> Result<Option<String>> {
             Ok(self.get(url)?.configs.get(commit).cloned())
         }
-        fn artefact_config(&self, url: &str, commit: &str) -> Result<Option<String>> {
-            self.config_at(url, commit, "")
-        }
-        fn default_branch(&self, _: &str, _: Kind) -> Result<Option<String>> {
+        fn default_branch(&self, _: &str) -> Result<Option<String>> {
             Ok(Some("main".to_string()))
         }
-        fn is_ancestor(&self, url: &str, _: Kind, a: &str, b: &str) -> Result<bool> {
+        fn is_ancestor(&self, url: &str, a: &str, b: &str) -> Result<bool> {
             if !self.history {
                 return Err(unavailable("no history"));
             }
@@ -2171,7 +2172,7 @@ mod tests {
     struct NoCheckouts;
 
     impl Checkouts for NoCheckouts {
-        fn config_if_at(&self, _: &str, _: Kind, _: &str) -> Option<Option<String>> {
+        fn config_if_at(&self, _: &str, _: &str) -> Option<Option<String>> {
             None
         }
         fn head(&self, _: &str) -> Option<String> {
@@ -2286,7 +2287,7 @@ mod tests {
         let r = resolve(&fake, &deps(&[("imports/b", B, ", revision = \"v1.0.0\"")])).unwrap();
         let d = slot(&r, "imports/shared");
         assert!(d.implicit);
-        assert_eq!(d.artefact, None);
+        assert_eq!(d.preferred, None);
         assert_eq!(d.chosen.as_ref().unwrap().revision, "v1.3.1");
         assert_eq!(r.links[0].target_path, PathBuf::from("imports/shared"));
     }
@@ -2775,7 +2776,7 @@ mod tests {
     }
 
     impl Checkouts for AtHeads {
-        fn config_if_at(&self, dir: &str, _: Kind, commit: &str) -> Option<Option<String>> {
+        fn config_if_at(&self, dir: &str, commit: &str) -> Option<Option<String>> {
             let head = self.heads.get(dir)?;
             (head == commit).then(|| self.configs.get(dir).cloned())
         }
@@ -2954,7 +2955,7 @@ mod tests {
             "b1",
             "v1.0.0",
             &format!(
-                "[develop]\npinned = [\"staging\"]\n\n{}",
+                "[branches]\npinned = [\"staging\"]\n\n{}",
                 deps(&[("libs/d", D, ", revision = \"v1.3.1\"")])
             ),
         );

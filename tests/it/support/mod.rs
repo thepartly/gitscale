@@ -151,7 +151,7 @@ impl TestEnv {
         let _ = self.registry_override.set(addr.to_string());
     }
 
-    fn registry_addr(&self) -> String {
+    pub fn registry_addr(&self) -> String {
         match self.registry_override.get() {
             Some(addr) => addr.clone(),
             None => self.registry().addr.clone(),
@@ -175,22 +175,39 @@ impl TestEnv {
         format!("{}/gitscale", name)
     }
 
-    /// A repository with an artefact published for the head of `main`:
-    /// `files` as the build output, one layer. Returns the bare repo, which
-    /// is what an artefact entry's `url` names.
+    /// A repository released as `v1.0.0`, the head of `main`, with an
+    /// artefact published for it: `files` as the build output, one layer.
+    /// Returns the bare repo, which is what an entry's `url` names.
     pub fn artefact_repo(&self, name: &str, files: &[(&str, &str)]) -> PathBuf {
         let bare = self.create_bare_repo(name, "main", &[("README.md", name)]);
-        self.publish(&bare, "main", files);
+        self.release(&bare, "v1.0.0", files);
         bare
+    }
+
+    /// Release the head of `main` in `bare` as `tag`, publishing `files` as
+    /// its artefact. Returns the commit.
+    pub fn release(&self, bare: &Path, tag: &str, files: &[(&str, &str)]) -> String {
+        run_git(bare, &["tag", tag, "main"]);
+        let artefact = "[artefact]\ninclude = [\"dist/**\"]\n";
+        let (out, commit) = self.publish_with(bare, "main", artefact, files, &[tag]);
+        assert!(out.success, "publish failed:\n{}{}", out.stdout, out.stderr);
+        commit
     }
 
     /// Publish `files` as the artefact of the commit `revision` names in
     /// `bare`, with gitscale's own `artefact publish`: the build output under
     /// `dist/`, which the producer ignores, so a consumer finds each file at
-    /// `dist/<name>`. Returns the commit.
+    /// `dist/<name>`. The image is tagged with its source hash, and released
+    /// as the version tag the commit has, if any. Returns the commit.
     pub fn publish(&self, bare: &Path, revision: &str, files: &[(&str, &str)]) -> String {
         let artefact = "[artefact]\ninclude = [\"dist/**\"]\n";
-        let (out, commit) = self.publish_with(bare, revision, artefact, files, &[]);
+        let tagged = git_stdout(bare, &["tag", "--points-at", revision]);
+        let release: Vec<&str> = tagged
+            .lines()
+            .filter(|t| gitscale::version::parse(t).is_some())
+            .take(1)
+            .collect();
+        let (out, commit) = self.publish_with(bare, revision, artefact, files, &release);
         assert!(out.success, "publish failed:\n{}{}", out.stdout, out.stderr);
         commit
     }
@@ -290,6 +307,12 @@ impl TestEnv {
     /// Write a .gitscale.toml config in the playground directory.
     pub fn write_config(&self, config_content: &str) {
         fs::write(self.playground.join(".gitscale.toml"), config_content).unwrap();
+    }
+
+    /// Take `repo` as `form` in the playground's workspace, as `git scale
+    /// prefer` records it.
+    pub fn prefer(&self, repo: &Path, form: gitscale::prefer::Form) {
+        prefer(&self.playground, repo, form);
     }
 
     /// The root's own store for `url`: where every checkout of it is a
@@ -521,4 +544,12 @@ pub fn edit(path: &Path, content: &str) {
         make_writable(path);
     }
     fs::write(path, content).unwrap();
+}
+
+/// Take `repo` as `form` in the workspace at `ws`, as `git scale prefer`
+/// records it.
+pub fn prefer(ws: &Path, repo: &Path, form: gitscale::prefer::Form) {
+    let mut prefs = gitscale::prefer::Prefs::load(ws).unwrap();
+    prefs.set(repo.to_str().unwrap(), form);
+    prefs.save(ws).unwrap();
 }

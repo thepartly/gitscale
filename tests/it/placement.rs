@@ -116,14 +116,15 @@ fn normal_004_places_checkouts_and_artefacts_together() {
     let bare_rw = env.create_bare_repo("rw-lib", "main", &[("rw.txt", "readwrite")]);
     let bare_ro = env.create_bare_repo("ro-lib", "main", &[("ro.txt", "readonly")]);
     let bare_art = env.create_bare_repo("art", "main", &[("README.md", "art")]);
-    run_git_pub(&bare_art, &["tag", "v1", "main"]);
-    env.publish(&bare_art, "v1", &[("art.bin", "artefact-data")]);
+    run_git_pub(&bare_art, &["tag", "v1.0.0", "main"]);
+    env.publish(&bare_art, "v1.0.0", &[("art.bin", "artefact-data")]);
 
+    env.prefer(&bare_art, gitscale::prefer::Form::Artefact);
     env.write_config(&format!(
         r#"{}[repos]
 "libs/ro-lib" = {{ url = "{}", revision = "main" }}
 "libs/rw-lib" = {{ url = "{}", revision = "main" }}
-"meta/art" = {{ url = "{}", revision = "v1", artefact = "replace" }}
+"meta/art" = {{ url = "{}", revision = "v1.0.0" }}
 "#,
         env.registries(),
         bare_ro.display(),
@@ -781,26 +782,24 @@ fn error_019_one_failing_entry_fails_the_command_after_the_rest_is_done() {
     let env = TestEnv::new("res_fail_at_end");
     let (b, d) = diamond(&env);
     let art = env.artefact_repo("art", &[("app.bin", "v1")]);
+    env.prefer(&art, gitscale::prefer::Form::Artefact);
     env.write_config(&format!(
         "{}{}",
         env.registries(),
         repos(&[
             ("imports/b", &b, ", revision = \"v1.0.0\""),
             ("imports/d", &d, ", revision = \"v1.2.0\""),
-            (
-                "meta/art",
-                &art,
-                ", revision = \"main\", artefact = \"replace\""
-            ),
+            ("meta/art", &art, ", revision = \"v1.1.0\""),
         ])
     ));
-    // A commit whose image does not exist yet, before anything is cloned.
+    // A release whose image does not exist yet, before anything is cloned.
     env.push_commit(&art, "main", "README.md", "unpublished");
+    run_git_pub(&art, &["tag", "v1.1.0", "main"]);
 
     let out = env.run(&["sync"]);
     let text = format!("{}{}", out.stdout, out.stderr);
     assert!(!out.success, "sync should fail: {}", text);
-    assert!(text.contains("may not have published yet"), "{}", text);
+    assert!(text.contains("no artefact for"), "{}", text);
     assert!(
         out.stderr.contains("FAIL  meta/art")
             && out.stderr.contains("Error: 1 repo(s) failed to place"),

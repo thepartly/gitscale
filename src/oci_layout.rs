@@ -20,16 +20,15 @@ const LAYOUT_FILE: &str = "oci-layout";
 const INDEX_FILE: &str = "index.json";
 /// The annotation the OCI layout spec uses for a manifest's tag.
 const REF_NAME: &str = "org.opencontainers.image.ref.name";
-const REVISION: &str = "org.opencontainers.image.revision";
 
 pub struct Layout {
     path: PathBuf,
 }
 
-/// One manifest the layout holds: the image for one commit.
+/// One manifest the layout holds: the image of one release.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Held {
-    pub commit: String,
+    pub tag: String,
     pub digest: String,
 }
 
@@ -129,50 +128,48 @@ impl Layout {
         }
     }
 
-    /// Record that `commit`'s image is the manifest `digest`, replacing what
-    /// the layout said before — a forced re-publish moves the commit.
-    pub fn record(&self, commit: &str, digest: &str, size: u64) -> Result<()> {
+    /// Record that the image of the release `tag` is the manifest `digest`,
+    /// replacing what the layout said before — a forced re-publish moves the
+    /// tag.
+    pub fn record(&self, tag: &str, digest: &str, size: u64) -> Result<()> {
         let mut index = self.read_index();
         index
             .manifests
-            .retain(|m| m.annotations.get(REF_NAME).map(String::as_str) != Some(commit));
+            .retain(|m| m.annotations.get(REF_NAME).map(String::as_str) != Some(tag));
         index.manifests.push(IndexEntry {
             media_type: MANIFEST_MEDIA_TYPE.to_string(),
             digest: digest.to_string(),
             size,
-            annotations: [
-                (REF_NAME.to_string(), commit.to_string()),
-                (REVISION.to_string(), commit.to_string()),
-            ]
-            .into_iter()
-            .collect(),
+            annotations: [(REF_NAME.to_string(), tag.to_string())]
+                .into_iter()
+                .collect(),
         });
         self.write_index(&index)
     }
 
-    /// Every commit the layout holds an image for.
+    /// Every release the layout holds an image of.
     pub fn held(&self) -> Vec<Held> {
         self.read_index()
             .manifests
             .into_iter()
             .filter_map(|m| {
                 Some(Held {
-                    commit: m.annotations.get(REF_NAME)?.clone(),
+                    tag: m.annotations.get(REF_NAME)?.clone(),
                     digest: m.digest,
                 })
             })
             .collect()
     }
 
-    /// Forget the images of `commits`. Their blobs go at the next [`gc`].
+    /// Forget the images of `tags`. Their blobs go at the next [`gc`].
     ///
     /// [`gc`]: Layout::gc
-    pub fn forget(&self, commits: &[String]) -> Result<()> {
+    pub fn forget(&self, tags: &[String]) -> Result<()> {
         let mut index = self.read_index();
         index.manifests.retain(|m| {
             m.annotations
                 .get(REF_NAME)
-                .is_none_or(|commit| !commits.contains(commit))
+                .is_none_or(|tag| !tags.contains(tag))
         });
         self.write_index(&index)
     }
@@ -268,13 +265,13 @@ mod tests {
         let new_app = put(&layout, b"app v2");
         let (m1, s1) = manifest(&layout, &[&shared, &old_app]);
         let (m2, s2) = manifest(&layout, &[&shared, &new_app]);
-        layout.record("c1", &m1, s1).unwrap();
-        layout.record("c2", &m2, s2).unwrap();
+        layout.record("v1.0.0", &m1, s1).unwrap();
+        layout.record("v1.1.0", &m2, s2).unwrap();
         assert_eq!(layout.gc().unwrap(), 0);
 
-        layout.forget(&["c1".to_string()]).unwrap();
+        layout.forget(&["v1.0.0".to_string()]).unwrap();
         assert!(layout.gc().unwrap() > 0);
-        // The layer both commits shared survives the one that went.
+        // The layer both releases shared survives the one that went.
         assert!(layout.verified_blob(&shared).is_some());
         assert!(layout.verified_blob(&new_app).is_some());
         assert!(layout.verified_blob(&old_app).is_none());
@@ -283,18 +280,18 @@ mod tests {
     }
 
     #[test]
-    fn a_forced_republish_moves_the_commit_and_frees_the_old_image() {
+    fn a_forced_republish_moves_the_tag_and_frees_the_old_image() {
         let layout = layout("republish");
         let v1 = put(&layout, b"build one");
         let v2 = put(&layout, b"build two");
         let (m1, s1) = manifest(&layout, &[&v1]);
         let (m2, s2) = manifest(&layout, &[&v2]);
-        layout.record("c1", &m1, s1).unwrap();
-        layout.record("c1", &m2, s2).unwrap();
+        layout.record("v1.0.0", &m1, s1).unwrap();
+        layout.record("v1.0.0", &m2, s2).unwrap();
         assert_eq!(
             layout.held(),
             vec![Held {
-                commit: "c1".into(),
+                tag: "v1.0.0".into(),
                 digest: m2.clone()
             }]
         );

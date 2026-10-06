@@ -1,10 +1,10 @@
-//! Tag names read as versions: semver, calendar versions, and the tag streams
-//! their prefixes name.
+//! Tag names read as versions: semver (`v1.4.0`, `1.4.0`) and calendar
+//! versions with a major (`v1-2026.10.05-1`). Nothing may come before either.
 //!
 //! Only a tag is ever read as a version — a branch called `v2.0.0` is a
-//! branch — and two versions are compared only when they are in the same
-//! stream and of the same kind. Everything else is compared by git history,
-//! which is the resolver's business, not this module's.
+//! branch — and two versions are compared only when they are of the same
+//! kind. Everything else is compared by position in the graph, which is the
+//! resolver's business, not this module's.
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -12,9 +12,6 @@ use std::fmt;
 /// A tag that reads as a version.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Version {
-    /// The tag stream: the text before the version, less a trailing `v`.
-    /// Empty for `v1.2.3` and `1.2.3` alike.
-    pub stream: String,
     pub scheme: Scheme,
 }
 
@@ -38,9 +35,10 @@ enum Ident {
     Alpha(String),
 }
 
-/// `YYYY.MM[.DD|.MICRO][.N]` and an optional modifier.
+/// `v<major>-YYYY.MM[.DD|.MICRO][.N]` and an optional modifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Calver {
+    major: u64,
     parts: Vec<u64>,
     modifier: Modifier,
 }
@@ -55,9 +53,9 @@ enum Modifier {
     Post(u64),
 }
 
-/// Which checkouts of one repository can be shared: the semver major, or for
-/// `0.x` the minor, as Cargo has it. A calendar version, and a branch or SHA
-/// with no semver tag behind it, are all in `Any`.
+/// Which checkouts of one repository can be shared: the major — for semver
+/// `0.x` the minor, as Cargo has it. A branch or SHA with no version tag
+/// behind it is in `Any`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Class {
     Any,
@@ -92,33 +90,34 @@ impl fmt::Display for Class {
     }
 }
 
-/// The years a calendar version may start with. Anything else in that
-/// position is a semver major — a project would need to reach major 1970 to
-/// be confused for one.
+/// The years a calendar version may start with. A tag whose first number is
+/// one of them and has no `v<major>-` is not a version at all, rather than
+/// semver major 2026 — a project would need to reach major 1970 to mean it.
 const YEARS: std::ops::RangeInclusive<u64> = 1970..=2199;
 
-/// Read `tag` as a version, if it is one.
+/// Read `tag` as a version, if it is one: `v<major>-` and a calendar version,
+/// or an optional `v` and semver.
 pub fn parse(tag: &str) -> Option<Version> {
-    let start = tag.find(|c: char| c.is_ascii_digit())?;
-    let (prefix, rest) = tag.split_at(start);
-    let stream = stream_of(prefix);
-    let scheme = if is_calendar(rest) {
-        Scheme::Calver(parse_calver(rest)?)
-    } else {
-        Scheme::Semver(parse_semver(rest)?)
-    };
-    Some(Version { stream, scheme })
+    let rest = tag.strip_prefix('v').unwrap_or(tag);
+    if let Some((major, calendar)) = rest.split_once('-') {
+        if tag.starts_with('v') && is_major(major) && is_calendar(calendar) {
+            let calver = parse_calver(number(major)?, calendar)?;
+            return Some(Version {
+                scheme: Scheme::Calver(calver),
+            });
+        }
+    }
+    if is_calendar(rest) {
+        return None;
+    }
+    Some(Version {
+        scheme: Scheme::Semver(parse_semver(rest)?),
+    })
 }
 
-/// The stream a prefix names. A lone `v`, or one ending a prefix after a
-/// separator (`api-v`), is spelling, not part of the stream's name.
-fn stream_of(prefix: &str) -> String {
-    match prefix.strip_suffix(['v', 'V']) {
-        Some(before) if before.is_empty() || before.ends_with(['-', '_', '/', '.']) => {
-            before.to_string()
-        }
-        _ => prefix.to_string(),
-    }
+/// A calendar version's major: a number from 1, with no leading zero.
+fn is_major(text: &str) -> bool {
+    number(text).is_some_and(|n| n >= 1) && !text.starts_with('0')
 }
 
 /// Whether the version text starts with a four-digit year.
@@ -130,7 +129,7 @@ fn is_calendar(rest: &str) -> bool {
             .is_ok_and(|year| YEARS.contains(&year))
 }
 
-fn parse_calver(text: &str) -> Option<Calver> {
+fn parse_calver(major: u64, text: &str) -> Option<Calver> {
     let (core, modifier) = match text.split_once('-') {
         Some((core, modifier)) => (core, Some(modifier)),
         None => (text, None),
@@ -153,7 +152,11 @@ fn parse_calver(text: &str) -> Option<Calver> {
         }
         Some(_) => return None,
     };
-    Some(Calver { parts, modifier })
+    Some(Calver {
+        major,
+        parts,
+        modifier,
+    })
 }
 
 fn parse_semver(text: &str) -> Option<Semver> {
@@ -204,7 +207,7 @@ impl Version {
         match &self.scheme {
             Scheme::Semver(v) if v.major == 0 => Class::Zero(v.minor),
             Scheme::Semver(v) => Class::Major(v.major),
-            Scheme::Calver(_) => Class::Any,
+            Scheme::Calver(v) => Class::Major(v.major),
         }
     }
 
@@ -220,12 +223,9 @@ impl Version {
         }
     }
 
-    /// How `self` and `other` order, or `None` when they are not versions of
-    /// one stream and one kind and so cannot be compared as versions at all.
+    /// How `self` and `other` order, or `None` when they are not of one
+    /// kind and so cannot be compared as versions at all.
     pub fn compare(&self, other: &Version) -> Option<Ordering> {
-        if self.stream != other.stream {
-            return None;
-        }
         match (&self.scheme, &other.scheme) {
             (Scheme::Semver(a), Scheme::Semver(b)) => Some(a.cmp(b)),
             (Scheme::Calver(a), Scheme::Calver(b)) => Some(a.cmp(b)),
@@ -276,10 +276,13 @@ impl Ord for Calver {
     fn cmp(&self, other: &Self) -> Ordering {
         let width = self.parts.len().max(other.parts.len());
         let part = |parts: &[u64], i: usize| parts.get(i).copied().unwrap_or(0);
-        (0..width)
+        let date = (0..width)
             .map(|i| part(&self.parts, i).cmp(&part(&other.parts, i)))
             .find(|o| o.is_ne())
-            .unwrap_or(Ordering::Equal)
+            .unwrap_or(Ordering::Equal);
+        self.major
+            .cmp(&other.major)
+            .then(date)
             .then_with(|| self.modifier.cmp(&other.modifier))
     }
 }
@@ -351,11 +354,10 @@ mod tests {
     }
 
     #[test]
-    fn semver_with_or_without_v_is_one_stream() {
+    fn semver_with_or_without_v_is_the_same_version() {
         assert_eq!(order("v1.2.3", "1.2.3"), Some(Ordering::Equal));
         assert_eq!(order("v1.2.4", "1.2.3"), Some(Ordering::Greater));
         assert_eq!(order("1.10.0", "v1.9.9"), Some(Ordering::Greater));
-        assert_eq!(parse("v1.2.3").unwrap().stream, "");
     }
 
     #[test]
@@ -374,20 +376,22 @@ mod tests {
     }
 
     #[test]
-    fn classes_follow_cargo() {
+    fn classes_follow_cargo_and_the_calendar_major() {
         assert_eq!(parse("v2.3.4").unwrap().class(), Class::Major(2));
         assert_eq!(parse("0.4.1").unwrap().class(), Class::Zero(4));
-        assert_eq!(parse("v2026.10.01").unwrap().class(), Class::Any);
+        assert_eq!(parse("v1-2026.10.01").unwrap().class(), Class::Major(1));
+        assert_eq!(parse("v12-2026.10.01-3").unwrap().class(), Class::Major(12));
         assert_eq!(Class::Zero(4).suffix(), "_v0.4");
         assert_eq!(Class::Major(2).suffix(), "_v2");
         assert!(Class::Any < Class::Zero(1) && Class::Zero(9) < Class::Major(1));
     }
 
     #[test]
-    fn a_year_first_tag_is_a_calendar_version() {
-        let v = parse("v2026.01.01").unwrap();
+    fn a_calendar_version_needs_its_major() {
+        let v = parse("v1-2026.01.01").unwrap();
         assert!(!v.is_semver());
-        assert!(parse("2026.10.01-2").is_some());
+        assert!(parse("v2-2026.10.01-2").is_some());
+        assert!(parse("v1-2026.10").is_some());
         // A short year reads as semver.
         assert!(parse("26.10.0").unwrap().is_semver());
         // Not a year: an ordinary semver major.
@@ -397,31 +401,25 @@ mod tests {
     #[test]
     fn calendar_modifiers_order_around_the_bare_date() {
         let run = [
-            "2026.10.01-dev",
-            "2026.10.01-rc2",
-            "2026.10.01-rc10",
-            "2026.10.01",
-            "2026.10.01-2",
-            "2026.10.01-11",
-            "2026.10.01-22",
-            "2026.10.02",
+            "v1-2026.10.01-dev",
+            "v1-2026.10.01-rc2",
+            "v1-2026.10.01-rc10",
+            "v1-2026.10.01",
+            "v1-2026.10.01-2",
+            "v1-2026.10.01-11",
+            "v1-2026.10.01-22",
+            "v1-2026.10.02",
+            "v2-2025.01.01",
         ];
         for pair in run.windows(2) {
             assert_eq!(order(pair[0], pair[1]), Some(Ordering::Less), "{:?}", pair);
         }
-        assert_eq!(order("2026.1.5", "2026.01.05"), Some(Ordering::Equal));
+        assert_eq!(order("v1-2026.1.5", "v1-2026.01.05"), Some(Ordering::Equal));
     }
 
     #[test]
-    fn prefixes_name_streams() {
-        assert_eq!(parse("api-v1.4.0").unwrap().stream, "api-");
-        assert_eq!(parse("api-1.4.1").unwrap().stream, "api-");
-        assert_eq!(parse("version-2026.09.30-2").unwrap().stream, "version-");
-        assert_eq!(order("api-v1.4.0", "api-1.4.1"), Some(Ordering::Less));
-        assert_eq!(order("api-v1.4.0", "v1.4.0"), None);
-        assert_eq!(order("api-2026.10.01", "web-2026.10.02"), None);
-        // Semver against a calendar version: not comparable as versions.
-        assert_eq!(order("v1.4.0", "v2026.10.01"), None);
+    fn semver_and_calendar_versions_never_compare() {
+        assert_eq!(order("v1.4.0", "v1-2026.10.01"), None);
     }
 
     #[test]
@@ -435,7 +433,18 @@ mod tests {
             "2026",
             "x-1.2",
             "1.2.3-",
-            "2026.1.1-",
+            "V1.2.3",
+            "api-v1.4.0",
+            "api-1.4.1",
+            "release-1.4.0",
+            "v2026.10.05",
+            "2026.10.05-2",
+            "1-2026.10.05",
+            "v0-2026.10.05",
+            "v01-2026.10.05",
+            "v1-2026.1.1-",
+            "api-v1-2026.10.05-1",
+            "V1-2026.10.05",
         ] {
             assert!(parse(tag).is_none(), "{} parsed as {:?}", tag, parse(tag));
         }

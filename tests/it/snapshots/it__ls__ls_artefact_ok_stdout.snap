@@ -1,7 +1,7 @@
 ---
-source: tests/it/status.rs
-assertion_line: 1178
+source: tests/it/ls.rs
+assertion_line: 127
 expression: plain
 ---
-    REPO       PATH   ARTEFACT   REF       EXPECTED   STATUS
-✔   meta/app   -      replace    [sha]   main       ok
+    REPO       PATH   AS         REF      EXPECTED   STATUS
+✔   meta/app   -      artefact   v1.0.0   v1.0.0     ok

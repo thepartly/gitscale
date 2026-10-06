@@ -4,7 +4,7 @@
 - [Ignoring the checkout directory](#ignoring-the-checkout-directory)
 - [Adding and removing entries](#adding-and-removing-entries)
 - [What a checkout is](#what-a-checkout-is)
-- [Artefacts: `replace` and `overlay`](#artefacts-replace-and-overlay)
+- [Artefacts: how a checkout arrives](#artefacts-how-a-checkout-arrives)
 - [Pinning a revision](#pinning-a-revision)
   - [Branch](#branch)
   - [Tag](#tag)
@@ -27,7 +27,7 @@ where the search starts.
 [repos]
 "imports/core"  = { url = "git@github.com:org/core.git", revision = "main" }
 "imports/utils" = { url = "https://github.com/org/utils.git", revision = "v2.1.0" }
-"meta/frontend" = { url = "https://github.com/org/frontend.git", revision = "main", artefact = "replace" }
+"meta/frontend" = { url = "https://github.com/org/frontend.git", revision = "main" }
 "vendor/tools"  = { url = "https://github.com/org/tools.git", revision = "main", recursive = false }
 ```
 
@@ -38,7 +38,6 @@ entry takes:
 |---|---|---|---|
 | `url` | yes | — | Git repository URL: HTTPS, SSH (`git@host:owner/repo.git` or `ssh://…`), or a local path |
 | `revision` | no | the remote's default branch | Branch, tag or commit SHA — see [pinning a revision](#pinning-a-revision) |
-| `artefact` | no | — | `replace` or `overlay` — see [artefacts](#artefacts-replace-and-overlay) |
 | `recursive` | no | `true` | Whether to read this repo's own `.gitscale.toml` — see [recursive dependencies](recursive-dependencies.md) |
 
 Directories must be relative and free of `..`; URLs and revisions may not start
@@ -79,13 +78,11 @@ directory — an entry may be declared at any relative path.
 
 ```
 git scale require imports/core https://github.com/org/core.git main
-git scale require --artefact replace meta/svc https://github.com/org/svc.git main
 
 git scale unrequire imports/core
 ```
 
-`require` takes `DIR URL [REVISION]`, plus an optional
-`--artefact replace|overlay`; left out, no revision is written. `DIR` is a path
+`require` takes `DIR URL [REVISION]`; with no revision, none is written. `DIR` is a path
 from the current directory. It refuses a directory that is already declared,
 and creates the root's `.gitscale.toml` when there is none. `unrequire` refuses
 a directory that is not declared.
@@ -112,25 +109,28 @@ the topic's name, writable, and
 [`git scale commit` and `git scale push`](cli.md#git-commands-git-scale-git-command)
 act on it. Everything else stays at its pin. See [topics](topics.md).
 
-## Artefacts: `replace` and `overlay`
+## Artefacts: how a checkout arrives
 
 A repository whose pipeline publishes its build output to an OCI registry —
-GitLab's, GHCR, or any other — as one image per commit can be consumed as that
-output:
+GitLab's, GHCR, or any other — can arrive as the output of its release. Which
+form a checkout takes is this workspace's choice, per dependency, never a
+config's:
 
-| `artefact` | On disk | Typical use |
+| Form | On disk | Typical use |
 |---|---|---|
-| `replace` | The image of the commit, read-only, instead of a checkout | Datasets, generated clients, compiled assets nobody builds locally |
-| `overlay` | A checkout of the commit, with its build output laid over it | A library whose sources you browse, but whose build you do not want to repeat |
+| `source` | A git checkout — the default | What you develop |
+| `artefact` | The image of its release, read-only, instead of a checkout; none of its git history | SDKs, datasets, generated clients, compiled assets nobody builds locally |
 
-```toml
-"meta/frontend" = { url = "https://github.com/org/frontend.git", revision = "main", artefact = "replace" }
-"imports/core"  = { url = "https://github.com/org/core.git", revision = "v2.0.0", artefact = "overlay" }
+```sh
+git scale prefer --artefact meta/frontend
+git scale pull
 ```
 
-The revision resolves exactly as for a git entry, so the files always match
-the commit a checkout would get; a commit with no image is an error. The
-image's location follows from `url` (`ghcr.io/org/frontend/gitscale` here).
+An artefact is only ever a release's: the revision must resolve to a version
+tag, and the image that tag names is installed. A branch, a commit, or a
+release with no image fails the checkout. On the topic it is its sources. The
+image's location follows from `url` (`ghcr.io/org/frontend/gitscale` here). A
+repository whose sources cannot be read arrives as its artefact by itself.
 
 Publishing, registries, logging in, topics and status flags are all on
 [their own page](artefacts.md).
@@ -181,6 +181,25 @@ refuse to serve an arbitrary commit; GitHub and GitLab both permit it.
 > place and fail in the other. The error says to run `git rev-parse <short>` in
 > a checkout to get the full one.
 
+### Build
+
+```toml
+"imports/secret-service" = { url = "https://github.com/org/secret-service.git", revision = "hash:3c9f2a7144e0b2d9..." }
+```
+
+One build, named by its [source hash](cli.md#git-scale-hash) — 64 hex digits
+after `hash:` — as its pipeline published it to the registry: a colleague's
+branch build, say, to try a change before it is released. Its registry
+records the commit it was built from: with access to the sources, that commit
+is checked out; taken as an [artefact](artefacts.md), or without access, the
+build itself is installed. It compares as a commit does, by position.
+
+A build pin is for trying a build out, never for shipping:
+[`git scale check`](topics.md#topics-in-ci) refuses to let a config holding
+one merge. Set it back to a release by hand; `git upgrade` leaves it alone.
+The hash comes from `git scale hash` in the workspace that built it, or from
+the `Publishing …:<hash>` line of its pipeline.
+
 ### No revision
 
 Omitting `revision` asks for nothing: the repositories that depend on it
@@ -198,20 +217,26 @@ Only a tag is ever read as a version; a branch called `v2.0.0` is a branch.
 | Kind | Recognised by | Compared |
 |---|---|---|
 | Semver | A tag `MAJOR.MINOR.PATCH[-pre][+build]`, with `v` or without: `v1.2.3`, `1.2.3` | By semver precedence, within one major (`0.N` for `0.x`) |
-| Calendar version | A tag whose first number is a four-digit year: `v2026.10.01`, `2026.10.01-2` | By date, then modifier |
-| Branch, commit, any other tag | — | By position in the graph, never by history |
+| Calendar version | A tag `v<major>-` and a date: `v1-2026.10.01`, `v1-2026.10.01-2` | By date, then modifier, within one major |
+| Branch, commit, build, any other tag | — | By position in the graph, never by history |
 
-**Calendar versions** follow [CalVer](https://calver.org/), spelt like semver
-tags: `v` or nothing, then `YYYY.0M.0D` (or `YYYY.0M.MICRO`), then an optional
-modifier after a hyphen. Within one date:
+Nothing may come before either form: `api-v1.4.0`, `release-1.4.0` and
+`v2026.10.01` are tags like any other, decided by position. The `v` is lower
+case.
 
-- a text modifier is a pre-release and comes first: `2026.10.01-rc1` before `2026.10.01`;
-- a numeric modifier is a later release that day, compared as a number: `2026.10.01` before `-2` before `-11`;
+**Calendar versions** follow [CalVer](https://calver.org/) after a major:
+`v<major>-` (a number from 1, no leading zero), then `YYYY.0M.0D` (or
+`YYYY.0M.MICRO`), then an optional modifier after a hyphen. The major works as
+semver's does: one checkout per major, and `upgrade` crosses one only with
+`--major`. Within one date:
+
+- a text modifier is a pre-release and comes first: `v1-2026.10.01-rc1` before `v1-2026.10.01`;
+- a numeric modifier is a later release that day, compared as a number: `v1-2026.10.01` before `-2` before `-11`;
 - text modifiers compare naturally, so `rc2` comes before `rc10`.
 
 ```
-2026.10.01-dev < 2026.10.01-rc2 < 2026.10.01-rc10 < 2026.10.01
-               < 2026.10.01-2   < 2026.10.01-11   < 2026.10.02
+v1-2026.10.01-dev < v1-2026.10.01-rc2 < v1-2026.10.01-rc10 < v1-2026.10.01
+                  < v1-2026.10.01-2   < v1-2026.10.01-11   < v1-2026.10.02
 ```
 
 Semver tools read a numeric `-2` as a pre-release instead, so a repository
@@ -219,13 +244,11 @@ whose tags other tools also read should keep to text modifiers. Short-year
 tags such as `26.10.0` look exactly like semver and are read as semver; `26.10`,
 with only two numbers, is not a version at all and is decided by position.
 
-**Streams.** Text before the version other than a lone `v` names a stream:
-`api-v1.4.0` and `api-1.4.1` are both stream `api-`, and versions are only ever
-compared within one. A monorepo can tag `api-…` and `web-…` side by side.
-`v` and no prefix are the same stream.
+A semver version and a calendar version never compare. A repository moving
+from one to the other starts the new scheme at its next major, so the two
+are separate checkouts.
 
-**Recommended for producers:** `vYYYY.0M.0D`, or `vMAJOR.MINOR.PATCH`, and no
-other prefix unless the repository releases more than one product.
+**Recommended for producers:** `vMAJOR.MINOR.PATCH`, or `v1-YYYY.0M.0D-N`.
 
 ## Holding a dependency down: `override`
 

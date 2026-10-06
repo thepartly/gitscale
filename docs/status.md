@@ -31,14 +31,14 @@ git explain                     # how each shared checkout got its revision
 ## Reading the table
 
 ```
-    REPO             PATH   ARTEFACT   REF       EXPECTED   STATUS
-⇓   apps/api         -      -          feat/x    feat/x     -3
-!   apps/web         -      -          feat/x    feat/x     dirty
-✔   imports/core     -      -          8c1d0e2   main       ok
-✘   imports/new      -      -          —         main       missed
-≠   imports/proto    -      -          41be7a0   main       ref-mismatch
-⤷   imports/shared   ../s   -          8c1d0e2   main       symlink
-✔   meta/frontend    -      replace    3f2a9c1   v2.1.0     ok
+    REPO             PATH   AS         REF       EXPECTED   STATUS
+⇓   apps/api         -      source     feat/x    feat/x     -3
+!   apps/web         -      source     feat/x    feat/x     dirty
+✔   imports/core     -      source     8c1d0e2   main       ok
+✘   imports/new      -      source     —         main       missed
+≠   imports/proto    -      source     41be7a0   main       ref-mismatch
+⤷   imports/shared   ../s   source     8c1d0e2   main       symlink
+✔   meta/frontend    -      artefact   v2.1.0    v2.1.0     ok
 ⊘   core/imports/x   -      -          —                    orphan
 ```
 
@@ -58,8 +58,8 @@ followed by a row for each
 | *(unnamed)* | Status icon — see [icons and colour](#icons-and-colour) |
 | `REPO` | The directory the entry declares. For an orphan row, the path of the leftover symlink |
 | `PATH` | Where a symlinked entry points; `-` for an ordinary checkout. Only [recursive dependencies](recursive-dependencies.md) deduped into one checkout are symlinks |
-| `ARTEFACT` | `replace` or `overlay` for an [artefact entry](dependencies.md#artefacts-replace-and-overlay), else `-` |
-| `REF` | The ref currently checked out: the topic branch, or an abbreviated commit when HEAD is detached. For an artefact, the abbreviated commit it was installed from. `—` when there is no checkout. For a symlink row, the ref of the checkout it points at |
+| `AS` | How the checkout arrives: `source` or `artefact` — see [artefacts](artefacts.md#choosing-how-a-checkout-arrives). `source → artefact` while the next placement is still to apply a preference |
+| `REF` | The ref currently checked out: the topic branch, or an abbreviated commit when HEAD is detached. For an artefact, the release it was installed from. `—` when there is no checkout. For a symlink row, the ref of the checkout it points at |
 | `EXPECTED` | The revision [resolution](recursive-dependencies.md#how-a-revision-is-chosen) chose — the root's own, a higher one a dependency asked for, or the topic branch. A SHA is abbreviated to 7 characters, as `REF` spells a detached HEAD in most repositories (git may use more digits in a very large one) |
 | `STATUS` | The flags below, comma-separated, or `ok` |
 | `RESOLUTION` | How the revision was chosen, when there is more to it than the root asking for it. Shown only when some row has something to say |
@@ -83,10 +83,9 @@ order.
 | `stale` | A CI checkout whose commit differs from upstream. A depth-1 checkout cannot produce an exact behind count, so this stands in for it |
 | `+N` | On a topic branch, N commits ahead of its upstream |
 | `-N` | On a topic branch, N commits behind its upstream |
-| `ref-mismatch` | The checkout is not where resolution puts it: detached at another commit, or not on the topic branch. For an artefact: installed for another revision than the config names now, or not at the commit a SHA revision pins |
-| `behind` | Artefact only: the revision has moved to another commit since this was installed, as the last fetch saw |
-| `missing` | Artefact only: that commit has no image in the registry (yet) |
-| `changed` | Artefact only: the installed commit's image was re-published with different files; the next [placement](workflow.md#placement) installs it |
+| `ref-mismatch` | The checkout is not where resolution puts it: detached at another commit, or not on the topic branch. For an artefact: installed for another release than the one wanted now |
+| `missing` | Artefact only: the release wanted had no image in the registry when last fetched |
+| `changed` | Artefact only: the installed release's image was re-published with different files; the next [placement](workflow.md#placement) installs it |
 | `orphan` | A leftover GitScale symlink whose dependency is no longer declared; its target still resolves |
 | `orphan, broken` | …and its target no longer exists |
 | `override` | An override holds the checkout below a request it beat; `RESOLUTION` says which |
@@ -100,8 +99,8 @@ back in — the row says `untracked-links`, and a line under the table says how
 to put them back:
 
 ```
-    REPO        PATH   ARTEFACT   REF       EXPECTED   STATUS
-!   imports/b   -      -          1498d55   v2.0.0     untracked-links
+    REPO        PATH   AS         REF       EXPECTED   STATUS
+!   imports/b   -      source     1498d55   v2.0.0     untracked-links
 hint: imports/b: git sees the dependency links GitScale planted there (libs/d); git scale sync puts them back in its info/exclude
 ```
 
@@ -112,7 +111,7 @@ A checkout off the topic is detached, so `REF` reads as a commit and can never
 equal a tag or branch name — that alone is not a mismatch. Detached *at the
 wrong commit* is.
 
-An artefact entry has no working tree to be dirty and no history to count, so
+A checkout taken as an artefact has no working tree to be dirty and no history to count, so
 its row only ever carries `ok`, `missed`, `symlink`, `unlinked`, the artefact
 flags, or resolution's `override` and `unresolved`. They compare what is installed with what the last
 `git scale fetch` — or `git scale ls --fetch` — saw; see
@@ -125,11 +124,11 @@ from. It appears when some row has something to say, and names the winner
 only — with a count when more than one repository asked:
 
 ```
-    REPO         PATH   ARTEFACT   REF       EXPECTED   STATUS       RESOLUTION
-✔   imports/d    -      -          3f2a9c1   v1.5.0     ok           raised from v1.2.0 by imports/c, 3 requests
-↧   imports/f    -      -          9e01c44   v1.4.0     override     held at v1.4.0, imports/c wants v1.6.0, 2 requests
-?   imports/h    -      -          —         main       unresolved   not fetched yet: run git scale ls --fetch
-✔   imports/sh   -      -          77c0a1d   main       ok           implicit via imports/d
+    REPO         PATH   AS         REF       EXPECTED   STATUS       RESOLUTION
+✔   imports/d    -      source     3f2a9c1   v1.5.0     ok           raised from v1.2.0 by imports/c, 3 requests
+↧   imports/f    -      source     9e01c44   v1.4.0     override     held at v1.4.0, imports/c wants v1.6.0, 2 requests
+?   imports/h    -      source     —         main       unresolved   not fetched yet: run git scale ls --fetch
+✔   imports/sh   -      source     77c0a1d   main       ok           implicit via imports/d
 hint: git explain <dir> lists every request behind a revision
 ```
 
@@ -139,7 +138,7 @@ hint: git explain <dir> lists every request behind a revision
 | `held at v1.4.0, imports/c wants v1.6.0` | The root's override holds it below a request it beat (`override` in STATUS) |
 | `held at v1.4.0 by imports/b, imports/e wants v1.6.0` | The same, for an override in a dependency |
 | `…, imports/b wants develop (no such revision)` | The override replaced a request for a revision the repository does not have |
-| `behind imports/c's v2026.09.30` | Won by position, but its commit is behind what that request asked for. Only where history is on local disk; the icon is `↧` when the row is otherwise `ok` |
+| `behind imports/c's v1-2026.09.30` | Won by position, but its commit is behind what that request asked for. Only where history is on local disk; the icon is `↧` when the row is otherwise `ok` |
 | `implicit via imports/b` | Not in the root config; brought in by the repository named |
 | `2 majors` | This repository has a checkout per major |
 | `3 requests` | That many repositories asked for it. `git explain` lists them |
@@ -160,19 +159,18 @@ change stands and what it waits on:
 
 ```
 topic feat/price-cache · next to merge: imports/d
-    REPO        PATH   ARTEFACT   REF                EXPECTED           STATUS   RESOLUTION
-✔   imports/b   -      -          feat/price-cache   feat/price-cache   ok       topic, waits on imports/d, not tagged yet
-✔   imports/d   -      -          feat/price-cache   feat/price-cache   ok       topic, not tagged yet, implicit via imports/b
+    REPO        PATH   AS         REF                EXPECTED           STATUS   RESOLUTION
+✔   imports/b   -      source     feat/price-cache   feat/price-cache   ok       topic, waits on imports/d, no tag
+✔   imports/d   -      source     feat/price-cache   feat/price-cache   ok       topic, no tag, implicit via imports/b
 ```
 
 | Text | Meaning |
 |---|---|
 | `topic` | On the topic branch in its store: joined here or in another root worktree |
 | `topic, from remote` | Its remote has the topic branch; the next placement puts it on a local branch tracking that |
-| `sources` / `image 3f2a9c1` | A `replace` artefact on the topic: checked out from source, or the image of the branch tip |
 | `waits on imports/d` | Asks, directly or further down, for a topic slot that is not promoted yet |
-| `behind v2026.09.30 wanted by imports/c: rebase it` | The topic branch lacks a release another repository now asks for |
-| `no change yet`, `not tagged yet`, `promoted → <tag>`, … | Where its change stands — see [promotion](topics.md#promotion-git-upgrade) |
+| `behind v1-2026.09.30 wanted by imports/c: rebase it` | The topic branch lacks a release another repository now asks for |
+| `no change yet`, `no tag`, `promoted → <tag>`, … | Where its change stands — see [promotion](topics.md#promotion-git-upgrade) |
 
 The promotion states and `behind` need history, so they are worked out from
 the root's stores, and never in CI.
@@ -211,7 +209,7 @@ most serious one.
 | `↧` | yellow | `override`; or a winner `behind` a request (see RESOLUTION) on a row otherwise `ok` |
 | `⇅` | yellow | ahead and behind |
 | `⇑` | yellow | ahead only |
-| `⇓` | yellow | behind only, or an artefact's `behind` |
+| `⇓` | yellow | behind only |
 
 The `REF` cell is also painted yellow on a `ref-mismatch`, so the wrong ref is
 visible without reading the last column.
@@ -267,12 +265,12 @@ Add `-v` to see which repository is being fetched.
   "detached": true,
   "ahead": 0,
   "behind": 0,
-  "artefact_use": "-",
   "stale": false,
   "symlink": false,
   "symlink_target": "",
   "untracked_links": [],
-  "foreign": false
+  "foreign": false,
+  "source_hash": "0d7d3387c313ae68b5266627b8516c367b79da27c00654dd10dacce856d5c847"
 }
 ```
 
@@ -285,7 +283,9 @@ How resolution got there is in the same object, as structure only:
   "resolved_commit": "3f2a9c1e5b7d4e8a9c217d4e5f6a8b90c1d2e3f4",
   "revision_kind": "tag",
   "class": "1",
-  "kind": "source",
+  "as": "source",
+  "as_reason": "default",
+  "as_next": null,
   "implicit": false,
   "resolution": "raised",
   "reason": "semver",
@@ -307,30 +307,32 @@ How resolution got there is in the same object, as structure only:
 |---|---|
 | `expected_ref`, `resolved_ref` | The revision resolution chose; empty when nobody asks for one |
 | `declared_ref` | The root's own revision; empty for an implicit checkout or an entry without one |
-| `revision_kind` | `branch`, `tag` or `sha` — consumers decide for themselves which they treat as pinned. A checkout nobody gives a revision follows a branch |
+| `revision_kind` | `branch`, `tag`, `sha` or `build` — consumers decide for themselves which they treat as pinned. A checkout nobody gives a revision follows a branch |
 | `class` | The major: `1`, `0.4`, or `any` |
-| `kind` | `source` or `artefact` |
+| `as` | How the checkout arrives on disk now: `source` or `artefact` |
+| `as_reason` | Why that form: `topic` (on the topic), `no-access` (its sources cannot be read), `preferred` or `default` |
+| `as_next` | The form the next placement gives, when it differs; else `null` |
 | `resolution` | `only`, `root` (the root's own request won), `raised`, `highest` (the root asked for nothing), `override`, `follow` (no revision asked for) or `unresolved` |
 | `reason` | `only`, `semver`, `calver`, `position`, `equal` or `override` |
 | `unread` | Why the checkout's own dependencies could not be read, when they could not |
 | `untracked_links` | The planted links git sees as untracked files, relative to the checkout |
-| `artefact_use` | `replace`, `overlay` or `-` |
-| `topic` | `null` off the topic; else `branch`, `commit`, `developed` (on a local branch, rather than only the remote's), `pin` (`revision`, `commit`, `by`: what a merge would ship) and `state` (`unchanged`, `not-tagged`, `no-image`, `promoted`, `cannot-tell`, `held`, `unknown`) |
+| `source_hash` | What its own pipeline builds — see [`git scale hash`](cli.md#git-scale-hash); `null` with uncommitted changes |
+| `topic` | `null` off the topic; else `branch`, `commit`, `developed` (on a local branch, rather than only the remote's), `pin` (`revision`, `commit`, `by`: what a merge would ship) and `state` (`unchanged`, `no-tag`, `no-release`, `no-image`, `promoted`, `cannot-tell`, `held`, `unknown`) |
 | `pinned_by` | The repository whose pinned branch holds this slot at its pin, or `null` |
 
-An artefact entry's object also carries what is installed and what the last
+An artefact's object also carries what is installed and what the last
 fetch saw, with the flags those produce:
 
 ```json
 "artefact": {
-  "installed": { "commit": "9fceb02d0ae598e95dc970b74767f19372d61af8", "digest": "sha256:77d0…" },
-  "remote":    { "commit": "3f2a9c1e5b7d4e8a9c217d4e5f6a8b90c1d2e3f4", "digest": null },
-  "flags": ["behind", "missing"]
+  "installed": { "tag": "v2.0.0", "digest": "sha256:77d0…" },
+  "remote":    { "tag": "v2.1.0", "digest": null },
+  "flags": ["ref-mismatch", "missing"]
 }
 ```
 
-`remote` is `null` until a fetch has run for the configured revision, and its
-`digest` is `null` when that commit has no image.
+`remote` is `null` until a fetch has run for the release wanted, and its
+`digest` is `null` when that release has no image.
 
 Orphaned symlinks appear as their own objects:
 

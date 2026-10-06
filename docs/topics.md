@@ -14,7 +14,6 @@
 - [Where a topic stands: `git topic status`](#where-a-topic-stands-git-topic-status)
 - [Promotion: `git upgrade`](#promotion-git-upgrade)
 - [Raising a dependency: `git upgrade <dir>`](#raising-a-dependency-git-upgrade-dir)
-- [Writing what resolution selected: `git upgrade --resolved`](#writing-what-resolution-selected-git-upgrade---resolved)
 - [Topics in CI](#topics-in-ci)
 - [Branch flows](#branch-flows)
 - [Parallel topics](#parallel-topics)
@@ -39,30 +38,31 @@ CI.** A workspace on a topic and a pipeline on the same branch resolve alike.
 
 ## A change across three layers
 
-The root pins B at `v2026.09.30`; B pins D at `v2026.09.28`. The change touches
+The root pins B at `v1-2026.09.30`; B pins D at `v1-2026.09.28`. The change touches
 D and B.
 
 ```
 $ git topic start feat/price-cache
 started feat/price-cache from origin/main
 $ git topic join imports/d imports/b
-imports/d on feat/price-cache, from v2026.09.28 (6be5fd3)
-imports/b on feat/price-cache, from v2026.09.30 (1498d55)
+imports/d on feat/price-cache, from v1-2026.09.28 (6be5fd3)
+imports/b on feat/price-cache, from v1-2026.09.30 (1498d55)
 …edit, build and test in the workspace…
 $ git scale add -A
 $ git scale commit -m "price cache"
 $ git scale push
 ```
 
-D is merged and its pipeline tags `v2026.10.01`:
+D is merged and its pipeline tags `v1-2026.10.01`:
 
 ```
 $ git upgrade --commit
-imports/b  not tagged yet
-imports/d  promoted → v2026.10.01
-  imports/b/.gitscale.toml   libs/d  v2026.09.28 → v2026.10.01
-  imports/d  left the topic: imports/d at v2026.10.01
-  commit  imports/b/.gitscale.toml: pin imports/d v2026.10.01
+imports/b  no tag
+imports/d  promoted → v1-2026.10.01
+  imports/b/.gitscale.toml   libs/d  v1-2026.09.28 → v1-2026.10.01
+  imports/d: deleted origin/feat/price-cache
+  imports/d  left the topic: imports/d at v1-2026.10.01
+  commit  imports/b/.gitscale.toml: pin imports/d v1-2026.10.01
 next to merge: imports/b
 to push: imports/b — git scale push
 $ git scale push
@@ -228,11 +228,11 @@ makes the worktree again, each joined checkout back on its branch.
 
 A branch the root **pins** is not a topic: on it, every checkout is at its pin.
 By default the root pins only its remote's default branch — `main` and `master`
-both, when there is no remote to ask. `[develop] pinned` names the pinned
+both, when there is no remote to ask. `[branches] pinned` names the pinned
 branches instead:
 
 ```toml
-[develop]
+[branches]
 pinned = ["main", "staging", "release/*"]
 ```
 
@@ -284,6 +284,31 @@ paths from the current directory; see [directory arguments](cli.md#directory-arg
 - With no directory it fails, as `git add` does: `no checkout named`, with a
   hint to use `.` when the current directory is inside a checkout.
 
+**`git topic join --dependants`** joins the checkouts whose configs ask for
+others — never the root:
+
+- **With directories:** the dependants of each that ask for less than its
+  newest release. That is how a [raise](#raising-a-dependency-git-upgrade-dir)
+  begins: the dependency need not be on the topic.
+- **Without:** one level up from the topic's changes. A checkout on the topic
+  *carries a change* when it has commits its pin does not, or uncommitted
+  work. The dependants of each carrier with none of its dependants on the
+  topic are joined. Once one of them is, that level is done, so a dependant
+  taken off with `leave` stays off; a plain `join` brings it back.
+- A dependant joined with nothing of its own carries no change until
+  promotion commits its pin bump: run it again after each release to climb
+  one more level.
+
+```
+$ git topic join imports/d          # changed, committed: a carrier
+$ git topic join --dependants
+imports/b on feat/price-cache, from v1-2026.09.30 (1498d55)
+imports/c on feat/price-cache, from v1-2026.09.30 (77c0a1d)
+$ git topic leave imports/c         # C stays at its release
+$ git topic join --dependants
+nothing to join
+```
+
 `leave` takes a checkout back to its pin and deletes its topic branch. It
 refuses while the remote still has the branch — placement would follow it
 again — and while the branch holds work no remote has.
@@ -332,7 +357,7 @@ would have chosen without the topic is kept as the slot's **pin**: what a
 merge would ship.
 
 **Pinned dependencies.** A repository whose own config pins the topic's branch
-— `[develop] pinned` naming it — keeps what it asks for at its pins: a slot
+— `[branches] pinned` naming it — keeps what it asks for at its pins: a slot
 only it asks for, and everything below that, stays put, and status says
 `pinned by imports/b`. Any other requester's view is unchanged.
 
@@ -358,13 +383,13 @@ see [ls → topics](status.md#topics):
 
 ```
 topic feat/price-cache · next to merge: imports/d
-    REPO        PATH   ARTEFACT   REF                EXPECTED           STATUS   RESOLUTION
-✔   imports/b   -      -          feat/price-cache   feat/price-cache   ok       topic, waits on imports/d, not tagged yet
-✔   imports/d   -      -          feat/price-cache   feat/price-cache   ok       topic, not tagged yet, implicit via imports/b
+    REPO        PATH   AS         REF                EXPECTED           STATUS   RESOLUTION
+✔   imports/b   -      source     feat/price-cache   feat/price-cache   ok       topic, waits on imports/d, no tag
+✔   imports/d   -      source     feat/price-cache   feat/price-cache   ok       topic, no tag, implicit via imports/b
 ```
 
 A topic branch cut from an older release than another repository now asks for
-gets `behind v2026.09.30 wanted by imports/c: rebase it`. That needs history,
+gets `behind v1-2026.09.30 wanted by imports/c: rebase it`. That needs history,
 so it is worked out from the store, and never in CI.
 
 ## Where a topic stands: `git topic status`
@@ -376,8 +401,8 @@ topic PROJ-12-price-cache
 
   REPO           BRANCH                AHEAD  PUSHED  STATE
   .              PROJ-12-price-cache   2      no      waits on imports/core
-  imports/core   PROJ-12-price-cache   3      yes     not tagged yet
-  imports/b      PROJ-12-price-cache   1      yes     promoted → v2026.10.04
+  imports/core   PROJ-12-price-cache   3      yes     no tag
+  imports/b      PROJ-12-price-cache   1      yes     promoted → v1-2026.10.04
 
 next to merge: imports/core
 then: git upgrade --commit, git scale push
@@ -407,17 +432,34 @@ slots off the topic.
 
 **No merge strategy is assumed.** A squash or a rebase rewrites commits, so
 history cannot tell whether a branch was merged; content can. A slot is
-promoted when **the newest calver tag on its pin's stream contains the
-change**: `git merge-tree` writes what merging the branch into the tag would
-give, and it is the tag's own tree. Nor is a branch flow assumed: only tags are
-asked, whichever branch they were cut on. This runs in each slot's store, which
-has the history; never in CI.
+promoted to **the newest release that contains the change**: `git merge-tree`
+writes what merging the branch into the tag would give, and it is the tag's
+own tree. Releases are asked newest first, so a newer hotfix cut beside it,
+without the change, is passed over. This runs in each slot's store, which has
+the history; never in CI.
+
+**Which tags are releases.** A tag of the pin's kind and major, reachable from
+a branch the repository [pins](configuration.md#branches), whose history holds
+the pin's commit: a tag on a line split off before the pin would lose what the
+pin had. By default a repository pins its default branch alone; one that cuts
+releases elsewhere says so in its own config, for every workspace that depends
+on it:
+
+```toml
+# core's .gitscale.toml
+[branches]
+pinned = ["main", "release/*"]
+```
+
+It is read from the repository's default branch, so a pin older than the list
+follows it too. A list that names no branch of the repository is an error.
 
 | State | Meaning | `upgrade` does |
 |---|---|---|
 | `no change yet` | The branch adds nothing to the pin | Nothing |
-| `not tagged yet` | The newest release does not hold the change: not merged, or its tag pipeline has not run | Nothing |
-| `tagged <tag>, no image yet` | Released, but consumed as an artefact and the tag's commit has no image yet | Nothing |
+| `no tag` | No release holds the change | Nothing |
+| `no release contains <pin>` | No release holds the pin itself: its tag was moved, or it was cut on no release branch | Nothing; raise it explicitly with `git upgrade <dir>` |
+| `tagged <tag>, no image` | Released, but the repository publishes artefacts and the release has no image | Nothing |
 | `promoted → <tag>` | The tag holds the change | Edits the configs, then the slot leaves the topic |
 | `cannot tell` | Merging conflicts: a later commit in the tag rewrote the same lines | Nothing; bump it explicitly with `git upgrade <dir>` |
 | `held (… uncommitted)` | Work no tag can hold | Nothing; commit or discard it first |
@@ -425,19 +467,36 @@ has the history; never in CI.
 Commits on the branch that nobody pushed do not hold a slot back: once the tag
 holds their content, they are what a squash left behind.
 
+`git upgrade` works on a topic only: off one, both forms fail with `not on a
+topic: git topic start NAME`.
+
 **What it edits.** For each promoted slot, every config of the topic — the
 root's, and each topic checkout's working tree — that asks for it below the
 new tag gets the tag written in, in the tag's own spelling. Requesters outside
-the topic are left alone: highest-wins resolution already lifts them. An
-override in a requester is reported, not changed. The file is edited in place,
-so comments and key order survive.
+the topic are left alone: they keep their releases, and highest-wins
+resolution lifts them in this workspace. An override in a requester is
+reported, not changed. The file is edited in place, so comments and key order
+survive.
 
-**Leaving.** The slot's topic branch is deleted and it is checked out detached
-at the tag, read-only; an artefact gets the tag's image back. If the topic
-branch still exists on the slot's remote, `upgrade` warns: placement and CI
-keep matching it by name until it is deleted — which is why merged topic branches
-are expected to be deleted, a setting GitLab ("Delete source branch") and
-GitHub ("Automatically delete head branches") both have.
+**The remote branch.** A promoted slot's topic branch left on its remote keeps
+matching by name, so the pipeline of the pin bump would still build from it.
+Before anything changes, `upgrade` asks each promoted slot's remote for the
+branch; the release must hold everything at its tip, or the whole `upgrade`
+fails with nothing changed:
+
+```
+Error: imports/d: origin/feat/price-cache has changes v1-2026.10.01 does not hold; merge or drop them, then run again
+```
+
+Then each branch is deleted — only while it is still at the tip checked, so a
+push made meanwhile fails the deletion instead of being lost — and only then
+are the configs edited. A refused deletion, by permissions or a protected
+branch, fails `upgrade` with no config edited; branches already deleted stay
+deleted, since their releases hold them, and running it again continues.
+`--dry-run` lists what it would delete.
+
+**Leaving.** The slot's local topic branch is deleted and it is checked out
+detached at the tag, read-only; an artefact gets the tag's image back.
 
 **The merge order.** A topic repository is ready to merge when no topic slot it
 asks for, directly or further down, is still unpromoted; the root merges last.
@@ -453,53 +512,41 @@ to push: `to push: imports/b, . — git scale push`.
 
 ## Raising a dependency: `git upgrade <dir>`
 
-`git upgrade imports/d` — or `git upgrade .` inside it — raises D wherever it
-is asked for, topic or not:
+`git upgrade imports/d` — or `git upgrade .` inside it — raises D in the
+topic's configs:
 
-1. The new revision is the **newest release on D's stream**: the newest calver,
-   or for semver the newest of the current major; `--major` crosses majors. A
-   pre-release is picked only when the current pin is already a pre-release —
-   the rule npm and Cargo follow.
-2. **Every requester is edited**: the root directly, every other one after
-   it [joins](#git-topic-join--leave) the topic — an artefact requester becomes
-   a checkout of its source first, to edit its config.
+1. The new revision is the **newest release of D's kind and current major**,
+   semver or calendar, among the [releases](#promotion-git-upgrade) that hold
+   the pin. `--major` crosses majors, and drops that last condition, since a
+   new major is often cut on a line of its own — on a pinned branch still.
+   A pre-release is picked only when the current pin is already a pre-release
+   — the rule npm and Cargo follow. Without access to D's sources, the newest
+   version its registry has: releases are cut in order on D's release
+   branches, so the newest holds every one before it.
+2. **The configs on the topic are edited**: the root's, and those of the
+   requesters joined to it. A requester off the topic is named, with the
+   command that joins it, and left as it is.
 3. A requester asking for no version (a branch) is reported, not changed. A
-   requester the root overrides cannot join, and is reported. If D itself is
-   overridden, nothing is edited.
-4. With no topic and a repository other than the root to edit, `upgrade`
-   creates the root's branch and joins the requesters to it:
-   `upgrade/d-v2026.10.01`, or `upgrade/<date>` for several dependencies.
-   `-c <branch>` names it.
+   requester the root overrides is reported. If D itself is overridden,
+   nothing is edited.
+
+`git topic join --dependants imports/d` joins every requester that asks for
+less, so a raise everywhere is:
 
 ```
+$ git topic start upgrade-d
+$ git topic join --dependants imports/d
+imports/b on upgrade-d, from v1-2026.09.30 (1498d55)
+imports/c on upgrade-d, from v1-2026.09.30 (77c0a1d)
 $ git upgrade imports/d
-imports/d   v2026.09.28 → v2026.10.01
-  topic upgrade/d-v2026.10.01 (created): imports/b, imports/c joined
-  imports/b/.gitscale.toml   libs/d  v2026.09.28 → v2026.10.01
-  imports/c/.gitscale.toml   libs/d  v2026.09.30 → v2026.10.01
+imports/d   v1-2026.09.28 → v1-2026.10.01
+  imports/b/.gitscale.toml   libs/d  v1-2026.09.28 → v1-2026.10.01
+  imports/c/.gitscale.toml   libs/d  v1-2026.09.30 → v1-2026.10.01
 next to merge: imports/b, imports/c
 ```
 
 The cascade then runs as for any change: B and C merge and are tagged, and
 `git upgrade` bumps the root's pins of them.
-
-## Writing what resolution selected: `git upgrade --resolved`
-
-`git upgrade --resolved [<dir>...]` writes the revision resolution already
-selected into the root's own entries, with no tag lookup — so the diff of
-`.gitscale.toml` shows what the workspace is really built from.
-
-| Root entry | Result |
-|---|---|
-| Has a revision, resolved to a different one | Replaced with the winner's text |
-| Has a revision, resolved to the same | Unchanged |
-| No revision | Unchanged: leaving it out is a choice to follow the dependencies |
-| `override = true` | Unchanged |
-| Implicit dependency | Never added |
-
-On a topic it writes the pin, never the topic branch. When the winner is a
-branch replacing a tag, the line says so, since that turns a fixed pin into a
-moving one. It edits only the root's config, so it never creates a topic.
 
 `upgrade` in all its forms works on a developer machine; in CI it refuses.
 
@@ -530,7 +577,8 @@ repository's refs, so matching costs no extra round trip.
 
 **The merge gate: `git scale check`.** It fails while any slot resolves from a
 topic branch rather than a revision written in a config — what a merge would
-ship is then not what the pipeline tested. It needs no history, so it runs on
+ship is then not what the pipeline tested — and while any config pins a
+[build](dependencies.md#build), which is for trying out, never for shipping. It needs no history, so it runs on
 shallow checkouts. In a merge request pipeline it applies only when the target
 is a branch the root pins; a branch pipeline is always checked.
 
@@ -543,18 +591,16 @@ The message names the slot, the branch and its repository, the pin that would
 ship, and the fix for each case:
 
 ```
-Error: imports/d was taken from branch feat/x, not from v2026.10.01 pinned in imports/b/.gitscale.toml.
+Error: imports/d was taken from branch feat/x, not from v1-2026.10.01 pinned in imports/b/.gitscale.toml.
   This pipeline tested imports/d at feat/x (4f2a9c1), so merging now would ship a pin that was not tested.
   - imports/d's change not merged yet: merge it first, then run git upgrade --commit here and push.
   - already merged and pinned: delete branch feat/x in git@github.com:org/d.git, then rerun this pipeline.
 ```
 
-**Missing images.** A topic slot consumed as a `replace` artefact uses the
-image of its branch tip's commit; with none — the producer does not publish
-on branches, or its pipeline has not finished — its sources are checked out
-at that same commit instead, locally and in CI alike. It never falls back to the pinned
-tag, which would test without the change and pass the gate, and never uses an
-older commit's image.
+**Artefacts on a topic.** A topic slot is its sources, also in a workspace that
+takes the repository as an [artefact](artefacts.md#an-artefact-on-a-topic):
+the change is tested as it is, locally and in CI alike, never the release
+before it.
 
 ## Branch flows
 
@@ -565,7 +611,7 @@ is any branch the root does not pin; promotion asks only about tags; the gate
 only whether anything resolves from a branch.
 
 **Long-lived branches are topics or pins — you choose.** Left out of
-`[develop] pinned`, the root's `staging` matches every repository with a
+`[branches] pinned`, the root's `staging` matches every repository with a
 `staging` branch, which is what a staging integration build wants. Listed in
 it, `staging` builds from pins like `main`.
 
@@ -574,9 +620,8 @@ it, `staging` builds from pins like `main`.
 
 | How a team tags | What `upgrade` pins |
 |---|---|
-| Releases on `staging` (`v2026.10.01`) | Those tags, as with tags on the default branch |
-| Pre-releases on `staging` (`v2026.10.01-rc1`), releases on `main` | An rc only where the current pin is already a pre-release |
-| A separate stream on `staging` (`staging-2026.10.01`) | The stream the current pin uses: streams are compared only within themselves |
+| Releases on `staging` (`v1-2026.10.01`) | Those tags, as with tags on the default branch |
+| Pre-releases on `staging` (`v1-2026.10.01-rc1`), releases on `main` | An rc only where the current pin is already a pre-release |
 
 ## Parallel topics
 

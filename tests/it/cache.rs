@@ -11,7 +11,7 @@ use crate::support::artefacts::*;
 use crate::support::ci_cache::*;
 use crate::support::ci_cache::{age, ci_pull};
 use crate::support::resolution::*;
-use crate::support::{redact_shas, TestEnv};
+use crate::support::TestEnv;
 
 // ---------------------------------------------------------------------------
 // Normal cases
@@ -156,7 +156,7 @@ fn normal_005_update_warms_a_repo_nobody_has_placed() {
 fn normal_006_update_warms_images_without_a_checkout() {
     let env = TestEnv::new("art_cache_update");
     let bare = env.artefact_repo("app", &[("app.bin", "x")]);
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
 
     let out = env.run_with_env(&[], &["cache", "update"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
@@ -234,11 +234,14 @@ fn normal_009_compact_drops_stale_pins_from_an_entry_it_keeps() {
 fn normal_010_compact_drops_cold_images_and_their_blobs() {
     let env = TestEnv::new("art_cache_compact");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-    let old = layered(&env, &bare, "app v1");
-    env.write_config(&entry_config(&env, &bare, "main"));
+    layered(&env, &bare, "v1.0.0", "app v1");
+    let old = "v1.0.0".to_string();
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     support::artefacts::ci_pull(&env);
     env.push_commit(&bare, "main", "README.md", "v2");
-    let new = layered(&env, &bare, "app v2");
+    layered(&env, &bare, "v1.1.0", "app v2");
+    let new = "v1.1.0".to_string();
+    env.write_config(&entry_config(&env, &bare, "v1.1.0"));
     support::artefacts::ci_pull(&env);
 
     let entry = cached_images(&env);
@@ -337,7 +340,7 @@ fn normal_012_status_lists_every_revision_a_snapshot_holds() {
 fn normal_013_status_has_an_images_column() {
     let env = TestEnv::new("art_cache_status");
     let bare = env.artefact_repo("app", &[("app.bin", "x")]);
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     support::artefacts::ci_pull(&env);
     assert!(!env.playground.join(".git/gitscale/images").exists());
 
@@ -346,47 +349,12 @@ fn normal_013_status_has_an_images_column() {
     assert!(out.stdout.contains("IMAGES"), "{}", out.stdout);
     let row = out.stdout.lines().find(|l| l.contains("meta/app")).unwrap();
     let fields: Vec<&str> = row.split_whitespace().collect();
-    // REPO, SNAPSHOTS, IMAGES (two words), …
+    // REPO, SNAPSHOTS, IMAGES (two words), …: no snapshot, as nothing of
+    // its git is read, and the image.
     assert_eq!(fields[1], "-", "{}", row);
     assert_ne!(fields[2], "-", "{}", row);
-    // The commit is listed under the row.
-    assert!(
-        redact_shas(&out.stdout).contains("      [sha]"),
-        "{}",
-        out.stdout
-    );
-}
-
-/// `cache update` warms an overlay entry's image as well as its source: a
-/// CI job lays that image over the checkout, and with it already in the
-/// cache downloads no blob at all.
-#[test]
-#[ignore = "bug: cache update warms only replace entries' images, not overlays'"]
-fn normal_020_update_warms_overlay_images() {
-    let env = TestEnv::new("cache_update_overlay");
-    let app = env.create_bare_repo(
-        "app",
-        "main",
-        &[("README.md", "app"), (".gitignore", "/dist/\n")],
-    );
-    env.publish(&app, "main", &[("app.bin", "built")]);
-    env.write_config(&overlay_config(&env, &app, "main"));
-
-    let out = cache_cmd(&env, &["update"]);
-    assert!(out.success, "{}{}", out.stdout, out.stderr);
-    assert!(
-        !env.cache_entries("images").is_empty(),
-        "no image was cached"
-    );
-
-    env.registry().clear_log();
-    support::artefacts::ci_pull(&env);
-    assert_eq!(
-        read(&env, "meta/app/dist/app.bin"),
-        "built",
-        "the overlay was laid"
-    );
-    assert_eq!(blob_downloads(&env), 0, "{:?}", env.registry().log());
+    // The release is listed under the row.
+    assert!(out.stdout.contains("      v1.0.0"), "{}", out.stdout);
 }
 
 /// An image entry nothing has used within the period goes whole, blobs and
@@ -395,7 +363,7 @@ fn normal_020_update_warms_overlay_images() {
 fn normal_021_compact_evicts_a_cold_image_entry_whole() {
     let env = TestEnv::new("cache_compact_image_entry");
     let bare = env.artefact_repo("app", &[("app.bin", "x")]);
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     support::artefacts::ci_pull(&env);
     let entry = cached_images(&env);
     age(&entry.join("gitscale-last-used"), "2000-01-01");
@@ -405,40 +373,6 @@ fn normal_021_compact_evicts_a_cold_image_entry_whole() {
     assert!(out.stdout.contains("1 entry evicted"), "{}", out.stdout);
     assert!(!entry.exists());
     assert!(env.cache_entries("images").is_empty());
-}
-
-/// An overlay entry's image is named after the directory that declares it,
-/// as its snapshot is: one row for the repository, with both columns
-/// filled, rather than a second row under the cache's own name.
-#[test]
-#[ignore = "bug: cache status names an overlay's image entry by its cache name, not the entry"]
-fn normal_027_status_names_an_overlay_image_after_its_entry() {
-    let env = TestEnv::new("cache_status_overlay");
-    let app = env.create_bare_repo(
-        "app",
-        "main",
-        &[("README.md", "app"), (".gitignore", "/dist/\n")],
-    );
-    env.publish(&app, "main", &[("app.bin", "built")]);
-    env.write_config(&overlay_config(&env, &app, "main"));
-    support::artefacts::ci_pull(&env);
-    assert!(!env.cache_entries("images").is_empty());
-
-    let out = cache_cmd(&env, &["status"]);
-    assert!(out.success, "{}", out.stderr);
-    let rows: Vec<&str> = out
-        .stdout
-        .lines()
-        .filter(|l| l.starts_with("  ") && !l.starts_with("      ") && !l.contains("REPO"))
-        .collect();
-    assert_eq!(rows.len(), 1, "{}", out.stdout);
-    let fields: Vec<&str> = rows[0].split_whitespace().collect();
-    assert_eq!(fields[0], "meta/app", "{}", out.stdout);
-    assert!(
-        !rows[0].contains(" - "),
-        "both columns filled: {}",
-        out.stdout
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -587,7 +521,7 @@ fn edge_022_compact_keeps_the_images_resolution_just_read() {
     let env = TestEnv::new("cache_compact_config_layer");
     let bare = env.artefact_repo("app", &[("app.bin", "x")]);
     let commit = tip(&bare, "main");
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let out = env.run_with_env(&[("CI", "true")], &["fetch"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     let entry = cached_images(&env);
@@ -612,7 +546,7 @@ fn edge_022_compact_keeps_the_images_resolution_just_read() {
 fn edge_023_compact_removes_half_written_downloads() {
     let env = TestEnv::new("cache_compact_partial");
     let bare = env.artefact_repo("app", &[("app.bin", "x")]);
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     support::artefacts::ci_pull(&env);
     let entry = cached_images(&env);
     let blobs = entry.join("blobs/sha256");
@@ -655,17 +589,18 @@ fn error_019_an_unknown_period_is_refused_before_anything_is_deleted() {
     }
 }
 
-/// `cache update` for an artefact whose commit has no image fails, and says
-/// it may not have been published yet, rather than warming something else.
+/// `cache update` for an artefact whose release has no image fails, and
+/// says so, rather than warming something else.
 #[test]
 fn error_024_update_fails_for_an_unpublished_artefact_and_says_why() {
     let env = TestEnv::new("cache_update_unpublished");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-    env.write_config(&entry_config(&env, &bare, "main"));
+    support::run_git_pub(&bare, &["tag", "v1.0.0", "main"]);
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let out = cache_cmd(&env, &["update"]);
     assert!(!out.success, "{}", out.stdout);
     let text = format!("{}{}", out.stdout, out.stderr);
-    assert!(text.contains("may not have published yet"), "{}", text);
+    assert!(text.contains("no artefact for"), "{}", text);
     assert!(env.cache_entries("images").is_empty());
 }
 

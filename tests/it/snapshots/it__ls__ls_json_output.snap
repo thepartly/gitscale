@@ -1,12 +1,14 @@
 ---
-source: tests/it/status.rs
-assertion_line: 1127
+source: tests/it/ls.rs
+assertion_line: 78
 expression: parsed
 ---
 [
   {
     "ahead": 0,
-    "artefact_use": "-",
+    "as": "source",
+    "as_next": null,
+    "as_reason": "default",
     "behind": 0,
     "class": "any",
     "clean": true,
@@ -18,7 +20,6 @@ expression: parsed
     "expected_ref": "main",
     "foreign": false,
     "implicit": false,
-    "kind": "source",
     "notes": [],
     "pinned_by": null,
     "reason": "only",
@@ -41,6 +42,7 @@ expression: parsed
     "resolved_commit": "[commit]",
     "resolved_ref": "main",
     "revision_kind": "branch",
+    "source_hash": "[hash]",
     "stale": false,
     "symlink": false,
     "symlink_target": "",

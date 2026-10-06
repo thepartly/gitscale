@@ -8,9 +8,10 @@
 //! read-only likewise: what a workspace builds and what a pipeline builds are
 //! the same files.
 //!
-//! An artefact entry that replaces its checkout holds the image of its
-//! commit, unless it is on the topic: developed here, or following a remote
-//! branch whose tip has no image yet, it is the source instead.
+//! A checkout arrives in the form [`Slot::arrival`] gives it — its sources,
+//! or the image of its release — and moves between them when that changes.
+//! An artefact at a revision that is no release, or of a release with no
+//! image, fails the checkout.
 //!
 //! Nothing is moved that could lose anything: uncommitted changes, or commits
 //! no branch, tag or remote holds, fail the entry and leave it where it is.
@@ -20,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use crate::artefact::{Artefacts, Pulled};
 use crate::config::RepoEntry;
+use crate::prefer::Form;
 use crate::resolution::Slot;
 use crate::store::{Sources, Worktree};
 
@@ -73,8 +75,12 @@ impl Placer<'_> {
                     .unwrap_or_default()
             );
         };
-        if entry.is_artefact() {
+        if slot.form() == Form::Artefact {
             return self.place_artefact(slot, &entry, &commit);
+        }
+        if crate::prefer::on_disk(self.config_root, name) == Some(Form::Artefact) {
+            // The image installed here: the sources take its place.
+            crate::artefact::uninstall(self.config_root, name)?;
         }
         let target = match &slot.topic {
             Some(topic) => Target::Branch {
@@ -84,65 +90,41 @@ impl Placer<'_> {
             },
             None => Target::Detached(commit),
         };
-        let mut message = self.place_source(&entry, &target)?;
-        if entry.is_overlay() {
-            message.push_str(&self.overlay(slot, &entry)?);
-        }
-        Ok(message)
+        self.place_source(&entry, &target)
     }
 
-    /// An artefact entry: the image, or — on the topic, without one to use —
-    /// the source.
+    /// The image of the release — or the build — resolution chose, in place
+    /// of any sources.
     fn place_artefact(&self, slot: &Slot, entry: &RepoEntry, commit: &str) -> Result<String> {
         let dest = self.config_root.join(&entry.directory);
         let name = entry.directory.as_str();
-        if let Some(topic) = &slot.topic {
-            let sources_needed = topic.developed
-                || !self
-                    .artefacts
-                    .has_image(&entry.repo_url, &topic.commit)
-                    .with_context(|| format!("cannot ask the registry about {}", name))?;
-            if sources_needed {
-                if !crate::git::is_checkout(&dest) {
-                    crate::artefact::uninstall(self.config_root, name)?;
-                }
-                // Developed: on its branch. Following a branch whose tip has
-                // no image: the source of that tip, detached — the image takes
-                // over again once one is published.
-                let target = if topic.developed {
-                    Target::Branch {
-                        name: topic.branch.clone(),
-                        commit: topic.commit.clone(),
-                        developed: true,
-                    }
-                } else {
-                    Target::Detached(topic.commit.clone())
-                };
-                let mut source = entry.clone();
-                source.artefact = None;
-                let placed = self.place_source(&source, &target)?;
-                return Ok(format!("{}, sources", placed));
+        if crate::artefact::image_tag(&entry.revision).is_none() {
+            match &slot.chosen {
+                Some(chosen) => bail!(
+                    "taken as an artefact, but {} asks for {}, which is not a release",
+                    chosen.by,
+                    entry.revision
+                ),
+                None => bail!(
+                    "taken as an artefact, but nothing asks for a release of it: it follows \
+                     its default branch"
+                ),
             }
         }
         if crate::git::is_checkout(&dest) {
+            // Asked before the sources go, so a missing image leaves them.
+            self.artefacts.check_image(entry)?;
             self.remove_source(entry, &dest)?;
         }
-        let commit = slot.topic.as_ref().map_or(commit, |t| t.commit.as_str());
         Ok(match self.artefacts.pull(entry, &dest, commit)? {
-            Pulled::Updated(commit) => {
-                format!("{} (artefact {})", name, crate::git::short_sha(&commit))
-            }
-            Pulled::Current(commit) => format!(
-                "{} (artefact {}, up to date)",
-                name,
-                crate::git::short_sha(&commit)
-            ),
+            Pulled::Updated(tag) => format!("{} (artefact {})", name, tag),
+            Pulled::Current(tag) => format!("{} (artefact {}, up to date)", name, tag),
         })
     }
 
-    /// A source checkout an artefact entry is done with — it left the topic,
-    /// or its branch's tip has an image now — taken away so the image can go
-    /// in its place. Refused while it holds work.
+    /// A source checkout replaced by its artefact — its form changed, or it
+    /// left the topic — taken away so the image can go in its place. Refused
+    /// while it holds work.
     fn remove_source(&self, entry: &RepoEntry, dest: &Path) -> Result<()> {
         if let Some(work) = crate::git::local_work(dest, &[]) {
             bail!(
@@ -166,25 +148,6 @@ impl Placer<'_> {
                 .with_context(|| format!("cannot remove {}", dest.display()))?,
         }
         Ok(())
-    }
-
-    /// The overlay of an overlay entry, for the commit its checkout is at.
-    /// Off the topic it must exist; on it, a commit without an image just has
-    /// none laid over it.
-    fn overlay(&self, slot: &Slot, entry: &RepoEntry) -> Result<String> {
-        let dest = self.config_root.join(&entry.directory);
-        let head = crate::git::resolve_ref(&dest, "HEAD")
-            .ok_or_else(|| anyhow::anyhow!("HEAD does not resolve in {}", entry.directory))?;
-        let on_branch = crate::git::current_branch(&dest).is_some();
-        if slot.topic.is_some() && !self.artefacts.has_image(&entry.repo_url, &head)? {
-            return Ok(String::new());
-        }
-        Ok(
-            match self.artefacts.overlay(entry, &dest, &head, on_branch)? {
-                Pulled::Updated(commit) => format!(" (overlay {})", crate::git::short_sha(&commit)),
-                Pulled::Current(_) => String::new(),
-            },
-        )
     }
 
     /// A git checkout at `target`.

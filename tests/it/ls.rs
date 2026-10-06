@@ -79,6 +79,7 @@ fn normal_003_json_lists_each_checkout() {
         "[].current_ref" => "[ref]",
         "[].resolved_commit" => "[commit]",
         "[].requests[].commit" => "[commit]",
+        "[].source_hash" => "[hash]",
     });
 }
 
@@ -87,10 +88,12 @@ fn normal_004_table_shows_a_missing_artefact() {
     let env = TestEnv::new("status_artefact_missed");
     env.init_playground_git();
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
+    support::run_git_pub(&bare, &["tag", "v1.0.0", "main"]);
 
+    env.prefer(&bare, gitscale::prefer::Form::Artefact);
     env.write_config(&format!(
         r#"{}[repos]
-"meta/app" = {{ url = "{}", revision = "main", artefact = "replace" }}
+"meta/app" = {{ url = "{}", revision = "v1.0.0" }}
 "#,
         env.registries(),
         bare.display(),
@@ -108,9 +111,10 @@ fn normal_005_table_shows_an_installed_artefact() {
     env.init_playground_git();
     let bare = env.artefact_repo("app", &[("app.bin", "content")]);
 
+    env.prefer(&bare, gitscale::prefer::Form::Artefact);
     env.write_config(&format!(
         r#"{}[repos]
-"meta/app" = {{ url = "{}", revision = "main", artefact = "replace" }}
+"meta/app" = {{ url = "{}", revision = "v1.0.0" }}
 "#,
         env.registries(),
         bare.display(),
@@ -348,36 +352,27 @@ fn normal_013_json_lists_the_untracked_links() {
 }
 
 /// An artefact's JSON carries what the last fetch saw beside what is
-/// installed, and the flags they make: `behind` and `missing` while the new
-/// commit has no image, `behind` once it has. The table's icon follows: `!`
-/// in bright red, then `⇓` in yellow.
+/// installed, and the flags they make: `ref-mismatch` and `missing` while
+/// the release wanted has no image, `ref-mismatch` once it has. The table's
+/// icon follows: `!`, then `≠`, both in bright red.
 #[test]
 fn normal_014_json_carries_an_artefacts_remote_state_and_flags() {
     let env = TestEnv::new("status_artefact_json_remote");
     let bare = env.artefact_repo("app", &[("app.bin", "v1")]);
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     assert!(env.run(&["sync"]).success);
-    let installed = support::git_stdout(&bare, &["rev-parse", "main"]);
     let row = json_row(&env, "meta/app");
-    assert_eq!(
-        row["artefact"]["remote"]["commit"],
-        installed.as_str(),
-        "{}",
-        row
-    );
+    assert_eq!(row["artefact"]["remote"]["tag"], "v1.0.0", "{}", row);
     assert_eq!(row["artefact"]["flags"], serde_json::json!([]), "{}", row);
 
-    let second = env.push_commit(&bare, "main", "README.md", "v2");
+    env.push_commit(&bare, "main", "README.md", "v2");
+    support::run_git_pub(&bare, &["tag", "v1.1.0", "main"]);
+    env.write_config(&entry_config(&env, &bare, "v1.1.0"));
     let _ = env.run(&["fetch"]);
     let row = json_row(&env, "meta/app");
     let artefact = &row["artefact"];
-    assert_eq!(
-        artefact["installed"]["commit"],
-        installed.as_str(),
-        "{}",
-        row
-    );
-    assert_eq!(artefact["remote"]["commit"], second.as_str(), "{}", row);
+    assert_eq!(artefact["installed"]["tag"], "v1.0.0", "{}", row);
+    assert_eq!(artefact["remote"]["tag"], "v1.1.0", "{}", row);
     assert_eq!(
         artefact["remote"]["digest"],
         serde_json::Value::Null,
@@ -386,7 +381,7 @@ fn normal_014_json_carries_an_artefacts_remote_state_and_flags() {
     );
     assert_eq!(
         artefact["flags"],
-        serde_json::json!(["behind", "missing"]),
+        serde_json::json!(["ref-mismatch", "missing"]),
         "{}",
         row
     );
@@ -404,14 +399,14 @@ fn normal_014_json_carries_an_artefacts_remote_state_and_flags() {
         .is_some_and(|d| d.starts_with("sha256:")));
     assert_eq!(
         row["artefact"]["flags"],
-        serde_json::json!(["behind"]),
+        serde_json::json!(["ref-mismatch"]),
         "{}",
         row
     );
     let out = env.run(&["ls", "--color", "always"]);
     assert_eq!(
         icon_and_colour(&out.stdout, "meta/app"),
-        ("⇓".to_string(), "33".to_string())
+        ("≠".to_string(), "91".to_string())
     );
 }
 
@@ -421,9 +416,17 @@ fn normal_014_json_carries_an_artefacts_remote_state_and_flags() {
 fn normal_015_fetch_reports_what_the_registry_has_now() {
     let env = TestEnv::new("status_fetch_artefact");
     let bare = env.artefact_repo("app", &[("app.bin", "v1")]);
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     assert!(env.run(&["sync"]).success);
-    env.push_commit(&bare, "main", "README.md", "v2");
+    let artefact = "[artefact]\ninclude = [\"dist/**\"]\n";
+    let (out, _) = env.publish_with(
+        &bare,
+        "main",
+        artefact,
+        &[("app.bin", "rebuilt")],
+        &["--force", "v1.0.0"],
+    );
+    assert!(out.success, "{}", out.stderr);
     let offline = env.run(&["ls"]);
     assert_eq!(
         status_cell(&offline.stdout, "meta/app"),
@@ -436,19 +439,10 @@ fn normal_015_fetch_reports_what_the_registry_has_now() {
     assert!(out.success, "{}", out.stderr);
     assert_eq!(
         status_cell(&out.stdout, "meta/app"),
-        "behind, missing",
+        "changed",
         "{}{}",
         out.stdout,
         out.stderr
-    );
-
-    env.publish(&bare, "main", &[("app.bin", "v2")]);
-    let out = env.run(&["ls", "--fetch"]);
-    assert_eq!(
-        status_cell(&out.stdout, "meta/app"),
-        "behind",
-        "{}",
-        out.stdout
     );
 }
 
@@ -641,32 +635,6 @@ fn normal_029_a_topic_branch_behind_the_pin_says_rebase_it() {
         "{}",
         row
     );
-}
-
-/// A `replace` artefact on a topic says which it is: the image of the
-/// branch tip, by commit, or the tip's sources when that commit has no image.
-#[test]
-fn normal_030_a_replace_artefact_on_a_topic_says_image_or_sources() {
-    let env = TestEnv::new("status_topic_artefact");
-    let app = env.artefact_repo("app", &[("app.bin", "main build")]);
-    run_git_branch(&app, "feat/x");
-    let tip = env.push_commit(&app, "feat/x", "README.md", "feature");
-    env.publish(&app, "feat/x", &[("app.bin", "feature build")]);
-    env.write_config(&entry_config(&env, &app, "main"));
-    env.init_playground_git();
-    support::run_git_pub(&env.playground, &["switch", "-q", "-c", "feat/x"]);
-    let pull = env.run(&["sync"]);
-    assert!(pull.success, "{}{}", pull.stdout, pull.stderr);
-    let out = env.run(&["ls"]);
-    let row = table_row(&out.stdout, "meta/app");
-    assert!(row.contains(&format!("image {}", &tip[..7])), "{}", row);
-
-    env.push_commit(&app, "feat/x", "README.md", "newer");
-    let pull = env.run(&["sync"]);
-    assert!(pull.success, "{}{}", pull.stdout, pull.stderr);
-    let out = env.run(&["ls"]);
-    let row = table_row(&out.stdout, "meta/app");
-    assert!(row.contains("sources"), "{}", row);
 }
 
 // ---------------------------------------------------------------------------
@@ -930,9 +898,10 @@ fn edge_032_a_checkout_git_cannot_read_is_not_ok() {
 fn error_009_fetch_reports_a_fetch_it_could_not_do() {
     let env = TestEnv::new("status_fetch_failure");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
+    env.prefer(&bare, gitscale::prefer::Form::Artefact);
     env.write_config(&format!(
         r#"[repos]
-"meta/app" = {{ url = "{}", revision = "main", artefact = "replace" }}
+"meta/app" = {{ url = "{}", revision = "v1.0.0" }}
 "#,
         bare.display()
     ));
@@ -994,7 +963,7 @@ fn error_025_a_graph_that_cannot_be_resolved_still_gets_a_table() {
 fn error_026_verbose_fetch_keeps_json_parseable() {
     let env = TestEnv::new("status_verbose_json");
     let bare = env.artefact_repo("app", &[("app.bin", "v1")]);
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     assert!(env.run(&["sync"]).success);
 
     let out = env.run(&["ls", "-v", "--fetch", "--format", "json"]);
@@ -1014,8 +983,9 @@ fn perf_027_without_fetch_ls_asks_nothing_of_the_network() {
     let env = TestEnv::new("status_offline");
     let app = env.artefact_repo("app", &[("app.bin", "v1")]);
     let lib = env.create_bare_repo("mylib", "main", &[("a.txt", "a")]);
+    env.prefer(&app, gitscale::prefer::Form::Artefact);
     env.write_config(&format!(
-        "{}[repos]\n\"meta/app\" = {{ url = \"{}\", revision = \"main\", artefact = \"replace\" }}\n\
+        "{}[repos]\n\"meta/app\" = {{ url = \"{}\", revision = \"v1.0.0\" }}\n\
          \"libs/mylib\" = {{ url = \"{}\", revision = \"main\" }}\n",
         env.registries(),
         app.display(),

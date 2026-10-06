@@ -32,7 +32,10 @@ use crate::topic::Root;
 /// What `git topic` was asked to do.
 pub enum Action {
     Print,
-    Join(Vec<String>),
+    Join {
+        dirs: Vec<String>,
+        dependants: bool,
+    },
     Leave(Vec<String>),
     Start {
         name: String,
@@ -76,8 +79,15 @@ pub fn run(
     };
     match action {
         Action::Print => print(&ctx, out),
-        Action::Join(dirs) => join_or_leave(&ctx, &dirs, false, out, err),
-        Action::Leave(dirs) => join_or_leave(&ctx, &dirs, true, out, err),
+        Action::Join { dirs, dependants } => {
+            let how = if dependants {
+                How::Dependants
+            } else {
+                How::Join
+            };
+            join_or_leave(&ctx, &dirs, how, out, err)
+        }
+        Action::Leave(dirs) => join_or_leave(&ctx, &dirs, How::Leave, out, err),
         Action::Start {
             name,
             from,
@@ -212,7 +222,7 @@ impl Repo {
     fn prefix(&self, need_user: bool) -> Result<Option<String>> {
         let configured = match &self.workspace {
             Some((config, _)) => config.topic.prefix.clone(),
-            None => crate::git::query(&self.dir, &["show", &format!("HEAD:{}", CONFIG_FILENAME)])
+            None => crate::config::committed_at(&self.dir, "HEAD")
                 .and_then(|text| {
                     crate::config::parse_config(&text, Path::new(CONFIG_FILENAME)).ok()
                 })
@@ -225,15 +235,15 @@ impl Repo {
         }
     }
 
-    /// `[develop] pinned`, as `prefix` reads it.
+    /// `[branches] pinned`, as `prefix` reads it.
     fn pinned(&self) -> Option<Vec<String>> {
         match &self.workspace {
-            Some((config, _)) => config.develop.pinned.clone(),
-            None => crate::git::query(&self.dir, &["show", &format!("HEAD:{}", CONFIG_FILENAME)])
+            Some((config, _)) => config.branches.pinned.clone(),
+            None => crate::config::committed_at(&self.dir, "HEAD")
                 .and_then(|text| {
                     crate::config::parse_config(&text, Path::new(CONFIG_FILENAME)).ok()
                 })
-                .and_then(|c| c.develop.pinned),
+                .and_then(|c| c.branches.pinned),
         }
     }
 
@@ -421,18 +431,28 @@ fn print(ctx: &Ctx, out: &mut dyn Write) -> Result<()> {
 // join / leave
 // ---------------------------------------------------------------------------
 
+/// What `join_or_leave` does with the checkouts it is given.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum How {
+    Join,
+    /// Join the dependants of the checkouts given, or of the topic's changes.
+    Dependants,
+    Leave,
+}
+
 fn join_or_leave(
     ctx: &Ctx,
     dirs: &[String],
-    leave: bool,
+    how: How,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
+    let leave = how == How::Leave;
     let verb = if leave { "leave" } else { "join" };
     let (config, config_root) = crate::config::load_workspace(ctx.start)?;
     let here = Here::new(ctx.start, &config_root)?;
     let sources = Sources::new(&config_root, ctx.no_cache)?;
-    if dirs.is_empty() {
+    if dirs.is_empty() && how != How::Dependants {
         // As `git add` with nothing named: the hint, when there is one to
         // give, names the checkout the current directory is in.
         let hint = crate::resolve::workspace(&config, &config_root, false, &sources, None, false)
@@ -484,10 +504,32 @@ fn join_or_leave(
         verbose: ctx.verbose,
         fetch: true,
     };
+    let targets: Vec<(String, Result<&Slot>)> = if how == How::Dependants {
+        let found = dependants(
+            &config_root,
+            stores,
+            &artefacts,
+            &resolution,
+            &here,
+            dirs,
+            out,
+        )?;
+        if found.is_empty() {
+            writeln!(out, "nothing to join")?;
+        }
+        found
+            .into_iter()
+            .map(|slot| (slot.directory.clone(), Ok(slot)))
+            .collect()
+    } else {
+        dirs.iter()
+            .map(|dir| (dir.clone(), here.slot(&resolution, dir)))
+            .collect()
+    };
     let color = crate::output::stderr();
     let mut failed = 0;
-    for dir in dirs {
-        let done = here.slot(&resolution, dir).and_then(|slot| {
+    for (dir, slot) in targets {
+        let done = slot.and_then(|slot| {
             if leave {
                 leave_one(&config_root, &resolution, &placer, slot)
             } else {
@@ -522,6 +564,81 @@ fn join_or_leave(
         );
     }
     Ok(())
+}
+
+/// The checkouts `--dependants` joins, never the root. With `dirs`, the
+/// dependants of each that ask for less than its newest release: a raise
+/// begins so. Without, one level up from the topic's changes: the dependants
+/// of each checkout carrying a change while none of them is on the topic —
+/// once one is, that level is done, and a dependant left off stays off.
+fn dependants<'a>(
+    config_root: &Path,
+    stores: &crate::store::Stores,
+    artefacts: &Artefacts,
+    resolution: &'a Resolution,
+    here: &Here,
+    dirs: &[String],
+    out: &mut dyn Write,
+) -> Result<Vec<&'a Slot>> {
+    let requesters = |slot: &Slot, wanted: &dyn Fn(&str) -> bool| -> Vec<&'a Slot> {
+        slot.requests
+            .iter()
+            .filter(|r| r.from != "root" && wanted(&r.revision))
+            .filter_map(|r| resolution.slot(&r.from))
+            .collect()
+    };
+    let mut found: Vec<&Slot> = Vec::new();
+    if dirs.is_empty() {
+        for slot in resolution.topic_slots() {
+            let store = stores.repo_path(&crate::ci::remote_url(&slot.url));
+            if !carries_change(config_root, &store, resolution, slot) {
+                continue;
+            }
+            let theirs = requesters(slot, &|_| true);
+            if theirs.iter().all(|r| r.topic.is_none()) {
+                found.extend(theirs);
+            }
+        }
+    } else {
+        for dir in dirs {
+            let slot = here.slot(resolution, dir)?;
+            match crate::promote::target(stores, artefacts, slot, false)?.release(&slot.directory) {
+                Ok((_, newest)) => found.extend(
+                    requesters(slot, &|revision| {
+                        crate::promote::below(revision, newest) == Some(true)
+                    })
+                    .into_iter()
+                    .filter(|r| r.topic.is_none()),
+                ),
+                Err(why) => writeln!(out, "{}", why)?,
+            }
+        }
+    }
+    let mut seen = BTreeSet::new();
+    found.retain(|s| seen.insert(s.directory.clone()));
+    Ok(found)
+}
+
+/// Whether a checkout on the topic carries a change: commits on its branch
+/// that its pin does not have, or uncommitted work.
+fn carries_change(config_root: &Path, store: &Path, resolution: &Resolution, slot: &Slot) -> bool {
+    if ahead(store, slot) > 0 {
+        return true;
+    }
+    let dest = config_root.join(&slot.directory);
+    crate::git::is_checkout(&dest)
+        && crate::git::uncommitted(&dest, &resolution.planted_in(&slot.directory)).is_some()
+}
+
+/// Commits on a topic slot's branch that its pin does not have.
+fn ahead(store: &Path, slot: &Slot) -> usize {
+    match (&slot.topic, slot.pin()) {
+        (Some(on), Some(pin)) => count(
+            store,
+            &["rev-list", &on.commit, &format!("^{}", pin.commit)],
+        ),
+        _ => 0,
+    }
 }
 
 /// Put one checkout on the topic.
@@ -565,18 +682,22 @@ fn join_one(
     let entry = slot.entry();
     // Joining an artefact means its source: the image goes, a worktree of
     // the same commit comes.
+    let installed = if crate::git::is_checkout(&dest) {
+        None
+    } else {
+        crate::artefact::installed(config_root, name).map(|m| m.commit)
+    };
     let from = match &slot.topic {
         Some(on) => on.commit.clone(),
-        None if entry.is_artefact() => crate::artefact::installed_commit(config_root, name)
+        None => installed
+            .clone()
+            .or_else(|| {
+                crate::git::is_checkout(&dest)
+                    .then(|| crate::git::resolve_ref(&dest, "HEAD"))
+                    .flatten()
+            })
             .or_else(|| slot.commit.clone())
             .ok_or_else(|| anyhow::anyhow!("{} has no commit to start from", name))?,
-        None => match crate::git::resolve_ref(&dest, "HEAD") {
-            Some(head) if crate::git::is_checkout(&dest) => head,
-            _ => slot
-                .commit
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("{} has no commit to start from", name))?,
-        },
     };
     let stores = placer
         .sources
@@ -584,7 +705,7 @@ fn join_one(
         .as_ref()
         .expect("join runs with stores");
     let store = stores.update(&crate::git::remote_url(&entry))?;
-    if entry.is_artefact() && !crate::git::is_checkout(&dest) {
+    if installed.is_some() {
         crate::artefact::uninstall(config_root, name)?;
     }
     if !crate::git::is_checkout(&dest) {
@@ -633,19 +754,19 @@ fn leave_one(
             name
         );
     }
-    let pin = match slot.pin() {
-        Some(pin) => pin.commit,
+    let (revision, pin) = match slot.pin() {
+        Some(pin) => (pin.revision, pin.commit),
         // Nobody gives it a revision: the default branch is its pin.
-        None => crate::git::resolve_ref(&dest, "refs/remotes/origin/HEAD")
-            .ok_or_else(|| anyhow::anyhow!("{} has no pin to go back to", name))?,
+        None => (
+            String::new(),
+            crate::git::resolve_ref(&dest, "refs/remotes/origin/HEAD")
+                .ok_or_else(|| anyhow::anyhow!("{} has no pin to go back to", name))?,
+        ),
     };
     crate::checkout::stop_branch(&dest, &on.branch, &pin, &resolution.planted_in(name), false)
         .with_context(|| format!("{} stays on {}", name, on.branch))?;
-    // Back to what it is off the topic — for an artefact, its image.
-    let mut off = slot.clone();
-    off.topic = None;
-    off.commit = Some(pin);
-    let placed = placer.place(&off)?;
+    // Back to the form it is preferred in — for an artefact, its image.
+    let placed = placer.place(&slot.off_topic(&revision, &pin))?;
     Ok(format!("{} left {}: {}", name, on.branch, placed))
 }
 
@@ -934,13 +1055,7 @@ fn status(ctx: &Ctx, fetch: bool, format: &str, out: &mut dyn Write) -> Result<(
         let store = stores.repo_path(&crate::ci::remote_url(&slot.url));
         let planted = resolution.planted_in(&slot.directory);
         let state = crate::promote::assess(&root, &store, slot, &planted, None);
-        let ahead = match slot.pin() {
-            Some(pin) => count(
-                &store,
-                &["rev-list", &on.commit, &format!("^{}", pin.commit)],
-            ),
-            None => 0,
-        };
+        let ahead = ahead(&store, slot);
         let pushed = (ahead > 0)
             .then(|| count(&store, &["rev-list", &on.commit, "--not", "--remotes"]) == 0);
         rows.push(Row {
@@ -1624,23 +1739,7 @@ fn uncommitted_work(root: &Path, moving: &[String], removing: bool, no_cache: bo
     else {
         return found;
     };
-    let ours: Vec<&str> = resolution
-        .slots
-        .iter()
-        .map(|s| s.directory.as_str())
-        .collect();
-    let changed = crate::git::porcelain(root)
-        .unwrap_or_default()
-        .iter()
-        .filter(|(untracked, path)| {
-            !(*untracked
-                && ours.iter().any(|dir| {
-                    Path::new(path).starts_with(dir)
-                        || Path::new(dir).starts_with(path.trim_end_matches('/'))
-                }))
-        })
-        .count();
-    if changed > 0 {
+    if resolution.root_changes(root).is_some() {
         found.push(".".to_string());
     }
     for slot in &resolution.slots {

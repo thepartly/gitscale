@@ -43,11 +43,13 @@ The problems GitScale is built for:
   repository's branch of that name too. `git scale commit` and `git scale push`
   run in every repository on the topic, dependencies first. Once the layers are
   released, `git upgrade` writes the new tags in. See [topics](topics.md).
-- **Large prebuilt payloads.** `artefact = "replace"` installs a repository's
-  build output instead of cloning it — datasets, generated clients, compiled
-  assets — published by its own pipeline to an OCI registry (GitLab's, GHCR, or
-  any other) as one image per commit, and fetched with the CI job token. No
-  `docker`, `oras` or cloud CLI is needed. See [artefacts](artefacts.md).
+- **Large prebuilt payloads.** `git scale prefer --artefact` takes a
+  repository's build output instead of cloning it — datasets, generated
+  clients, compiled assets — published by its own pipeline to an OCI registry
+  (GitLab's, GHCR, or any other) for each release, and fetched with the CI job
+  token. A workspace that cannot read a repository's sources gets its
+  artefact by itself. No `docker`, `oras` or cloud CLI is needed. See
+  [artefacts](artefacts.md).
 - **Shared transitive dependencies checked out once.** When two repositories in
   the workspace both depend on a third, it is checked out once — at the highest
   version either asks for, one checkout per major — and symlinked into each
@@ -80,10 +82,10 @@ nothing but branches of one name — no manifest of its own, no server. The
 
 ```
 $ git scale ls
-    REPO            PATH   ARTEFACT   REF       EXPECTED   STATUS   RESOLUTION
-✔   imports/core    -      -          3f2a9c1   main       ok
-✔   imports/utils   -      -          8c1d0e2   v2.1.0     ok
-✔   imports/d       -      -          6be5fd3   v1.4.0     ok       implicit via imports/core
+    REPO            PATH   AS         REF       EXPECTED   STATUS   RESOLUTION
+✔   imports/core    -      source     3f2a9c1   main       ok
+✔   imports/utils   -      source     8c1d0e2   v2.1.0     ok
+✔   imports/d       -      source     6be5fd3   v1.4.0     ok       implicit via imports/core
 ```
 
 ## Install

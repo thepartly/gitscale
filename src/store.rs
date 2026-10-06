@@ -42,8 +42,8 @@ const PRUNED: &str = "gitscale-pruned";
 /// Touched on every use of an image entry, so pruning can tell live entries
 /// from dead.
 pub(crate) const LAST_USED: &str = "gitscale-last-used";
-/// One marker per commit an image entry holds, touched whenever that
-/// commit's image is used.
+/// One marker per release an image entry holds, touched whenever that
+/// release's image is used.
 pub(crate) const PINS: &str = "gitscale-pins";
 
 /// The directory name holding `url`'s store.
@@ -532,10 +532,10 @@ impl ImageStore {
         Lock::acquire(&self.locks, entry)
     }
 
-    /// Mark an entry, and the commit just served from it, as wanted.
-    pub(crate) fn touch(&self, entry: &Path, commit: &str) {
+    /// Mark an entry, and the release just served from it, as wanted.
+    pub(crate) fn touch(&self, entry: &Path, tag: &str) {
         touch(&entry.join(LAST_USED));
-        touch(&entry.join(PINS).join(commit));
+        touch(&entry.join(PINS).join(tag));
     }
 
     /// Every entry the store holds.
@@ -552,9 +552,9 @@ impl ImageStore {
         entries
     }
 
-    /// When anything last used the commit `commit` of `entry`.
-    pub fn used(entry: &Path, commit: &str) -> Option<SystemTime> {
-        modified(&entry.join(PINS).join(commit))
+    /// When anything last used the release `tag` of `entry`.
+    pub fn used(entry: &Path, tag: &str) -> Option<SystemTime> {
+        modified(&entry.join(PINS).join(tag))
     }
 
     /// Drop every image nothing has used within `keep`, then every blob no
@@ -578,12 +578,12 @@ impl ImageStore {
             let cold: Vec<String> = layout
                 .held()
                 .into_iter()
-                .map(|held| held.commit)
-                .filter(|commit| older_than(&entry.join(PINS).join(commit), cutoff))
+                .map(|held| held.tag)
+                .filter(|tag| older_than(&entry.join(PINS).join(tag), cutoff))
                 .collect();
             layout.forget(&cold)?;
-            for commit in &cold {
-                let _ = fs::remove_file(entry.join(PINS).join(commit));
+            for tag in &cold {
+                let _ = fs::remove_file(entry.join(PINS).join(tag));
             }
             pruned.images += cold.len();
             layout.gc()?;

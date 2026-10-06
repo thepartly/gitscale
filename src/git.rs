@@ -173,7 +173,7 @@ pub(crate) fn set_origin(dir: &Path, url: &str) -> Result<bool> {
 /// The one way a revision names a commit. Anything else is a branch or tag
 /// name, so a tag called `20241001` is a tag, not a commit: an abbreviated SHA
 /// cannot be told apart from such a name, and git cannot expand one without
-/// the history a shallow clone or an artefact entry never downloads. `git clone
+/// the history a shallow clone or an artefact never downloads. `git clone
 /// --branch` accepts only branch and tag names, so a SHA-pinned entry cannot be
 /// cloned shallowly the usual way.
 pub fn is_full_sha(revision: &str) -> bool {
@@ -376,12 +376,42 @@ pub fn is_checkout(dir: &Path) -> bool {
     dir.join(".git").exists()
 }
 
+/// Whether a failed fetch or `ls-remote`, by what git said, was refused —
+/// the repository is not there for us, or not ours to read — rather than
+/// unable to reach the server at all.
+pub fn is_access_error(said: &str) -> bool {
+    let said = said.to_lowercase();
+    let unreachable = [
+        "could not resolve host",
+        "connection refused",
+        "connection timed out",
+        "timed out",
+        "network is unreachable",
+        "failed to connect",
+        "couldn't connect",
+        "no route to host",
+    ];
+    if unreachable.iter().any(|s| said.contains(s)) {
+        return false;
+    }
+    let refused = [
+        "repository not found",
+        "does not appear to be a git repository",
+        "authentication failed",
+        "permission denied",
+        "access denied",
+        "could not read username",
+        "terminal prompts disabled",
+        "the requested url returned error: 401",
+        "the requested url returned error: 403",
+        "the requested url returned error: 404",
+    ];
+    refused.iter().any(|s| said.contains(s))
+}
+
 /// Ensure an existing clone's `origin` remote URL matches the configured URL.
 /// Returns `true` if the remote was updated.
 pub fn reconcile_remote(entry: &RepoEntry, root: &Path) -> Result<bool> {
-    if entry.is_artefact() {
-        return Ok(false);
-    }
     let dest = root.join(&entry.directory);
     if !is_checkout(&dest) {
         return Ok(false);
@@ -841,8 +871,9 @@ pub struct RepoStatus {
     pub is_detached: bool,
     pub ahead: i32,
     pub behind: i32,
-    /// `replace`, `overlay` or `-`, as the ARTEFACT column shows it.
-    pub artefact_use: String,
+    /// The form the checkout has on disk, `None` when it is not there.
+    /// Filled in by the caller.
+    pub on_disk: Option<crate::prefer::Form>,
     pub is_stale: bool,
     pub is_symlink: bool,
     pub symlink_target: String,
@@ -863,8 +894,8 @@ pub struct RepoStatus {
     /// own, or one whose store is gone. Filled in by the caller, which knows
     /// the stores.
     pub foreign: bool,
-    /// What an artefact entry has installed and what the last fetch saw —
-    /// `None` for a git entry.
+    /// What an artefact has installed and what the last fetch saw —
+    /// `None` for a source checkout.
     pub artefact: Option<crate::artefact::State>,
 }
 
@@ -881,7 +912,7 @@ impl RepoStatus {
             is_detached: false,
             ahead: 0,
             behind: 0,
-            artefact_use: entry.artefact_label(),
+            on_disk: None,
             is_stale: false,
             is_symlink: false,
             symlink_target: String::new(),
@@ -1030,14 +1061,10 @@ pub fn is_tree_modified(path: &Path) -> bool {
     else {
         return false;
     };
-    config
-        .repos
-        .iter()
-        .filter(|e| !e.is_artefact())
-        .any(|entry| {
-            let child = path.join(&entry.directory);
-            is_checkout(&child) && !child.is_symlink() && is_tree_modified(&child)
-        })
+    config.repos.iter().any(|entry| {
+        let child = path.join(&entry.directory);
+        is_checkout(&child) && !child.is_symlink() && is_tree_modified(&child)
+    })
 }
 
 /// Where resolution puts a checkout: on a topic branch, or detached at a
@@ -1124,7 +1151,7 @@ pub fn get_artefact_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
         current_ref: state
             .installed
             .as_ref()
-            .map(|i| short_sha(&i.commit).to_string())
+            .map(|i| i.tag.clone())
             .unwrap_or_default(),
         artefact: Some(state),
         ..RepoStatus::new(entry)

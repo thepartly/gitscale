@@ -1,6 +1,7 @@
 ---
 source: tests/it/artefact.rs
-expression: redact_shas(&out2.stdout)
+assertion_line: 187
+expression: out2.stdout
 ---
 Pulling latest changes...
-  ok    meta/app (artefact [sha])
+  ok    meta/app (artefact v1.1.0)

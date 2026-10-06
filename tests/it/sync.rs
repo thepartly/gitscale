@@ -80,23 +80,19 @@ fn normal_002_removes_an_implicit_checkout_left_behind() {
 fn normal_003_removes_a_left_behind_implicit_artefact() {
     let env = TestEnv::new("res_left_behind_artefact");
     let art = env.artefact_repo("art", &[("app.bin", "x")]);
-    run_git_pub(&art, &["tag", "v1.0.0", "main"]);
     let b = tagged(
         &env,
         "b",
         &[
             (
                 "v1.0.0",
-                &repos(&[(
-                    "libs/art",
-                    &art,
-                    ", revision = \"v1.0.0\", artefact = \"replace\"",
-                )]),
+                &repos(&[("libs/art", &art, ", revision = \"v1.0.0\"")]),
             ),
             ("v1.1.0", "[repos]\n"),
         ],
     );
     env.init_playground_git();
+    env.prefer(&art, gitscale::prefer::Form::Artefact);
     let config = |rev: &str| {
         format!(
             "{}{}{}",

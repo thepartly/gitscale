@@ -13,17 +13,38 @@ use std::path::PathBuf;
 // Normal cases
 // ---------------------------------------------------------------------------
 
+/// The image is tagged with the source hash of what it was built from and
+/// with the commit's version tags — never the commit — and records the
+/// commit, its tree and the hash.
 #[test]
-fn normal_001_publish_tags_the_commit_and_annotates_the_image() {
+fn normal_001_publish_tags_the_source_hash_and_annotates_the_image() {
     let env = TestEnv::new("art_publish_tags");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-    let commit = layered(&env, &bare, "app v1");
+    let commit = layered(&env, &bare, "v1.0.0", "app v1");
 
-    assert_eq!(env.registry().tags(&env.image(&bare)), vec![commit.clone()]);
-    let manifest = env.registry().manifest(&env.image(&bare), &commit).unwrap();
+    let mut tags = env.registry().tags(&env.image(&bare));
+    let hash = hash_tags(tags.clone()).pop().expect("a source hash tag");
+    tags.sort();
+    assert_eq!(tags, {
+        let mut want = vec![hash.clone(), "v1.0.0".to_string()];
+        want.sort();
+        want
+    });
+    let manifest = env.registry().manifest(&env.image(&bare), &hash).unwrap();
+    assert_eq!(
+        env.registry()
+            .manifest(&env.image(&bare), "v1.0.0")
+            .unwrap(),
+        manifest
+    );
     assert_eq!(
         manifest["annotations"]["org.opencontainers.image.revision"],
         commit.as_str()
+    );
+    assert_eq!(manifest["annotations"]["dev.gitscale.hash"], hash.as_str());
+    assert_eq!(
+        manifest["annotations"]["dev.gitscale.tree"],
+        git_stdout(&bare, &["rev-parse", &format!("{}^{{tree}}", commit)]).as_str()
     );
     assert_eq!(
         manifest["annotations"]["org.opencontainers.image.source"],
@@ -73,7 +94,7 @@ fn normal_002_a_dry_run_lists_the_layers_and_sends_nothing() {
 }
 
 #[test]
-fn normal_003_an_annotated_tag_resolves_to_its_commit() {
+fn normal_003_an_annotated_tag_is_a_release() {
     let env = TestEnv::new("art_annotated_tag");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
     run_git_pub(
@@ -87,65 +108,63 @@ fn normal_003_an_annotated_tag_resolves_to_its_commit() {
             "-a",
             "-m",
             "release",
-            "v2.0",
+            "v2.0.0",
             "main",
         ],
     );
-    let commit = env.publish(&bare, "v2.0", &[("app.bin", "tagged")]);
-    env.write_config(&entry_config(&env, &bare, "v2.0"));
+    env.publish(&bare, "v2.0.0", &[("app.bin", "tagged")]);
+    env.write_config(&entry_config(&env, &bare, "v2.0.0"));
 
     let out = env.run(&["sync"]);
     assert!(out.success, "{}", out.stderr);
     assert_eq!(read(&env, "meta/app/dist/app.bin"), "tagged");
-    assert_eq!(installed_commit(&env), commit);
+    assert_eq!(installed_tag(&env), "v2.0.0");
 }
 
+/// An artefact is only ever a release's: a commit, a branch, or no revision
+/// at all fails the checkout, naming who asks for it.
 #[test]
-fn normal_004_a_full_sha_is_used_as_given() {
-    let env = TestEnv::new("art_full_sha");
+fn error_004_an_artefact_needs_a_release() {
+    let env = TestEnv::new("art_not_a_release");
     let bare = env.artefact_repo("app", &[("app.bin", "pinned")]);
     let commit = git_stdout(&bare, &["rev-parse", "main"]);
-    // Main moves on, unpublished: the pinned commit is unaffected.
-    env.push_commit(&bare, "main", "README.md", "later");
-    env.write_config(&entry_config(&env, &bare, &commit));
-
-    let out = env.run(&["sync"]);
-    assert!(out.success, "{}", out.stderr);
-    assert_eq!(read(&env, "meta/app/dist/app.bin"), "pinned");
+    for (revision, said) in [
+        (
+            commit.as_str(),
+            format!("root asks for {}, which is not a release", commit),
+        ),
+        (
+            "main",
+            "root asks for main, which is not a release".to_string(),
+        ),
+        (
+            "",
+            "nothing asks for a release of it: it follows its default branch".to_string(),
+        ),
+    ] {
+        env.write_config(&entry_config(&env, &bare, revision));
+        let out = env.run(&["sync"]);
+        assert!(!out.success, "{}: {}", revision, out.stdout);
+        assert!(
+            out.stderr
+                .contains(&format!("taken as an artefact, but {}", said)),
+            "{}: {}",
+            revision,
+            out.stderr
+        );
+        assert!(!env.playground.join("meta/app").exists());
+    }
 }
 
 #[test]
-fn normal_005_no_revision_follows_the_default_branch() {
-    let env = TestEnv::new("art_default_branch");
-    let bare = env.create_bare_repo("app", "trunk", &[("README.md", "app")]);
-    env.publish(&bare, "trunk", &[("app.bin", "from trunk")]);
-    env.write_config(&format!(
-        "{}[repos]\n\"meta/app\" = {{ url = \"{}\", artefact = \"replace\" }}\n",
-        env.registries(),
-        bare.display()
-    ));
-
-    let out = env.run(&["sync"]);
-    assert!(out.success, "{}", out.stderr);
-    assert_eq!(read(&env, "meta/app/dist/app.bin"), "from trunk");
-}
-
-#[test]
-fn normal_006_sync_installs_a_replace_image() {
+fn normal_006_sync_installs_the_image_of_a_release() {
     let env = TestEnv::new("pull_artefact_replace");
     let bare = env.artefact_repo("app", &[("app.bin", "binary-content")]);
-
-    env.write_config(&format!(
-        r#"{}[repos]
-"meta/app" = {{ url = "{}", revision = "main", artefact = "replace" }}
-"#,
-        env.registries(),
-        bare.display(),
-    ));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
 
     let out = env.run(&["sync"]);
     assert!(out.success, "stderr: {}", out.stderr);
-    insta::assert_snapshot!("sync_artefact_replace_stdout", redact_shas(&out.stdout));
+    insta::assert_snapshot!("sync_artefact_replace_stdout", out.stdout);
 
     // Image paths are the repository's own.
     let file = env.playground.join("meta/app/dist/app.bin");
@@ -154,86 +173,72 @@ fn normal_006_sync_installs_a_replace_image() {
 }
 
 #[test]
-fn normal_007_sync_takes_a_newly_published_image() {
+fn normal_007_sync_takes_the_image_of_a_newer_release() {
     let env = TestEnv::new("pull_artefact_local");
     let bare = env.artefact_repo("app", &[("app.bin", "v1-content")]);
-
-    env.write_config(&format!(
-        r#"{}[repos]
-"meta/app" = {{ url = "{}", revision = "main", artefact = "replace" }}
-"#,
-        env.registries(),
-        bare.display(),
-    ));
-
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let out1 = env.run(&["sync"]);
     assert!(out1.success, "first pull stderr: {}", out1.stderr);
 
-    // A new commit on main, and its pipeline's artefact.
+    // A new release, and its pipeline's artefact.
     env.push_commit(&bare, "main", "README.md", "v2");
-    env.publish(&bare, "main", &[("app.bin", "v2-content")]);
+    env.release(&bare, "v1.1.0", &[("app.bin", "v2-content")]);
+    env.write_config(&entry_config(&env, &bare, "v1.1.0"));
 
-    // Sync should download newer version
     let out2 = env.run(&["sync"]);
     assert!(out2.success, "pull stderr: {}", out2.stderr);
-    insta::assert_snapshot!("sync_artefact_local_stdout", redact_shas(&out2.stdout));
-
-    let content = std::fs::read_to_string(env.playground.join("meta/app/dist/app.bin")).unwrap();
-    assert_eq!(content, "v2-content");
+    insta::assert_snapshot!("sync_artefact_local_stdout", out2.stdout);
+    assert_eq!(read(&env, "meta/app/dist/app.bin"), "v2-content");
 }
 
 #[test]
 fn normal_008_fetch_records_what_the_registry_holds_and_installs_nothing() {
     let env = TestEnv::new("fetch_artefact_local");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-    run_git_pub(&bare, &["tag", "v1.0", "main"]);
-    env.publish(&bare, "v1.0", &[("app.bin", "v1-content")]);
-
-    env.write_config(&format!(
-        r#"{}[repos]
-"meta/app" = {{ url = "{}", revision = "v1.0", artefact = "replace" }}
-"#,
-        env.registries(),
-        bare.display(),
-    ));
+    env.release(&bare, "v1.0.0", &[("app.bin", "v1-content")]);
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
 
     let out = env.run(&["fetch"]);
     assert!(out.success, "stderr: {}", out.stderr);
-    insta::assert_snapshot!("fetch_artefact_local_stdout", redact_shas(&out.stdout));
+    insta::assert_snapshot!("fetch_artefact_local_stdout", out.stdout);
 
     // What the fetch saw is recorded outside the checkout; nothing is
     // downloaded, and no directory is made for it.
     assert!(!env.playground.join("meta/app").exists());
 }
 
+/// A release wanted that has no image yet is `missing` once a fetch has
+/// looked; published, the checkout is only at the wrong release until a
+/// sync.
 #[test]
-fn normal_009_ls_says_behind_and_missing_after_a_fetch() {
+fn normal_009_ls_says_missing_after_a_fetch() {
     let env = TestEnv::new("art_status_behind");
     let bare = env.artefact_repo("app", &[("app.bin", "v1")]);
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     assert!(env.run(&["sync"]).success);
     assert!(status_line(&env).ends_with("ok"), "{}", status_line(&env));
 
-    // A new commit whose pipeline has not published yet.
+    // A new release whose pipeline has not published yet.
     env.push_commit(&bare, "main", "README.md", "v2");
+    run_git_pub(&bare, &["tag", "v1.1.0", "main"]);
+    env.write_config(&entry_config(&env, &bare, "v1.1.0"));
     let fetch = env.run(&["fetch"]);
     assert!(!fetch.success, "a missing artefact is an error");
     assert!(
-        fetch.stderr.contains("may not have published yet"),
+        fetch.stderr.contains("no artefact for v1.1.0"),
         "{}",
         fetch.stderr
     );
     assert!(
-        status_line(&env).ends_with("behind, missing"),
+        status_line(&env).ends_with("ref-mismatch, missing"),
         "{}",
         status_line(&env)
     );
 
-    // Published now: just behind, until a sync.
     env.publish(&bare, "main", &[("app.bin", "v2")]);
     assert!(env.run(&["fetch"]).success);
     assert!(
-        status_line(&env).ends_with("behind"),
+        status_line(&env).ends_with("ref-mismatch"),
         "{}",
         status_line(&env)
     );
@@ -243,10 +248,10 @@ fn normal_009_ls_says_behind_and_missing_after_a_fetch() {
 }
 
 #[test]
-fn normal_010_a_republished_commit_shows_as_changed_and_sync_takes_it() {
+fn normal_010_a_republished_release_shows_as_changed_and_sync_takes_it() {
     let env = TestEnv::new("art_status_changed");
     let bare = env.artefact_repo("app", &[("app.bin", "first build")]);
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     assert!(env.run(&["sync"]).success);
 
     let artefact = "[artefact]\ninclude = [\"dist/**\"]\n";
@@ -255,16 +260,16 @@ fn normal_010_a_republished_commit_shows_as_changed_and_sync_takes_it() {
         "main",
         artefact,
         &[("app.bin", "second build")],
-        &["--force"],
+        &["--force", "v1.0.0"],
     );
     assert!(out.success, "{}", out.stderr);
-    // A sync alone asks the registry nothing: the commit has not moved.
+    // A sync alone asks the registry nothing: the release has not moved.
     env.registry().clear_log();
     assert!(env.run(&["sync"]).success);
     assert_eq!(read(&env, "meta/app/dist/app.bin"), "first build");
     assert!(
         env.registry().log().is_empty(),
-        "a pull of an unmoved commit asked the registry: {:?}",
+        "a pull of an unmoved release asked the registry: {:?}",
         env.registry().log()
     );
 
@@ -280,11 +285,10 @@ fn normal_010_a_republished_commit_shows_as_changed_and_sync_takes_it() {
 }
 
 #[test]
-fn normal_011_ls_json_carries_the_installed_commit_and_digest() {
+fn normal_011_ls_json_carries_the_installed_release_and_digest() {
     let env = TestEnv::new("art_status_json");
     let bare = env.artefact_repo("app", &[("app.bin", "v1")]);
-    let commit = git_stdout(&bare, &["rev-parse", "main"]);
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     assert!(env.run(&["sync"]).success);
 
     let out = env.run(&["ls", "--format", "json"]);
@@ -295,7 +299,7 @@ fn normal_011_ls_json_carries_the_installed_commit_and_digest() {
         .iter()
         .find(|r| r["directory"] == "meta/app")
         .unwrap();
-    assert_eq!(row["artefact"]["installed"]["commit"], commit.as_str());
+    assert_eq!(row["artefact"]["installed"]["tag"], "v1.0.0");
     assert!(row["artefact"]["installed"]["digest"]
         .as_str()
         .unwrap()
@@ -303,13 +307,14 @@ fn normal_011_ls_json_carries_the_installed_commit_and_digest() {
 }
 
 #[test]
-fn normal_012_changing_the_configured_revision_is_a_ref_mismatch() {
+fn normal_012_wanting_another_release_is_a_ref_mismatch() {
     let env = TestEnv::new("art_ref_mismatch");
     let bare = env.artefact_repo("app", &[("app.bin", "v1")]);
-    run_git_pub(&bare, &["tag", "v1", "main"]);
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.push_commit(&bare, "main", "README.md", "v2");
+    env.release(&bare, "v1.1.0", &[("app.bin", "v2")]);
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     assert!(env.run(&["sync"]).success);
-    env.write_config(&entry_config(&env, &bare, "v1"));
+    env.write_config(&entry_config(&env, &bare, "v1.1.0"));
     assert!(
         status_line(&env).ends_with("ref-mismatch"),
         "{}",
@@ -326,7 +331,7 @@ fn normal_013_records_live_in_the_git_directory_not_the_checkout() {
     let env = TestEnv::new("art_records");
     env.init_playground_git();
     let bare = env.artefact_repo("app", &[("app.bin", "x"), (".env", "y")]);
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     assert!(env.run(&["sync"]).success);
 
     let listed = |dir: PathBuf| {
@@ -360,19 +365,22 @@ fn normal_013_records_live_in_the_git_directory_not_the_checkout() {
 fn normal_014_show_says_what_the_registry_and_the_checkout_hold() {
     let env = TestEnv::new("art_show");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-    let first = layered(&env, &bare, "app v1");
-    env.write_config(&entry_config(&env, &bare, "main"));
+    layered(&env, &bare, "v1.0.0", "app v1");
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
+    let hash = hash_tags(env.registry().tags(&env.image(&bare)))
+        .pop()
+        .unwrap();
 
     let out = env.run(&["artefact", "show"]);
     assert!(out.success, "{}", out.stderr);
     assert!(out.stdout.starts_with("meta/app\n"), "{}", out.stdout);
-    assert_eq!(shown(&out.stdout, "revision"), "main");
-    assert_eq!(shown(&out.stdout, "commit"), first);
+    assert_eq!(shown(&out.stdout, "release"), "v1.0.0");
     assert!(
         shown(&out.stdout, "published").starts_with("sha256:"),
         "{}",
         out.stdout
     );
+    assert_eq!(shown(&out.stdout, "sources"), hash);
     assert!(
         shown(&out.stdout, "layers").starts_with("gitscale "),
         "{}",
@@ -385,74 +393,63 @@ fn normal_014_show_says_what_the_registry_and_the_checkout_hold() {
     assert!(env.run(&["sync"]).success);
     let out = env.run(&["artefact", "show", "meta/app"]);
     assert!(
-        shown(&out.stdout, "installed").starts_with(&first),
+        shown(&out.stdout, "installed").starts_with("v1.0.0 (sha256:"),
         "{}",
         out.stdout
     );
     assert_eq!(shown(&out.stdout, "status"), "ok");
 
-    // A new commit nobody has published: show says so without a fetch, and
-    // changes nothing.
-    let second = env.push_commit(&bare, "main", "README.md", "v2");
+    // A new release nobody has published: show says so without a fetch,
+    // and records nothing.
+    env.push_commit(&bare, "main", "README.md", "v2");
+    run_git_pub(&bare, &["tag", "v1.1.0", "main"]);
+    env.write_config(&entry_config(&env, &bare, "v1.1.0"));
     let out = env.run(&["artefact", "show"]);
     assert!(out.success, "{}", out.stderr);
-    assert_eq!(shown(&out.stdout, "commit"), second);
+    assert_eq!(shown(&out.stdout, "release"), "v1.1.0");
+    assert_eq!(shown(&out.stdout, "published"), "no");
+    assert_eq!(shown(&out.stdout, "status"), "ref-mismatch, missing");
     assert!(
-        shown(&out.stdout, "published").starts_with("no"),
-        "{}",
-        out.stdout
-    );
-    assert_eq!(shown(&out.stdout, "status"), "behind, missing");
-    assert!(
-        status_line(&env).ends_with("ok"),
-        "show must not record anything"
+        status_line(&env).ends_with("ref-mismatch"),
+        "show must not record anything: {}",
+        status_line(&env)
     );
 }
 
+/// `list` shows each release with an image, newest first, with the source
+/// hash it was built from — not the builds no release names.
 #[test]
-fn normal_015_list_shows_every_published_commit_with_its_refs() {
+fn normal_015_list_shows_every_release_with_its_source_hash() {
     let env = TestEnv::new("art_list");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-    let first = env.publish(&bare, "main", &[("app.bin", "v1")]);
-    run_git_pub(&bare, &["tag", "v1", "main"]);
-    let second = env.push_commit(&bare, "main", "README.md", "v2");
-    env.publish(&bare, "main", &[("app.bin", "v2")]);
-    // A third, on a branch that is gone by now: only the registry remembers it.
+    env.release(&bare, "v1.0.0", &[("app.bin", "v1")]);
+    env.push_commit(&bare, "main", "README.md", "v2");
+    env.release(&bare, "v1.1.0", &[("app.bin", "v2")]);
+    // A branch build: no release names it.
     run_git_pub(&bare, &["branch", "topic", "main"]);
-    let third = env.push_commit(&bare, "topic", "README.md", "v3");
+    env.push_commit(&bare, "topic", "README.md", "v3");
     env.publish(&bare, "topic", &[("app.bin", "v3")]);
-    run_git_pub(&bare, &["branch", "-D", "topic"]);
 
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.1.0"));
     assert!(env.run(&["sync"]).success);
 
+    let hash = |tag: &str| {
+        env.registry().manifest(&env.image(&bare), tag).unwrap()["annotations"]["dev.gitscale.hash"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
     let out = env.run(&["artefact", "list"]);
     assert!(out.success, "{}", out.stderr);
     let lines: Vec<&str> = out.stdout.lines().collect();
     assert!(lines[0].starts_with("meta/app  "), "{}", out.stdout);
-    assert!(
-        lines[0].ends_with("(3 images)"),
-        "three tags, over two pages: {}",
-        out.stdout
-    );
-    let row = |sha: &str| {
-        lines
-            .iter()
-            .find(|l| l.contains(sha))
-            .copied()
-            .unwrap_or_default()
-    };
+    assert!(lines[0].ends_with("(2 releases)"), "{}", out.stdout);
     assert_eq!(
-        row(&second).trim(),
-        format!("{}  main  (installed)", second)
+        lines[1].trim(),
+        format!("v1.1.0  {}  (installed)", hash("v1.1.0"))
     );
-    assert_eq!(row(&first).trim(), format!("{}  v1", first));
-    assert_eq!(row(&third).trim(), third);
-    // Commits a ref names come before the ones only the registry remembers.
-    assert!(
-        lines.iter().position(|l| l.contains(&third))
-            > lines.iter().position(|l| l.contains(&first))
-    );
+    assert_eq!(lines[2].trim(), format!("v1.0.0  {}", hash("v1.0.0")));
+    assert_eq!(lines.len(), 3, "{}", out.stdout);
 }
 
 /// Placement prunes the image store by itself — at most once a day, so the cost
@@ -461,21 +458,25 @@ fn normal_015_list_shows_every_published_commit_with_its_refs() {
 fn normal_016_placement_prunes_cold_images_once_a_day() {
     let env = TestEnv::new("art_daily_prune");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-    let old = layered(&env, &bare, "app v1");
-    env.write_config(&format!(
-        "[clean]\nkeep_recent = \"30d\"\n\n{}",
-        entry_config(&env, &bare, "main")
-    ));
+    layered(&env, &bare, "v1.0.0", "app v1");
+    let config = |release: &str| {
+        format!(
+            "[clean]\nkeep_recent = \"30d\"\n\n{}",
+            entry_config(&env, &bare, release)
+        )
+    };
+    env.write_config(&config("v1.0.0"));
     assert!(env.run(&["sync"]).success);
     env.push_commit(&bare, "main", "README.md", "v2");
-    layered(&env, &bare, "app v2");
+    layered(&env, &bare, "v1.1.0", "app v2");
+    env.write_config(&config("v1.1.0"));
     let entry = image_store(&env);
     let held = || std::fs::read_to_string(entry.join("index.json")).unwrap();
 
     // Pruned today already: nothing goes.
-    age(&entry, &old);
+    age(&entry, "v1.0.0");
     assert!(env.run(&["sync"]).success);
-    assert!(held().contains(&old));
+    assert!(held().contains("\"v1.0.0\""));
 
     // A day later, it does.
     let marker = env.playground.join(".git/gitscale/images/gitscale-pruned");
@@ -485,105 +486,38 @@ fn normal_016_placement_prunes_cold_images_once_a_day() {
         .unwrap();
     assert!(touched.success());
     assert!(env.run(&["sync"]).success);
-    assert!(!held().contains(&old), "{}", held());
+    assert!(!held().contains("\"v1.0.0\""), "{}", held());
 }
 
-/// On the topic, an artefact that replaces its checkout is the image of the
-/// branch tip when one is published, and that tip's source when not.
+/// On the topic, a checkout taken as an artefact is its sources: the
+/// topic's branch of it, followed. Off the topic, the image of its release
+/// again.
 #[test]
-fn normal_017_an_artefact_on_a_topic_is_the_tips_image_or_its_source() {
+fn normal_017_an_artefact_on_a_topic_is_its_sources() {
     let env = TestEnv::new("wt_artefact_topic");
-    let app = env.artefact_repo("app", &[("app.bin", "main build")]);
-    let ws = artefact_workspace(&env, &app, "replace");
+    let app = env.artefact_repo("app", &[("app.bin", "release build")]);
+    let ws = artefact_workspace(&env, &app, gitscale::prefer::Form::Artefact);
     ok(&gs(&ws, &["sync"]));
     let dest = ws.join("meta/app");
     assert!(dest.join("dist/app.bin").is_file());
 
-    // A branch of the topic, published.
     run_git_pub(&app, &["branch", "feat/x", "main"]);
     env.push_commit(&app, "feat/x", "README.md", "feature");
-    env.publish(&app, "feat/x", &[("app.bin", "feature build")]);
     run_git_pub(&ws, &["switch", "-q", "-c", "feat/x"]);
     ok(&gs(&ws, &["sync"]));
-    assert_eq!(
-        std::fs::read_to_string(dest.join("dist/app.bin")).unwrap(),
-        "feature build"
-    );
-    assert!(!dest.join(".git").exists());
-
-    // A newer tip with no image yet: its source, detached.
-    let unpublished = env.push_commit(&app, "feat/x", "README.md", "newer");
-    let out = gs(&ws, &["sync"]);
-    ok(&out);
-    assert!(dest.join(".git").is_file(), "{}", out.stdout);
-    assert_eq!(head(&dest), unpublished);
-    assert_eq!(branch(&dest), None);
-
-    // Joined: the source, on its branch.
-    ok(&gs(&ws, &["topic", "join", "meta/app"]));
+    assert!(dest.join(".git").exists(), "the sources");
     assert_eq!(branch(&dest).as_deref(), Some("feat/x"));
+    let rows = support::status_clean::json_rows(&gs(&ws, &["ls", "--format", "json"]).stdout);
+    let row = rows.iter().find(|r| r["directory"] == "meta/app").unwrap();
+    assert_eq!(row["as_reason"], "topic");
 
-    // Back on main: the image again.
-    run_git_pub(&dest, &["checkout", "-q", "--detach"]);
-    run_git_pub(&dest, &["branch", "-q", "-D", "feat/x"]);
     run_git_pub(&ws, &["switch", "-q", "main"]);
-    run_git_pub(&app, &["branch", "-D", "feat/x"]);
     ok(&gs(&ws, &["sync"]));
     assert!(!dest.join(".git").exists());
     assert_eq!(
         std::fs::read_to_string(dest.join("dist/app.bin")).unwrap(),
-        "main build"
+        "release build"
     );
-}
-
-/// An overlay is the source checkout with the image's untracked files laid
-/// over it: tracked files are the checkout's own, and the next overlay
-/// removes what this one wrote before laying its own. `clean` keeps them.
-#[test]
-fn normal_018_an_overlay_lays_the_build_over_the_source() {
-    let env = TestEnv::new("wt_overlay");
-    // Build output is ignored, as the artefact policy has it.
-    let app = env.create_bare_repo(
-        "app",
-        "main",
-        &[
-            ("README.md", "app"),
-            ("src.txt", "source"),
-            (".gitignore", "/dist/\n"),
-        ],
-    );
-    let producer_files = [("app.bin", "v1 build"), ("old.bin", "goes away")];
-    env.publish(&app, "main", &producer_files);
-    let ws = artefact_workspace(&env, &app, "overlay");
-    ok(&gs(&ws, &["sync"]));
-    let dest = ws.join("meta/app");
-    assert!(dest.join(".git").is_file(), "a source worktree");
-    assert_eq!(
-        std::fs::read_to_string(dest.join("dist/app.bin")).unwrap(),
-        "v1 build"
-    );
-    assert_eq!(
-        std::fs::read_to_string(dest.join("src.txt")).unwrap(),
-        "source"
-    );
-    assert!(
-        git(&dest, &["status", "--porcelain"]).is_empty(),
-        "the overlay is ignored output"
-    );
-
-    // A clean keeps the overlay's files.
-    ok(&gs(&ws, &["clean", "-fdx"]));
-    assert!(dest.join("dist/app.bin").is_file());
-
-    // A new commit with a smaller build: the old file goes.
-    env.push_commit(&app, "main", "README.md", "v2");
-    env.publish(&app, "main", &[("app.bin", "v2 build")]);
-    ok(&gs(&ws, &["sync"]));
-    assert_eq!(
-        std::fs::read_to_string(dest.join("dist/app.bin")).unwrap(),
-        "v2 build"
-    );
-    assert!(!dest.join("dist/old.bin").exists());
 }
 
 /// Images other tools publish unpack too: a Docker-typed gzip layer and an
@@ -594,11 +528,11 @@ fn normal_018_an_overlay_lays_the_build_over_the_source() {
 fn normal_044_foreign_layer_media_types_unpack_in_order() {
     let env = TestEnv::new("artefact_foreign_media_types");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-    let commit = tip(&bare, "main");
+    run_git_pub(&bare, &["tag", "v1.0.0", "main"]);
     push_image(
         &env,
         &bare,
-        &commit,
+        "v1.0.0",
         &[
             Layer {
                 media_type: support::registry::DOCKER_LAYER_GZIP,
@@ -618,48 +552,39 @@ fn normal_044_foreign_layer_media_types_unpack_in_order() {
             },
         ],
     );
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(read(&env, "meta/app/dist/a.txt"), "from docker");
     assert_eq!(read(&env, "meta/app/dist/b.txt"), "from plain tar");
     assert_eq!(read(&env, "meta/app/dist/shared.txt"), "second");
-    assert_eq!(installed_commit(&env), commit);
+    assert_eq!(installed_tag(&env), "v1.0.0");
 }
 
-/// In a GitLab job, `publish` tags the job's commit (`CI_COMMIT_SHA`) — not
-/// whatever `HEAD` is — under the job's project (`CI_PROJECT_URL`), which
-/// is the URL consumers declare. A wrong commit or image name would publish
-/// an artefact no consumer ever finds, or one under another commit's tag.
+/// In a GitLab job, `publish` names the image after the job's project
+/// (`CI_PROJECT_URL`), which is the URL consumers declare: under any other
+/// name no consumer would find it.
 #[test]
-fn normal_045_publish_in_a_gitlab_job_tags_the_jobs_commit_under_its_project() {
+fn normal_045_publish_in_a_gitlab_job_names_the_image_after_its_project() {
     let env = TestEnv::new("artefact_publish_gitlab_job");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-    let job_commit = tip(&bare, "main");
-    // HEAD moves on with a change the image does not ship.
-    env.push_commit(&bare, "main", "README.md", "later");
+    let commit = tip(&bare, "main");
     let producer = producer_with_build(&env, &bare);
     let project = format!("{}/project.git", env.repos_remote.display());
 
     let out = run_bin_in(
         &env,
         &producer,
-        &[
-            ("GITLAB_CI", "true"),
-            ("CI_COMMIT_SHA", &job_commit),
-            ("CI_PROJECT_URL", &project),
-        ],
+        &[("GITLAB_CI", "true"), ("CI_PROJECT_URL", &project)],
         &["artefact", "publish"],
     );
     assert!(out.success, "{}{}", out.stdout, out.stderr);
-    assert_eq!(
-        env.registry().tags("project/gitscale"),
-        vec![job_commit.clone()]
-    );
+    let tags = env.registry().tags("project/gitscale");
+    assert_eq!(hash_tags(tags.clone()), tags);
     assert!(env.registry().tags("app/gitscale").is_empty());
     let manifest = env
         .registry()
-        .manifest("project/gitscale", &job_commit)
+        .manifest("project/gitscale", &tags[0])
         .unwrap();
     assert_eq!(
         manifest["annotations"]["org.opencontainers.image.source"],
@@ -667,18 +592,16 @@ fn normal_045_publish_in_a_gitlab_job_tags_the_jobs_commit_under_its_project() {
     );
     assert_eq!(
         manifest["annotations"]["org.opencontainers.image.revision"],
-        job_commit.as_str()
+        commit.as_str()
     );
 }
 
-/// The same in a GitHub workflow: `GITHUB_SHA` is the commit, and
-/// `GITHUB_SERVER_URL`/`GITHUB_REPOSITORY` name the repository.
+/// The same in a GitHub workflow: `GITHUB_SERVER_URL`/`GITHUB_REPOSITORY`
+/// name the repository.
 #[test]
-fn normal_046_publish_in_a_github_workflow_tags_its_commit_under_its_repository() {
+fn normal_046_publish_in_a_github_workflow_names_the_image_after_its_repository() {
     let env = TestEnv::new("artefact_publish_github_workflow");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-    let workflow_commit = tip(&bare, "main");
-    env.push_commit(&bare, "main", "README.md", "later");
     let producer = producer_with_build(&env, &bare);
     let server = env.repos_remote.display().to_string();
 
@@ -687,55 +610,22 @@ fn normal_046_publish_in_a_github_workflow_tags_its_commit_under_its_repository(
         &producer,
         &[
             ("GITHUB_ACTIONS", "true"),
-            ("GITHUB_SHA", &workflow_commit),
             ("GITHUB_SERVER_URL", &server),
             ("GITHUB_REPOSITORY", "org/proj"),
         ],
         &["artefact", "publish"],
     );
     assert!(out.success, "{}{}", out.stdout, out.stderr);
-    assert_eq!(
-        env.registry().tags("org/proj/gitscale"),
-        vec![workflow_commit.clone()]
-    );
+    let tags = env.registry().tags("org/proj/gitscale");
+    assert_eq!(hash_tags(tags.clone()).len(), 1, "{:?}", tags);
     let manifest = env
         .registry()
-        .manifest("org/proj/gitscale", &workflow_commit)
+        .manifest("org/proj/gitscale", &tags[0])
         .unwrap();
     assert_eq!(
         manifest["annotations"]["org.opencontainers.image.source"],
         format!("{}/org/proj", server).as_str()
     );
-}
-
-/// An overlay's files are read-only on a detached checkout, as the rest of
-/// it is, and writable once the checkout is on a topic branch somebody
-/// develops in: a build there has to be able to replace them.
-#[test]
-fn normal_047_an_overlay_is_readonly_off_a_topic_and_writable_on_its_branch() {
-    let env = TestEnv::new("artefact_overlay_modes");
-    let app = env.create_bare_repo(
-        "app",
-        "main",
-        &[("README.md", "app"), (".gitignore", "/dist/\n")],
-    );
-    env.publish(&app, "main", &[("app.bin", "main build")]);
-    let ws = artefact_workspace(&env, &app, "overlay");
-    ok(&gs(&ws, &["sync"]));
-    let dest = ws.join("meta/app");
-    assert!(!writable(&dest.join("dist/app.bin")));
-
-    run_git_pub(&app, &["branch", "feat/x", "main"]);
-    env.push_commit(&app, "feat/x", "README.md", "feature");
-    env.publish(&app, "feat/x", &[("app.bin", "feature build")]);
-    run_git_pub(&ws, &["switch", "-q", "-c", "feat/x"]);
-    ok(&gs(&ws, &["sync"]));
-    assert_eq!(branch(&dest).as_deref(), Some("feat/x"));
-    assert_eq!(
-        std::fs::read_to_string(dest.join("dist/app.bin")).unwrap(),
-        "feature build"
-    );
-    assert!(writable(&dest.join("dist/app.bin")));
 }
 
 // ---------------------------------------------------------------------------
@@ -776,32 +666,6 @@ fn edge_019_a_dry_run_lists_files_without_a_registry() {
     assert!(!out.success);
 }
 
-#[test]
-fn edge_020_an_all_hex_tag_name_is_a_tag() {
-    let env = TestEnv::new("art_hex_tag");
-    let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-    run_git_pub(&bare, &["tag", "20241001", "main"]);
-    env.publish(&bare, "20241001", &[("app.bin", "dated")]);
-    env.write_config(&entry_config(&env, &bare, "20241001"));
-    let out = env.run(&["sync"]);
-    assert!(out.success, "{}", out.stderr);
-    assert_eq!(read(&env, "meta/app/dist/app.bin"), "dated");
-}
-
-#[test]
-fn edge_021_a_branch_name_matches_exactly() {
-    let env = TestEnv::new("art_exact_branch");
-    let bare = env.artefact_repo("app", &[("app.bin", "main")]);
-    // `ls-remote <url> main` would also list this one.
-    run_git_pub(&bare, &["branch", "feature/main", "main"]);
-    env.push_commit(&bare, "feature/main", "README.md", "f");
-    env.write_config(&entry_config(&env, &bare, "main"));
-
-    let out = env.run(&["sync"]);
-    assert!(out.success, "{}", out.stderr);
-    assert_eq!(read(&env, "meta/app/dist/app.bin"), "main");
-}
-
 /// Read-only applies to the whole archive, not just its top level, dot files
 /// included — and an update still gets past the read-only files it replaces.
 /// What gitscale records about the checkout is kept outside it.
@@ -821,13 +685,7 @@ fn edge_022_an_installed_image_is_readonly_at_every_depth() {
         ]
     };
     let bare = env.artefact_repo("app", &files("v1"));
-    env.write_config(&format!(
-        r#"{}[repos]
-"meta/app" = {{ url = "{}", revision = "main", artefact = "replace" }}
-"#,
-        env.registries(),
-        bare.display(),
-    ));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let root = env.playground.join("meta/app");
     let dest = root.join("dist");
 
@@ -860,7 +718,8 @@ fn edge_022_an_installed_image_is_readonly_at_every_depth() {
 
     // An update has to get past the read-only files it replaces.
     env.push_commit(&bare, "main", "README.md", "v2");
-    env.publish(&bare, "main", &files("v2"));
+    env.release(&bare, "v1.1.0", &files("v2"));
+    env.write_config(&entry_config(&env, &bare, "v1.1.0"));
     let out = env.run(&["sync"]);
     assert!(out.success, "pull stderr: {}", out.stderr);
     for (name, _) in files("") {
@@ -880,16 +739,8 @@ fn edge_022_an_installed_image_is_readonly_at_every_depth() {
 #[test]
 fn edge_023_sync_after_fetch_still_downloads_the_artefact() {
     let env = TestEnv::new("pull_after_fetch_artefact");
-    let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-    run_git_pub(&bare, &["tag", "v1.0", "main"]);
-    env.publish(&bare, "v1.0", &[("app.bin", "v1-content")]);
-    env.write_config(&format!(
-        r#"{}[repos]
-"meta/app" = {{ url = "{}", revision = "v1.0", artefact = "replace" }}
-"#,
-        env.registries(),
-        bare.display(),
-    ));
+    let bare = env.artefact_repo("app", &[("app.bin", "v1-content")]);
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
 
     assert!(env.run(&["fetch"]).success);
     let out = env.run(&["sync"]);
@@ -907,7 +758,7 @@ fn edge_023_sync_after_fetch_still_downloads_the_artefact() {
 fn edge_024_an_old_style_checkout_is_replaced_on_sync() {
     let env = TestEnv::new("art_legacy");
     let bare = env.artefact_repo("app", &[("app.bin", "new")]);
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let dest = env.playground.join("meta/app");
     std::fs::create_dir_all(&dest).unwrap();
     std::fs::write(dest.join(".etag"), "\"abc\"").unwrap();
@@ -926,7 +777,7 @@ fn edge_024_an_old_style_checkout_is_replaced_on_sync() {
 fn edge_025_a_deleted_checkout_is_cloned_again() {
     let env = TestEnv::new("art_deleted");
     let bare = env.artefact_repo("app", &[("app.bin", "x")]);
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     assert!(env.run(&["sync"]).success);
     std::fs::remove_dir_all(env.playground.join("meta/app")).unwrap();
     assert!(
@@ -944,11 +795,12 @@ fn edge_025_a_deleted_checkout_is_cloned_again() {
 fn edge_026_list_of_a_repository_nothing_published_for() {
     let env = TestEnv::new("art_list_empty");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-    env.write_config(&entry_config(&env, &bare, "main"));
+    run_git_pub(&bare, &["tag", "v1.0.0", "main"]);
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let out = env.run(&["artefact", "list"]);
     assert!(out.success, "{}", out.stderr);
     assert!(
-        out.stdout.trim_end().ends_with("(0 images)"),
+        out.stdout.trim_end().ends_with("(0 releases)"),
         "{}",
         out.stdout
     );
@@ -960,7 +812,7 @@ fn edge_026_list_of_a_repository_nothing_published_for() {
 fn edge_027_a_damaged_blob_is_downloaded_again() {
     let env = TestEnv::new("art_damaged_blob");
     let bare = env.artefact_repo("app", &[("app.bin", "intact")]);
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     assert!(env.run(&["sync"]).success);
 
     let blobs = image_store(&env).join("blobs/sha256");
@@ -983,109 +835,6 @@ fn edge_027_a_damaged_blob_is_downloaded_again() {
     assert_eq!(gets, 1, "{:?}", env.registry().log());
 }
 
-/// An overlay lays only what the checkout does not track: a tracked file is
-/// the commit's own, and the image's `.gitscale.toml` is for consumers to
-/// read, never laid over the checkout's. An image that ships either with
-/// other content — from another tool, or a forced publish — must not change
-/// the source the checkout holds.
-#[test]
-fn edge_048_an_overlay_never_replaces_a_tracked_file_or_the_config() {
-    let env = TestEnv::new("artefact_overlay_tracked");
-    let app = env.create_bare_repo(
-        "app",
-        "main",
-        &[
-            ("README.md", "app"),
-            ("src.txt", "source"),
-            (".gitignore", "/dist/\n"),
-            (".gitscale.toml", "# the source's own\n"),
-        ],
-    );
-    let commit = tip(&app, "main");
-    push_image(
-        &env,
-        &app,
-        &commit,
-        &[gzip_layer(
-            "app",
-            Tar::new()
-                .file("dist/app.bin", "built")
-                .file("src.txt", "from the image")
-                .file(".gitscale.toml", "# from the image\n"),
-        )],
-    );
-    env.write_config(&overlay_config(&env, &app, "main"));
-    let out = env.run(&["sync"]);
-    assert!(out.success, "{}{}", out.stdout, out.stderr);
-    assert_eq!(read(&env, "meta/app/dist/app.bin"), "built");
-    assert_eq!(read(&env, "meta/app/src.txt"), "source");
-    assert_eq!(
-        read(&env, "meta/app/.gitscale.toml"),
-        "# the source's own\n"
-    );
-    assert!(git(&env.playground.join("meta/app"), &["status", "--porcelain"]).is_empty());
-}
-
-/// An overlay checkout deleted by hand — or by a CI runner's `git clean`
-/// of the root — and cloned again at the same commit gets its build again.
-/// What gitscale recorded about the old checkout says nothing about the new
-/// one: a source tree without its build is what the overlay exists to
-/// prevent.
-#[test]
-#[ignore = "bug: overlay is skipped when its record names the commit, though the files are gone"]
-fn edge_049_a_recreated_overlay_checkout_gets_its_build_again() {
-    let env = TestEnv::new("artefact_overlay_recreated");
-    let app = env.create_bare_repo(
-        "app",
-        "main",
-        &[("README.md", "app"), (".gitignore", "/dist/\n")],
-    );
-    env.publish(&app, "main", &[("app.bin", "built")]);
-    env.write_config(&overlay_config(&env, &app, "main"));
-    assert!(env.run(&["sync"]).success);
-    let dest = env.playground.join("meta/app");
-    assert!(dest.join("dist/app.bin").is_file());
-
-    make_tree_writable(&dest);
-    std::fs::remove_dir_all(&dest).unwrap();
-    let out = env.run(&["sync"]);
-    assert!(out.success, "{}{}", out.stdout, out.stderr);
-    assert!(dest.join(".git").is_file(), "cloned again");
-    assert!(
-        dest.join("dist/app.bin").is_file(),
-        "the overlay was not laid again: {}",
-        out.stdout
-    );
-}
-
-/// On a topic, a branch tip with no image yet keeps the overlay that is
-/// there: the checkout moves to the tip, and the previous build stays, as
-/// the topics table in the docs says.
-#[test]
-fn edge_050_an_overlay_on_a_topic_without_an_image_keeps_the_previous_build() {
-    let env = TestEnv::new("artefact_overlay_topic_unpublished");
-    let app = env.create_bare_repo(
-        "app",
-        "main",
-        &[("README.md", "app"), (".gitignore", "/dist/\n")],
-    );
-    env.publish(&app, "main", &[("app.bin", "main build")]);
-    let ws = artefact_workspace(&env, &app, "overlay");
-    ok(&gs(&ws, &["sync"]));
-    let dest = ws.join("meta/app");
-
-    run_git_pub(&app, &["branch", "feat/x", "main"]);
-    let unpublished = env.push_commit(&app, "feat/x", "README.md", "feature");
-    run_git_pub(&ws, &["switch", "-q", "-c", "feat/x"]);
-    let out = gs(&ws, &["sync"]);
-    ok(&out);
-    assert_eq!(head(&dest), unpublished);
-    assert_eq!(
-        std::fs::read_to_string(dest.join("dist/app.bin")).unwrap(),
-        "main build"
-    );
-}
-
 /// An image whose directories are read-only — as another tool may write
 /// them — still installs, and the next version still replaces it. gitscale
 /// makes the files read-only itself; a directory it cannot write into would
@@ -1095,31 +844,33 @@ fn edge_050_an_overlay_on_a_topic_without_an_image_keeps_the_previous_build() {
 fn edge_051_an_image_with_a_readonly_directory_installs_and_updates() {
     let env = TestEnv::new("artefact_readonly_directory");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-    let first = tip(&bare, "main");
+    run_git_pub(&bare, &["tag", "v1.0.0", "main"]);
     push_image(
         &env,
         &bare,
-        &first,
+        "v1.0.0",
         &[gzip_layer(
             "app",
             Tar::new().dir("ro", 0o555).file("ro/f.txt", "v1"),
         )],
     );
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(read(&env, "meta/app/ro/f.txt"), "v1");
 
-    let second = env.push_commit(&bare, "main", "README.md", "v2");
+    env.push_commit(&bare, "main", "README.md", "v2");
+    run_git_pub(&bare, &["tag", "v1.1.0", "main"]);
     push_image(
         &env,
         &bare,
-        &second,
+        "v1.1.0",
         &[gzip_layer(
             "app",
             Tar::new().dir("ro", 0o555).file("ro/f.txt", "v2"),
         )],
     );
+    env.write_config(&entry_config(&env, &bare, "v1.1.0"));
     let out = env.run(&["sync"]);
     make_tree_writable(&env.playground.join("meta"));
     assert!(out.success, "{}{}", out.stdout, out.stderr);
@@ -1134,11 +885,11 @@ fn edge_051_an_image_with_a_readonly_directory_installs_and_updates() {
 fn edge_052_whiteout_files_are_unpacked_as_ordinary_files() {
     let env = TestEnv::new("artefact_whiteouts");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-    let commit = tip(&bare, "main");
+    run_git_pub(&bare, &["tag", "v1.0.0", "main"]);
     push_image(
         &env,
         &bare,
-        &commit,
+        "v1.0.0",
         &[
             gzip_layer(
                 "base",
@@ -1149,54 +900,13 @@ fn edge_052_whiteout_files_are_unpacked_as_ordinary_files() {
             gzip_layer("delete", Tar::new().file("dist/.wh.old.txt", "")),
         ],
     );
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     let dist = env.playground.join("meta/app/dist");
     assert!(dist.join("keep.txt").is_file());
     assert!(dist.join("old.txt").is_file());
     assert!(dist.join(".wh.old.txt").is_file());
-}
-
-/// `publish --commit` checks the artefact policy against the commit named,
-/// not `HEAD`: a file tracked there that the working tree has changed since
-/// breaks it. A short SHA is refused: an image is tagged with a full one.
-#[test]
-fn edge_053_publish_commit_checks_the_policy_against_that_commit() {
-    let env = TestEnv::new("artefact_publish_commit_flag");
-    let bare = env.create_bare_repo("app", "main", &[("README.md", "app"), ("src/lib.rs", "v1")]);
-    let first = tip(&bare, "main");
-    let second = env.push_commit(&bare, "main", "src/lib.rs", "v2");
-    let producer = producer_with_build(&env, &bare);
-    std::fs::write(
-        producer.join(".gitscale.toml"),
-        format!(
-            "{}[artefact]\ninclude = [\"dist/**\", \"src/**\"]\n",
-            env.registries()
-        ),
-    )
-    .unwrap();
-
-    let out = env.run_in(&producer, &["artefact", "publish", "--commit", &first]);
-    assert!(!out.success, "{}", out.stdout);
-    assert!(
-        out.stderr
-            .contains(&format!("tracked, modified since {}", &first[..7])),
-        "{}",
-        out.stderr
-    );
-    let out = env.run_in(&producer, &["artefact", "publish", "--commit", &first[..9]]);
-    assert!(!out.success);
-    assert!(
-        out.stderr.contains("not a full commit SHA"),
-        "{}",
-        out.stderr
-    );
-    assert!(env.registry().tags(&env.image(&bare)).is_empty());
-
-    let out = env.run_in(&producer, &["artefact", "publish", "--commit", &second]);
-    assert!(out.success, "{}{}", out.stdout, out.stderr);
-    assert_eq!(env.registry().tags(&env.image(&bare)), vec![second]);
 }
 
 /// A repository holds symlinks out of itself that no artefact ships — the
@@ -1259,7 +969,7 @@ fn edge_055_a_dry_run_outside_git_says_what_it_could_not_check() {
     );
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert!(out.stdout.contains("Would publish:"), "{}", out.stdout);
-    assert!(out.stdout.contains("  commit: unknown ("), "{}", out.stdout);
+    assert!(out.stdout.contains("  tags: unknown ("), "{}", out.stdout);
     assert!(out.stdout.contains("  image: unknown ("), "{}", out.stdout);
     assert!(
         out.stdout.contains("  policy: not checked ("),
@@ -1270,54 +980,27 @@ fn edge_055_a_dry_run_outside_git_says_what_it_could_not_check() {
     assert!(env.registry().log().is_empty());
 }
 
-/// On a topic, a `replace` entry installed from the branch tip's image is
-/// what the topic asks for: `ls --fetch` calls it ok, not behind the
-/// pinned revision.
-#[test]
-fn edge_056_ls_fetch_on_a_topic_calls_the_installed_tip_ok() {
-    let env = TestEnv::new("artefact_topic_status_fetch");
-    let app = env.artefact_repo("app", &[("app.bin", "main build")]);
-    let ws = artefact_workspace(&env, &app, "replace");
-    run_git_pub(&app, &["branch", "feat/x", "main"]);
-    env.push_commit(&app, "feat/x", "README.md", "feature");
-    env.publish(&app, "feat/x", &[("app.bin", "feature build")]);
-    run_git_pub(&ws, &["switch", "-q", "-c", "feat/x"]);
-    ok(&gs(&ws, &["sync"]));
-
-    let out = gs(&ws, &["ls", "--fetch"]);
-    ok(&out);
-    let row = support::strip_ansi(&out.stdout)
-        .lines()
-        .find(|l| l.split_whitespace().nth(1) == Some("meta/app"))
-        .unwrap_or_default()
-        .to_string();
-    assert!(row.contains(" ok "), "{}", row);
-    assert!(!row.contains("behind"), "{}", row);
-}
-
 /// A forced re-publish that changes the image's `.gitscale.toml` changes
 /// what resolution reads: after a fetch says the image changed, the sync
 /// that installs the new files also brings the dependencies the new config
 /// declares. Files from one build and dependencies from another would be a
 /// checkout nobody published.
 #[test]
-#[ignore = "bug: resolution reads the config layer of the image held for the commit, not the republished one"]
+#[ignore = "bug: resolution reads the config layer of the image held for the release, not the republished one"]
 fn edge_057_a_forced_republish_brings_the_dependencies_it_declares() {
     let env = TestEnv::new("artefact_republish_config");
     let dep = tagged(&env, "dep", &[("v1.0.0", "")]);
     let art = env.create_bare_repo("art", "main", &[("README.md", "art")]);
+    run_git_pub(&art, &["tag", "v1.0.0", "main"]);
     let plain = "[artefact]\ninclude = [\"dist/**\"]\n";
     let (out, _) = env.publish_with(&art, "main", plain, &[("app.bin", "first")], &[]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
+    env.prefer(&art, gitscale::prefer::Form::Artefact);
     env.write_config(&format!(
         "{}{}{}",
         env.registries(),
         allow(&env),
-        repos(&[(
-            "meta/app",
-            &art,
-            ", revision = \"main\", artefact = \"replace\""
-        )])
+        repos(&[("meta/app", &art, ", revision = \"v1.0.0\"")])
     ));
     assert!(env.run(&["sync"]).success);
 
@@ -1358,7 +1041,7 @@ fn edge_057_a_forced_republish_brings_the_dependencies_it_declares() {
 fn error_028_a_different_build_of_a_published_commit_needs_force() {
     let env = TestEnv::new("art_republish_force");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-    layered(&env, &bare, "app v1");
+    layered(&env, &bare, "v1.0.0", "app v1");
 
     let rebuild = [("vendor/lib.js", "vendor v1"), ("app.js", "app rebuilt")];
     let (out, _) = env.publish_with(&bare, "main", LAYERED, &rebuild, &[]);
@@ -1481,11 +1164,10 @@ fn error_032_an_abbreviated_sha_is_refused_with_directions() {
 fn error_033_sync_without_a_registry_says_how_to_add_one() {
     let env = TestEnv::new("pull_no_registry");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-
+    run_git_pub(&bare, &["tag", "v1.0.0", "main"]);
+    env.prefer(&bare, gitscale::prefer::Form::Artefact);
     env.write_config(&format!(
-        r#"[repos]
-"meta/app" = {{ url = "{}", revision = "main", artefact = "replace" }}
-"#,
+        "[repos]\n\"meta/app\" = {{ url = \"{}\", revision = \"v1.0.0\" }}\n",
         bare.display()
     ));
 
@@ -1501,21 +1183,15 @@ fn error_033_sync_without_a_registry_says_how_to_add_one() {
 #[test]
 fn error_034_sync_fails_when_nothing_is_published() {
     let env = TestEnv::new("pull_artefact_no_data");
-    // A repository whose pipeline has published nothing.
+    // A release whose pipeline has published nothing.
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-
-    env.write_config(&format!(
-        r#"{}[repos]
-"meta/app" = {{ url = "{}", revision = "main", artefact = "replace" }}
-"#,
-        env.registries(),
-        bare.display(),
-    ));
+    run_git_pub(&bare, &["tag", "v1.0.0", "main"]);
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
 
     let out = env.run(&["sync"]);
     assert!(!out.success, "a missing artefact is an error, not a skip");
     assert!(
-        out.stderr.contains("no artefact for") && out.stderr.contains("(main)"),
+        out.stderr.contains("no artefact for v1.0.0 ("),
         "stderr: {}",
         out.stderr
     );
@@ -1530,13 +1206,7 @@ fn error_035_a_corrupt_artefact_is_not_taken_as_current() {
     let env = TestEnv::new("corrupt_artefact");
     let bare = env.artefact_repo("app", &[("app.bin", "v1-content")]);
     env.registry().corrupt_blobs();
-    env.write_config(&format!(
-        r#"{}[repos]
-"meta/app" = {{ url = "{}", revision = "main", artefact = "replace" }}
-"#,
-        env.registries(),
-        bare.display(),
-    ));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
 
     let first = env.run(&["sync"]);
     assert!(!first.success, "the blob does not match its digest");
@@ -1555,16 +1225,18 @@ fn error_035_a_corrupt_artefact_is_not_taken_as_current() {
     // Nothing is recorded as installed. (The failure here comes from the
     // config layer resolution reads; artefact::error_058 has one in the
     // install itself.)
-    assert_eq!(installed_commit(&env), "");
+    assert_eq!(installed_tag(&env), "");
 }
 
 #[test]
 fn error_036_show_reports_an_entry_it_cannot_look_up_and_fails() {
     let env = TestEnv::new("art_show_error");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
+    run_git_pub(&bare, &["tag", "v1.0.0", "main"]);
     // No [registries]: nothing maps this repository to a registry.
+    env.prefer(&bare, gitscale::prefer::Form::Artefact);
     env.write_config(&format!(
-        "[repos]\n\"meta/app\" = {{ url = \"{}\", revision = \"main\", artefact = \"replace\" }}\n",
+        "[repos]\n\"meta/app\" = {{ url = \"{}\", revision = \"v1.0.0\" }}\n",
         bare.display()
     ));
     let out = env.run(&["artefact", "show"]);
@@ -1575,15 +1247,14 @@ fn error_036_show_reports_an_entry_it_cannot_look_up_and_fails() {
         out.stdout
     );
     assert!(
-        out.stderr
-            .contains("1 artefact entry could not be looked up"),
+        out.stderr.contains("1 image could not be looked up"),
         "{}",
         out.stderr
     );
 }
 
 #[test]
-fn error_037_show_and_list_refuse_an_entry_that_is_not_an_artefact() {
+fn normal_037_show_and_list_name_nothing_while_nothing_is_taken_as_an_artefact() {
     let env = TestEnv::new("art_show_git");
     let lib = env.create_bare_repo("lib", "main", &[("a.txt", "a")]);
     env.write_config(&format!(
@@ -1591,17 +1262,10 @@ fn error_037_show_and_list_refuse_an_entry_that_is_not_an_artefact() {
         lib.display()
     ));
     for command in ["show", "list"] {
-        let out = env.run(&["artefact", command, "libs/lib"]);
-        assert!(!out.success);
-        assert!(
-            out.stderr.contains("Not artefact entries: libs/lib"),
-            "{}",
-            out.stderr
-        );
         let all = env.run(&["artefact", command]);
         assert!(all.success, "{}", all.stderr);
         assert!(
-            all.stdout.contains("No artefact entries declared."),
+            all.stdout.contains("No checkout is taken as an artefact."),
             "{}",
             all.stdout
         );
@@ -1611,21 +1275,22 @@ fn error_037_show_and_list_refuse_an_entry_that_is_not_an_artefact() {
 /// A registry that serves a damaged layer during an update leaves the
 /// installed version alone: everything is downloaded and checked before the
 /// old files go, as the docs promise. The installed files, the record of
-/// them and `ls` all still say the old commit.
+/// them and `ls` all still say the old release.
 #[test]
 fn error_058_a_registry_failing_mid_update_keeps_the_installed_version() {
     let env = TestEnv::new("artefact_mid_update_failure");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-    let first = layered(&env, &bare, "app v1");
-    env.write_config(&entry_config(&env, &bare, "main"));
+    layered(&env, &bare, "v1.0.0", "app v1");
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     assert!(env.run(&["sync"]).success);
 
     env.push_commit(&bare, "main", "README.md", "v2");
-    let second = layered(&env, &bare, "app v2");
+    layered(&env, &bare, "v1.1.0", "app v2");
     // The config and vendor layers are the same as before; the app layer is
     // new, and the one the registry damages.
-    let app_layer = layer_digests(&env, &bare, &second)[2].clone();
+    let app_layer = layer_digests(&env, &bare, "v1.1.0")[2].clone();
     env.registry().corrupt_blob(&app_layer);
+    env.write_config(&entry_config(&env, &bare, "v1.1.0"));
     let out = env.run(&["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(
@@ -1635,8 +1300,7 @@ fn error_058_a_registry_failing_mid_update_keeps_the_installed_version() {
     );
     assert_eq!(read(&env, "meta/app/dist/app.js"), "app v1");
     assert_eq!(read(&env, "meta/app/dist/vendor/lib.js"), "vendor v1");
-    assert_eq!(installed_commit(&env), first);
-    assert!(status_line(&env).ends_with("ok"), "{}", status_line(&env));
+    assert_eq!(installed_tag(&env), "v1.0.0");
 }
 
 /// A tag that names an image index — what `docker buildx` pushes with
@@ -1649,11 +1313,11 @@ fn error_058_a_registry_failing_mid_update_keeps_the_installed_version() {
 fn error_059_an_image_index_is_refused_rather_than_installed_empty() {
     let env = TestEnv::new("artefact_index_refused");
     let bare = env.artefact_repo("app", &[("app.bin", "v1")]);
-    let first = tip(&bare, "main");
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     assert!(env.run(&["sync"]).success);
 
-    let second = env.push_commit(&bare, "main", "README.md", "v2");
+    env.push_commit(&bare, "main", "README.md", "v2");
+    run_git_pub(&bare, &["tag", "v1.1.0", "main"]);
     let index = serde_json::to_vec(&serde_json::json!({
         "schemaVersion": 2,
         "mediaType": support::registry::INDEX_TYPE,
@@ -1667,14 +1331,15 @@ fn error_059_an_image_index_is_refused_rather_than_installed_empty() {
     .unwrap();
     env.registry().put_manifest(
         &env.image(&bare),
-        &second,
+        "v1.1.0",
         &index,
         support::registry::INDEX_TYPE,
     );
+    env.write_config(&entry_config(&env, &bare, "v1.1.0"));
     let out = env.run(&["sync"]);
     assert!(!out.success, "an index was installed: {}", out.stdout);
     assert_eq!(read(&env, "meta/app/dist/app.bin"), "v1");
-    assert_eq!(installed_commit(&env), first);
+    assert_eq!(installed_tag(&env), "v1.0.0");
 }
 
 /// Nothing in an archive may land outside the checkout or be anything but a
@@ -1715,8 +1380,9 @@ fn error_060_archive_entries_that_leave_the_checkout_are_refused() {
     ];
     for (name, tar, why) in cases {
         let bare = env.create_bare_repo(name, "main", &[("README.md", name)]);
-        push_image(&env, &bare, &tip(&bare, "main"), &[gzip_layer("app", tar)]);
-        env.write_config(&entry_config(&env, &bare, "main"));
+        run_git_pub(&bare, &["tag", "v1.0.0", "main"]);
+        push_image(&env, &bare, "v1.0.0", &[gzip_layer("app", tar)]);
+        env.write_config(&entry_config(&env, &bare, "v1.0.0"));
         let out = env.run(&["sync"]);
         assert!(!out.success, "{}: {}", name, out.stdout);
         assert!(
@@ -1731,7 +1397,7 @@ fn error_060_archive_entries_that_leave_the_checkout_are_refused() {
             "{}: a half-unpacked checkout was left",
             name
         );
-        assert_eq!(installed_commit(&env), "", "{}", name);
+        assert_eq!(installed_tag(&env), "", "{}", name);
         assert!(!env.playground.join("meta/escape.txt").exists(), "{}", name);
         assert!(
             !std::path::Path::new("/abs-escape.txt").exists(),
@@ -1751,10 +1417,11 @@ fn error_060_archive_entries_that_leave_the_checkout_are_refused() {
 fn error_061_a_symlink_through_a_symlink_cannot_point_out_of_the_checkout() {
     let env = TestEnv::new("artefact_symlink_chain");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
+    run_git_pub(&bare, &["tag", "v1.0.0", "main"]);
     push_image(
         &env,
         &bare,
-        &tip(&bare, "main"),
+        "v1.0.0",
         &[gzip_layer(
             "app",
             Tar::new()
@@ -1764,7 +1431,7 @@ fn error_061_a_symlink_through_a_symlink_cannot_point_out_of_the_checkout() {
                 .symlink("a/b/l", "../escaped"),
         )],
     );
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let out = env.run(&["sync"]);
     let escaped = env.playground.join("meta/app/l");
     assert!(
@@ -1776,41 +1443,6 @@ fn error_061_a_symlink_through_a_symlink_cannot_point_out_of_the_checkout() {
     assert!(!out.success, "{}", out.stdout);
 }
 
-/// An overlay writes only inside its checkout. A path in the image under a
-/// directory the checkout holds as a symlink — tracked, or a dependency
-/// link gitscale planted — must not be followed: here `link -> ../../victim`
-/// would have the overlay write into another directory of the workspace.
-#[test]
-#[ignore = "bug: the overlay copies files through symlinked directories of the checkout"]
-fn error_062_an_overlay_never_writes_through_a_symlink_in_the_checkout() {
-    let env = TestEnv::new("artefact_overlay_through_link");
-    let victim = env.playground.join("victim");
-    std::fs::create_dir_all(&victim).unwrap();
-    let app = env.create_bare_repo(
-        "app",
-        "main",
-        &[("README.md", "app"), (".gitignore", "/dist/\n")],
-    );
-    let commit = commit_symlink(&env, &app, "main", "link", "../../victim");
-    push_image(
-        &env,
-        &app,
-        &commit,
-        &[gzip_layer(
-            "app",
-            Tar::new()
-                .file("dist/app.bin", "built")
-                .file("link/evil.txt", "written through the link"),
-        )],
-    );
-    env.write_config(&overlay_config(&env, &app, "main"));
-    let _ = env.run(&["sync"]);
-    assert!(
-        !victim.join("evil.txt").exists(),
-        "the overlay wrote outside its checkout"
-    );
-}
-
 /// A layer of a kind gitscale cannot unpack — a Helm chart, say — fails the
 /// install with the media type named, rather than being unpacked as a tar
 /// or skipped.
@@ -1818,17 +1450,18 @@ fn error_062_an_overlay_never_writes_through_a_symlink_in_the_checkout() {
 fn error_063_an_unknown_layer_media_type_is_refused() {
     let env = TestEnv::new("artefact_unknown_media_type");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
+    run_git_pub(&bare, &["tag", "v1.0.0", "main"]);
     push_image(
         &env,
         &bare,
-        &tip(&bare, "main"),
+        "v1.0.0",
         &[Layer {
             media_type: "application/vnd.cncf.helm.chart.content.v1.tar+gzip",
             bytes: Tar::new().file("dist/chart.yaml", "x").gzip(),
             title: "chart",
         }],
     );
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let out = env.run(&["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(
@@ -1863,13 +1496,14 @@ fn error_064_a_manifest_naming_an_invalid_digest_is_refused() {
         }],
     }))
     .unwrap();
+    run_git_pub(&bare, &["tag", "v1.0.0", "main"]);
     env.registry().put_manifest(
         &env.image(&bare),
-        &tip(&bare, "main"),
+        "v1.0.0",
         &manifest,
         support::registry::MANIFEST_TYPE,
     );
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let out = env.run(&["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(
@@ -1881,25 +1515,6 @@ fn error_064_a_manifest_naming_an_invalid_digest_is_refused() {
     assert_eq!(env.registry().count("GET", "/blobs/"), 0);
 }
 
-/// Off a topic, an overlay entry whose commit has no image fails, rather
-/// than handing over the sources without their build.
-#[test]
-fn error_065_an_overlay_without_an_image_fails_off_a_topic() {
-    let env = TestEnv::new("artefact_overlay_unpublished");
-    let app = env.create_bare_repo(
-        "app",
-        "main",
-        &[("README.md", "app"), (".gitignore", "/dist/\n")],
-    );
-    env.write_config(&overlay_config(&env, &app, "main"));
-    let out = env.run(&["sync"]);
-    assert!(!out.success, "{}", out.stdout);
-    let text = format!("{}{}", out.stdout, out.stderr);
-    assert!(text.contains("no artefact for"), "{}", text);
-    assert!(text.contains("may not have published yet"), "{}", text);
-    assert!(!env.playground.join("meta/app/dist").exists());
-}
-
 /// `ls --fetch` that cannot reach the registry still prints the table,
 /// says the entry's row is what the last successful fetch saw, and does not
 /// pass that off as fresh.
@@ -1907,7 +1522,7 @@ fn error_065_an_overlay_without_an_image_fails_off_a_topic() {
 fn error_066_ls_fetch_without_the_registry_shows_the_last_fetched_state() {
     let env = TestEnv::new("artefact_status_fetch_refused");
     let bare = env.artefact_repo("app", &[("app.bin", "v1")]);
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     assert!(env.run(&["sync"]).success);
     env.registry().refuse_with(500);
 
@@ -1937,7 +1552,7 @@ fn error_066_ls_fetch_without_the_registry_shows_the_last_fetched_state() {
 fn perf_038_an_identical_republish_uploads_nothing() {
     let env = TestEnv::new("art_republish_same");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-    layered(&env, &bare, "app v1");
+    layered(&env, &bare, "v1.0.0", "app v1");
     env.registry().clear_log();
 
     let (out, _) = env.publish_with(
@@ -1957,14 +1572,15 @@ fn perf_038_an_identical_republish_uploads_nothing() {
 fn perf_039_a_sync_downloads_only_the_layer_that_changed() {
     let env = TestEnv::new("art_layer_pull");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-    layered(&env, &bare, "app v1");
-    env.write_config(&entry_config(&env, &bare, "main"));
+    layered(&env, &bare, "v1.0.0", "app v1");
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     assert!(env.run(&["sync"]).success);
     // The config layer, read by resolution and kept, then vendor and app.
     assert_eq!(blob_downloads(&env), 3);
 
     env.push_commit(&bare, "main", "README.md", "v2");
-    layered(&env, &bare, "app v2");
+    layered(&env, &bare, "v1.1.0", "app v2");
+    env.write_config(&entry_config(&env, &bare, "v1.1.0"));
     env.registry().clear_log();
     let out = env.run(&["sync"]);
     assert!(out.success, "{}", out.stderr);
@@ -1977,23 +1593,15 @@ fn perf_039_a_sync_downloads_only_the_layer_that_changed() {
 fn perf_040_an_up_to_date_sync_asks_the_registry_nothing() {
     let env = TestEnv::new("pull_artefact_up_to_date");
     let bare = env.artefact_repo("app", &[("app.bin", "content")]);
-
-    env.write_config(&format!(
-        r#"{}[repos]
-"meta/app" = {{ url = "{}", revision = "main", artefact = "replace" }}
-"#,
-        env.registries(),
-        bare.display(),
-    ));
-
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     assert!(env.run(&["sync"]).success);
     env.registry().clear_log();
 
-    // Sync again: the revision still names the installed commit, so the
-    // registry is not asked anything.
+    // Sync again: the release is installed, so the registry is not asked
+    // anything.
     let out = env.run(&["sync"]);
     assert!(out.success, "stderr: {}", out.stderr);
-    insta::assert_snapshot!("sync_artefact_up_to_date_stdout", redact_shas(&out.stdout));
+    insta::assert_snapshot!("sync_artefact_up_to_date_stdout", out.stdout);
     assert!(
         env.registry().log().is_empty(),
         "{:?}",
@@ -2007,8 +1615,8 @@ fn perf_040_an_up_to_date_sync_asks_the_registry_nothing() {
 fn perf_041_a_second_root_worktree_downloads_nothing() {
     let env = TestEnv::new("art_second_worktree");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-    layered(&env, &bare, "app v1");
-    env.write_config(&entry_config(&env, &bare, "main"));
+    layered(&env, &bare, "v1.0.0", "app v1");
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     env.init_playground_git();
     run_git_pub(&env.playground, &["add", ".gitscale.toml"]);
     run_git_pub(&env.playground, &["commit", "-q", "-m", "config"]);
@@ -2043,13 +1651,15 @@ fn perf_041_a_second_root_worktree_downloads_nothing() {
 fn perf_042_in_ci_without_the_cache_every_layer_is_downloaded() {
     let env = TestEnv::new("art_ci_no_cache");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-    layered(&env, &bare, "app v1");
-    env.write_config(&entry_config(&env, &bare, "main"));
+    layered(&env, &bare, "v1.0.0", "app v1");
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     for _ in 0..2 {
         let _ = std::fs::remove_dir_all(env.playground.join("meta"));
         let out = env.run_with_env(&[("CI", "true")], &["sync", "--no-cache"]);
         assert!(out.success, "{}{}", out.stdout, out.stderr);
     }
+    // Each time the config layer resolution reads, then the three layers
+    // the install unpacks.
     assert_eq!(blob_downloads(&env), 8);
     assert!(env.cache_entries("images").is_empty());
 }
@@ -2059,14 +1669,19 @@ fn perf_042_in_ci_without_the_cache_every_layer_is_downloaded() {
 fn perf_043_parallel_cold_ci_jobs_download_each_blob_once() {
     let env = TestEnv::new("art_parallel");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-    layered(&env, &bare, "app v1");
+    layered(&env, &bare, "v1.0.0", "app v1");
     let workspaces: Vec<PathBuf> = (0..4)
         .map(|i| env.repos_remote.join(format!("ws{}", i)))
         .collect();
     for ws in &workspaces {
         std::fs::create_dir_all(ws).unwrap();
         run_git_pub(ws, &["init", "-q"]);
-        std::fs::write(ws.join(".gitscale.toml"), entry_config(&env, &bare, "main")).unwrap();
+        std::fs::write(
+            ws.join(".gitscale.toml"),
+            entry_config(&env, &bare, "v1.0.0"),
+        )
+        .unwrap();
+        crate::support::prefer(ws, &bare, gitscale::prefer::Form::Artefact);
     }
     std::thread::scope(|scope| {
         for ws in &workspaces {
@@ -2093,4 +1708,504 @@ fn perf_043_parallel_cold_ci_jobs_download_each_blob_once() {
         );
     }
     assert_eq!(blob_downloads(&env), 3, "{:?}", env.registry().log());
+}
+
+/// A release named for a commit already published goes on its image,
+/// uploading nothing.
+#[test]
+fn normal_067_publish_releases_an_image_already_there() {
+    let env = TestEnv::new("art_version_tags");
+    let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
+    let (out, _) = env.publish_with(
+        &bare,
+        "main",
+        LAYERED,
+        &[("vendor/lib.js", "vendor v1"), ("app.js", "app v1")],
+        &[],
+    );
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    assert_eq!(hash_tags(env.registry().tags(&env.image(&bare))).len(), 1);
+    assert_eq!(
+        env.registry().tags(&env.image(&bare)).len(),
+        1,
+        "no release yet"
+    );
+
+    env.registry().clear_log();
+    layered(&env, &bare, "v1-2026.10.05-1", "app v1");
+    let hash = hash_tags(env.registry().tags(&env.image(&bare)))
+        .pop()
+        .unwrap();
+    assert_eq!(
+        env.registry()
+            .manifest(&env.image(&bare), "v1-2026.10.05-1"),
+        env.registry().manifest(&env.image(&bare), &hash)
+    );
+    assert_eq!(env.registry().count("POST", "/blobs/uploads/"), 0);
+}
+
+/// A squash merge that changes no file gives `main` a new commit with the
+/// branch build's sources: `publish --reuse` releases that build's image, as
+/// it is, packing and uploading nothing.
+#[test]
+fn normal_068_reuse_releases_the_image_of_the_same_sources() {
+    let env = TestEnv::new("art_reuse");
+    let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
+    run_git_pub(&bare, &["branch", "feat/x", "main"]);
+    let branch = env.push_commit(&bare, "feat/x", "lib.txt", "the change");
+    let built = [("vendor/lib.js", "vendor"), ("app.js", "built")];
+    let (out, _) = env.publish_with(&bare, "feat/x", LAYERED, &built, &[]);
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    let image = env.image(&bare);
+    let hash = hash_tags(env.registry().tags(&image)).pop().unwrap();
+
+    let tree = git_stdout(&bare, &["rev-parse", &format!("{}^{{tree}}", branch)]);
+    let squashed = git_stdout(&bare, &["commit-tree", &tree, "-p", "main", "-m", "squash"]);
+    run_git_pub(&bare, &["update-ref", "refs/heads/main", &squashed]);
+    env.registry().clear_log();
+
+    let (out, _) = env.publish_with(&bare, "main", LAYERED, &[], &["--reuse", "v1-2026.10.05-1"]);
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    let released = env.registry().manifest(&image, "v1-2026.10.05-1").unwrap();
+    assert_eq!(released, env.registry().manifest(&image, &hash).unwrap());
+    assert_eq!(
+        released["annotations"]["org.opencontainers.image.revision"],
+        branch.as_str(),
+        "the build it is"
+    );
+    assert_eq!(env.registry().count("POST", "/blobs/uploads/"), 0);
+}
+
+/// With no image of these sources there is nothing to reuse: `--reuse`
+/// fails, a dry run as well, so a release pipeline stops before it tags.
+#[test]
+fn error_069_reuse_fails_without_an_image_of_these_sources() {
+    let env = TestEnv::new("art_reuse_none");
+    let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
+    layered(&env, &bare, "v1.0.0", "app v1");
+    env.push_commit(&bare, "main", "lib.txt", "changed sources");
+    for args in [
+        &["--reuse", "--dry-run", "v1.1.0"][..],
+        &["--reuse", "v1.1.0"][..],
+    ] {
+        let (out, _) = env.publish_with(&bare, "main", LAYERED, &[], args);
+        assert!(!out.success, "{:?}: {}", args, out.stdout);
+        assert!(
+            out.stderr.contains("no image of these sources"),
+            "{:?}: {}",
+            args,
+            out.stderr
+        );
+    }
+    assert_eq!(hash_tags(env.registry().tags(&env.image(&bare))).len(), 1);
+}
+
+/// A repository published as `app`, at a release, whose sources then become
+/// unreadable — moved where its URL no longer reaches. Its image declares a
+/// dependency in its config layer. Returns the URL the root asks for.
+fn unreadable_release(env: &TestEnv) -> PathBuf {
+    let dep = tagged(env, "dep", &[("v1.0.0", "")]);
+    let app = env.create_bare_repo("app", "main", &[("README.md", "app")]);
+    let producer = format!(
+        "[artefact]\ninclude = [\"dist/**\"]\n\n{}",
+        repos(&[("vendor/dep", &dep, ", revision = \"v1.0.0\"")])
+    );
+    let (out, _) = env.publish_with(
+        &app,
+        "main",
+        &producer,
+        &[("app.bin", "built")],
+        &["v1-2026.10.05-1"],
+    );
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    std::fs::rename(&app, env.repos_remote.join("moved.git")).unwrap();
+    app
+}
+
+/// A repository whose sources cannot be read is its artefact, with nothing to
+/// configure: its release found in its registry, its dependencies in its
+/// image's config layer, and its source hash from the tree its image records.
+#[test]
+fn normal_070_without_access_to_its_sources_a_checkout_is_its_artefact() {
+    let env = TestEnv::new("art_no_access");
+    let app = unreadable_release(&env);
+    env.write_config(&format!(
+        "{}{}{}",
+        env.registries(),
+        allow(&env),
+        repos(&[("meta/app", &app, ", revision = \"v1-2026.10.05-1\"")])
+    ));
+    let out = env.run(&["sync"]);
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    let dest = env.playground.join("meta/app");
+    assert!(dest.join("dist/app.bin").is_file());
+    assert!(!dest.join(".git").exists());
+    assert!(
+        dest.join("vendor/dep").is_symlink(),
+        "its dependency, linked"
+    );
+    assert!(env.playground.join("imports/dep/VERSION").is_file());
+
+    let row = crate::support::status_clean::json_row(&env, "meta/app");
+    assert_eq!(row["as"], "artefact");
+    assert_eq!(row["as_reason"], "no-access");
+    let out = env.run(&["hash", "meta/app"]);
+    assert!(out.success, "{}", out.stderr);
+
+    // On a topic it stays at its release: no branch of it can be seen.
+    run_git_pub(&env.playground, &["switch", "-q", "-c", "feat/x"]);
+    let out = env.run(&["sync"]);
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    assert_eq!(
+        crate::support::status_clean::json_row(&env, "meta/app")["topic"],
+        serde_json::Value::Null
+    );
+}
+
+/// Without its sources, a branch cannot be resolved: only released versions.
+#[test]
+fn error_071_without_access_a_branch_revision_needs_the_sources() {
+    let env = TestEnv::new("art_no_access_branch");
+    let app = unreadable_release(&env);
+    env.write_config(&format!(
+        "{}{}{}",
+        env.registries(),
+        allow(&env),
+        repos(&[("meta/app", &app, ", revision = \"main\"")])
+    ));
+    let out = env.run(&["sync"]);
+    assert!(!out.success, "{}", out.stdout);
+    assert!(
+        out.stderr.contains("main needs access to its sources"),
+        "{}",
+        out.stderr
+    );
+}
+
+/// A remote that cannot be reached is not one that refused: its registry is
+/// not asked instead, and the fetch error is what is said.
+#[test]
+fn edge_072_an_unreachable_remote_is_not_taken_for_one_without_access() {
+    let env = TestEnv::new("art_unreachable");
+    env.write_config(&format!(
+        "[registries]\n\"http://127.0.0.1:1/\" = \"{}\"\n\n{}",
+        env.registry_addr(),
+        "[repos]\n\"meta/app\" = { url = \"http://127.0.0.1:1/app.git\", revision = \"v1-2026.10.05-1\" }\n"
+    ));
+    let out = env.run(&["sync"]);
+    assert!(!out.success, "{}", out.stdout);
+    assert!(out.stderr.contains("cannot fetch"), "{}", out.stderr);
+    assert!(!out.stderr.contains("registry"), "{}", out.stderr);
+}
+
+/// A release tag already naming an image stays where it is: `--reuse`
+/// refuses to move it, as a release is published once.
+#[test]
+fn error_073_reuse_leaves_a_release_already_published_alone() {
+    let env = TestEnv::new("art_reuse_taken");
+    let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
+    let (out, _) = env.publish_with(
+        &bare,
+        "main",
+        LAYERED,
+        &[("vendor/lib.js", "v"), ("app.js", "a")],
+        &[],
+    );
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    run_git_pub(&bare, &["tag", "v1.0.0", "main"]);
+    push_image(
+        &env,
+        &bare,
+        "v1.0.0",
+        &[gzip_layer(
+            "app",
+            Tar::new().file("dist/other.txt", "other"),
+        )],
+    );
+    let image = env.image(&bare);
+    let published = env.registry().manifest(&image, "v1.0.0");
+
+    let (out, _) = env.publish_with(&bare, "main", LAYERED, &[], &["--reuse", "v1.0.0"]);
+    assert!(!out.success, "{}", out.stdout);
+    assert!(
+        out.stderr.contains(":v1.0.0 already names another image"),
+        "{}",
+        out.stderr
+    );
+    assert_eq!(env.registry().manifest(&image, "v1.0.0"), published);
+}
+
+/// A dependency that does not resolve leaves the source hash unknown: a dry
+/// run says so and lists the layers, a publish fails, as `--reuse` could not
+/// find the image it would push.
+#[test]
+fn error_074_publish_fails_on_a_source_hash_it_cannot_take() {
+    let env = TestEnv::new("art_hash_unknown");
+    let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
+    let missing = env.repos_remote.join("missing.git");
+    let producer = format!(
+        "{}\n{}",
+        LAYERED,
+        repos(&[("vendor/dep", &missing, ", revision = \"v1.0.0\"")])
+    );
+    let built = [("vendor/lib.js", "vendor"), ("app.js", "built")];
+    let (out, _) = env.publish_with(&bare, "main", &producer, &built, &["--dry-run"]);
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    assert!(out.stdout.contains("  tags: unknown ("), "{}", out.stdout);
+    assert!(out.stdout.contains("    dist/app.js"), "{}", out.stdout);
+
+    let (out, _) = env.publish_with(&bare, "main", &producer, &built, &[]);
+    assert!(!out.success, "{}", out.stdout);
+    assert!(
+        out.stderr.contains("cannot hash the sources"),
+        "{}",
+        out.stderr
+    );
+    assert!(env.registry().tags(&env.image(&bare)).is_empty());
+}
+
+/// Without access to its sources, a raise takes the newest version its
+/// registry has: releases are cut in order on the producer's release
+/// branches, so the newest holds every one before it.
+#[test]
+fn normal_075_without_access_a_raise_takes_the_newest_registry_version() {
+    let env = TestEnv::new("art_no_access_raise");
+    let app = env.create_bare_repo("app", "main", &[("README.md", "app")]);
+    let producer = "[artefact]\ninclude = [\"dist/**\"]\n";
+    let (out, _) = env.publish_with(
+        &app,
+        "main",
+        producer,
+        &[("app.bin", "one")],
+        &["v1-2026.10.05-1"],
+    );
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    env.push_commit(&app, "main", "lib.txt", "two");
+    let (out, _) = env.publish_with(
+        &app,
+        "main",
+        producer,
+        &[("app.bin", "two")],
+        &["v1-2026.10.06-1"],
+    );
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    std::fs::rename(&app, env.repos_remote.join("moved.git")).unwrap();
+    env.write_config(&format!(
+        "{}{}{}",
+        env.registries(),
+        allow(&env),
+        repos(&[("meta/app", &app, ", revision = \"v1-2026.10.05-1\"")])
+    ));
+    let out = env.run(&["sync"]);
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    run_git_pub(&env.playground, &["switch", "-q", "-c", "feat/x"]);
+
+    let out = env.run(&["upgrade", "meta/app"]);
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    assert!(
+        out.stdout
+            .contains("meta/app   v1-2026.10.05-1 → v1-2026.10.06-1"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        std::fs::read_to_string(env.playground.join(".gitscale.toml"))
+            .unwrap()
+            .contains("revision = \"v1-2026.10.06-1\""),
+    );
+}
+
+/// A checkout taken as an artefact downloads none of its history: its refs
+/// are listed, its config read from its image, and nothing of git is kept
+/// for it — someone without access, or not wanting the sources, gets only
+/// the build.
+#[test]
+fn perf_076_an_artefact_downloads_none_of_its_history() {
+    let env = TestEnv::new("art_no_history");
+    env.init_playground_git();
+    let bare = env.artefact_repo("app", &[("app.bin", "built")]);
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
+    let out = env.run(&["sync"]);
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    assert_eq!(read(&env, "meta/app/dist/app.bin"), "built");
+    let stores = env.playground.join(".git/gitscale/repos");
+    assert!(
+        !stores.exists() || std::fs::read_dir(&stores).unwrap().next().is_none(),
+        "a store was made: {:?}",
+        all_names(&stores)
+    );
+}
+
+/// A release is named with a version; anything else is refused before
+/// anything is packed.
+#[test]
+fn error_077_a_release_must_be_a_version() {
+    let env = TestEnv::new("art_release_name");
+    let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
+    let (out, _) = env.publish_with(&bare, "main", LAYERED, &[], &["release-1"]);
+    assert!(!out.success, "{}", out.stdout);
+    assert!(
+        out.stderr
+            .contains("release-1 is not a version: a release is named like v1.4.0"),
+        "{}",
+        out.stderr
+    );
+    assert!(env.registry().log().is_empty());
+}
+
+/// A release already made of another commit is never taken over: refused
+/// before anything is packed or pushed.
+#[test]
+fn error_078_a_release_of_another_commit_is_refused() {
+    let env = TestEnv::new("art_release_taken");
+    let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
+    let first = layered(&env, &bare, "v1.0.0", "app v1");
+    env.push_commit(&bare, "main", "README.md", "v2");
+    env.registry().clear_log();
+    let (out, _) = env.publish_with(
+        &bare,
+        "main",
+        LAYERED,
+        &[("vendor/lib.js", "vendor v1"), ("app.js", "app v2")],
+        &["v1.0.0"],
+    );
+    assert!(!out.success, "{}", out.stdout);
+    assert!(
+        out.stderr
+            .contains(&format!("v1.0.0 is already the release of {}", &first[..7])),
+        "{}",
+        out.stderr
+    );
+    assert!(env.registry().log().is_empty());
+    assert_eq!(tag_commit(&bare, "v1.0.0"), first);
+}
+
+/// A branch build of a repository whose sources cannot be read, published
+/// under its source hash: the build pinned as `hash:<hash>`, and its
+/// dependencies.
+fn unreadable_build(env: &TestEnv) -> (PathBuf, String) {
+    let dep = tagged(env, "dep", &[("v1.0.0", "")]);
+    let app = env.create_bare_repo("app", "main", &[("README.md", "app")]);
+    let producer = format!(
+        "[artefact]\ninclude = [\"dist/**\"]\n\n{}",
+        repos(&[("vendor/dep", &dep, ", revision = \"v1.0.0\"")])
+    );
+    let built = [("app.bin", "release")];
+    let (out, _) = env.publish_with(&app, "main", &producer, &built, &["v1-2026.10.05-1"]);
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    run_git_pub(&app, &["branch", "feat/x", "main"]);
+    env.push_commit(&app, "feat/x", "lib.txt", "the change");
+    let built = [("app.bin", "branch build")];
+    let (out, _) = env.publish_with(&app, "feat/x", &producer, &built, &[]);
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    let hash = hash_tags(env.registry().tags(&env.image(&app)))
+        .into_iter()
+        .find(|h| {
+            env.registry().manifest(&env.image(&app), h).unwrap()["annotations"]
+                ["org.opencontainers.image.revision"]
+                == git_stdout(&app, &["rev-parse", "feat/x"]).as_str()
+        })
+        .unwrap();
+    std::fs::rename(&app, env.repos_remote.join("moved.git")).unwrap();
+    (app, hash)
+}
+
+/// A build pinned by its source hash is taken as it is — here by a
+/// workspace that cannot read the sources, which no branch would reach:
+/// its files, its dependencies, and `build` as its revision's kind.
+#[test]
+fn normal_080_a_build_pinned_by_its_source_hash_is_taken() {
+    let env = TestEnv::new("art_build_pin");
+    let (app, hash) = unreadable_build(&env);
+    let pin = format!(", revision = \"hash:{}\"", hash);
+    env.write_config(&format!(
+        "{}{}{}",
+        env.registries(),
+        allow(&env),
+        repos(&[("meta/app", &app, &pin)])
+    ));
+    let out = env.run(&["sync"]);
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    assert_eq!(read(&env, "meta/app/dist/app.bin"), "branch build");
+    assert!(env.playground.join("meta/app/vendor/dep").is_symlink());
+    let row = crate::support::status_clean::json_row(&env, "meta/app");
+    assert_eq!(row["revision_kind"], "build", "{}", row);
+    assert_eq!(row["as_reason"], "no-access", "{}", row);
+}
+
+/// A build pin is for trying a build out, never for shipping: the merge
+/// gate refuses it, naming the config that holds it.
+#[test]
+fn error_081_check_refuses_a_build_pin() {
+    let env = TestEnv::new("art_build_pin_gate");
+    let (app, hash) = unreadable_build(&env);
+    let pin = format!(", revision = \"hash:{}\"", hash);
+    env.write_config(&format!(
+        "{}{}{}",
+        env.registries(),
+        allow(&env),
+        repos(&[("meta/app", &app, &pin)])
+    ));
+    let out = env.run(&["check"]);
+    assert!(!out.success, "{}", out.stdout);
+    assert!(
+        out.stderr.contains(&format!(
+            "meta/app is pinned to a build (hash:{}) in .gitscale.toml, not to a release",
+            hash
+        )),
+        "{}",
+        out.stderr
+    );
+}
+
+/// A source hash that names no build fails, saying so; a malformed one too.
+#[test]
+fn error_082_a_build_pin_needs_a_build() {
+    let env = TestEnv::new("art_build_pin_missing");
+    let (app, _) = unreadable_build(&env);
+    for (revision, said) in [
+        (
+            format!("hash:{}", "a".repeat(64)),
+            "no build of these sources (aaaaaaaaaaaa)",
+        ),
+        (
+            "hash:abc".to_string(),
+            "hash: takes a source hash, 64 hex digits",
+        ),
+    ] {
+        let pin = format!(", revision = \"{}\"", revision);
+        env.write_config(&format!(
+            "{}{}{}",
+            env.registries(),
+            allow(&env),
+            repos(&[("meta/app", &app, &pin)])
+        ));
+        let out = env.run(&["sync"]);
+        assert!(!out.success, "{}: {}", revision, out.stdout);
+        assert!(out.stderr.contains(said), "{}: {}", revision, out.stderr);
+    }
+}
+
+/// With access to the sources, a build pin is a checkout of the commit the
+/// build was made from.
+#[test]
+fn normal_083_with_access_a_build_pin_is_its_commit() {
+    let env = TestEnv::new("art_build_pin_sources");
+    let app = env.create_bare_repo("app", "main", &[("README.md", "app")]);
+    run_git_pub(&app, &["branch", "feat/x", "main"]);
+    let built = env.push_commit(&app, "feat/x", "lib.txt", "the change");
+    env.publish(&app, "feat/x", &[("app.bin", "branch build")]);
+    let hash = hash_tags(env.registry().tags(&env.image(&app)))
+        .pop()
+        .unwrap();
+    env.write_config(&format!(
+        "{}{}",
+        env.registries(),
+        repos(&[("meta/app", &app, &format!(", revision = \"hash:{}\"", hash))])
+    ));
+    let out = env.run(&["sync"]);
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    let dest = env.playground.join("meta/app");
+    assert_eq!(git_stdout(&dest, &["rev-parse", "HEAD"]), built);
+    assert!(dest.join("lib.txt").is_file());
 }

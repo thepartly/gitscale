@@ -1,4 +1,5 @@
-//! `git upgrade`: raising pins and recording what resolution chose.
+//! `git upgrade`: promoting a topic's released repositories, and raising
+//! named dependencies, in the configs on the topic.
 
 use crate::support;
 use crate::support::resolution::*;
@@ -8,43 +9,6 @@ use crate::support::{run_git_pub, TestEnv};
 // ---------------------------------------------------------------------------
 // Normal cases
 // ---------------------------------------------------------------------------
-
-#[test]
-fn normal_001_resolved_records_the_resolved_revisions_and_keeps_comments() {
-    let env = TestEnv::new("res_write");
-    let (b, d) = diamond(&env);
-    env.write_config(&format!(
-        "# the workspace\n[repos]\n\"imports/b\" = {{ url = \"{}\", revision = \"v1.0.0\" }}\n\
-         \"imports/d\" = {{ url = \"{}\", revision = \"v1.2.0\" }} # raised by b\n",
-        b.display(),
-        d.display()
-    ));
-
-    let before = std::fs::read_to_string(env.playground.join(".gitscale.toml")).unwrap();
-    let out = env.run(&["upgrade", "--resolved", "--dry-run"]);
-    assert!(out.success, "{}", out.stderr);
-    assert!(out.stdout.contains("v1.2.0 → v1.5.0"), "{}", out.stdout);
-    assert!(
-        out.stdout.contains("1 entry would change"),
-        "{}",
-        out.stdout
-    );
-    // A dry run leaves the file exactly as it was.
-    assert_eq!(
-        std::fs::read_to_string(env.playground.join(".gitscale.toml")).unwrap(),
-        before
-    );
-
-    let out = env.run(&["upgrade", "--resolved"]);
-    assert!(out.success, "{}", out.stderr);
-    let config = std::fs::read_to_string(env.playground.join(".gitscale.toml")).unwrap();
-    assert!(config.contains("revision = \"v1.5.0\""), "{}", config);
-    assert!(config.contains("# the workspace"), "{}", config);
-    assert!(config.contains("# raised by b"), "{}", config);
-
-    let out = env.run(&["upgrade", "--resolved"]);
-    assert!(out.stdout.contains("already declares"), "{}", out.stdout);
-}
 
 /// Once a release tag holds a joined child's change, `upgrade` writes the
 /// tag into the root's config, deletes the child's topic branch and detaches
@@ -96,6 +60,7 @@ fn normal_002_promotes_a_child_whose_change_is_released() {
 fn normal_003_raises_a_named_dependency_to_its_newest_release() {
     let f = fixture("wt_raise", "");
     let ws = f.clone_root("ws");
+    run_git_pub(&ws, &["switch", "-q", "-c", "feat/bump"]);
     let newer = f.core_commit("main", "lib.txt", "v1.2");
     run_git_pub(&f.core, &["tag", "v1.2.0", &newer]);
     let before = config_text(&ws);
@@ -109,24 +74,45 @@ fn normal_003_raises_a_named_dependency_to_its_newest_release() {
     );
     let config = std::fs::read_to_string(ws.join(".gitscale.toml")).unwrap();
     assert!(config.contains("revision = \"v1.2.0\""), "{}", config);
-    // Only that revision changed; with only the root to edit there is no
-    // topic to create, and nothing is committed without --commit.
+    // Only that revision changed, and nothing is committed without --commit.
     assert_eq!(config, before.replace("v1.0.0", "v1.2.0"));
-    assert_eq!(branch(&ws).as_deref(), Some("main"));
+    assert_eq!(branch(&ws).as_deref(), Some("feat/bump"));
     assert_eq!(support::worktrees::head(&ws), root_head);
 }
 
-/// `upgrade <dir>` with a requester other than the root, and no topic:
-/// the root's new branch becomes the topic, the requester is joined to
-/// it, and both configs get the new release in place, comments kept. With
-/// `--commit` each config is committed alone, as `pin <dep> <tag>`.
+/// `upgrade <dir>` edits only the configs on the topic: a requester off it
+/// is named with the command that joins it, and left as it is. Joined by
+/// `git topic join --dependants`, it is edited in place, comments kept, and
+/// with `--commit` each config is committed alone, as `pin <dep> <tag>`.
 #[test]
-fn normal_005_raising_creates_the_topic_and_edits_every_requester() {
+fn normal_005_a_raise_edits_the_topics_configs_and_names_requesters_off_it() {
     let env = TestEnv::new("upgrade_raise_topic");
     let (b, d, config) = raise_graph(&env);
     let ws = root_workspace(&env, &config);
     ok(&gs(&ws, &["sync"]));
+    run_git_pub(&ws, &["switch", "-q", "-c", "feat/bump"]);
     let child = ws.join("imports/b");
+    let child_before = config_text(&child);
+
+    let out = gs(&ws, &["upgrade", "--dry-run", "imports/d"]);
+    ok(&out);
+    assert!(
+        out.stdout.contains(
+            "imports/b/.gitscale.toml   libs/d asks for v1.0.0: git topic join imports/b"
+        ),
+        "{}",
+        out.stdout
+    );
+    assert_eq!(branch(&child), None);
+    assert_eq!(config_text(&child), child_before);
+
+    let out = gs(&ws, &["topic", "join", "--dependants", "imports/d"]);
+    ok(&out);
+    assert!(
+        out.stdout.contains("imports/b on feat/bump"),
+        "{}",
+        out.stdout
+    );
     identity(&child);
 
     let out = gs(&ws, &["upgrade", "--commit", "imports/d"]);
@@ -137,18 +123,12 @@ fn normal_005_raising_creates_the_topic_and_edits_every_requester() {
         out.stdout
     );
     assert!(
-        out.stdout
-            .contains("topic upgrade/d-v1.1.0 (created): imports/b joined"),
-        "{}",
-        out.stdout
-    );
-    assert!(
         out.stdout.contains("next to merge: imports/b"),
         "{}",
         out.stdout
     );
-    assert_eq!(branch(&ws).as_deref(), Some("upgrade/d-v1.1.0"));
-    assert_eq!(branch(&child).as_deref(), Some("upgrade/d-v1.1.0"));
+    assert_eq!(branch(&ws).as_deref(), Some("feat/bump"));
+    assert_eq!(branch(&child).as_deref(), Some("feat/bump"));
 
     assert_eq!(
         config_text(&ws),
@@ -181,24 +161,26 @@ fn normal_005_raising_creates_the_topic_and_edits_every_requester() {
     }
 }
 
-/// `upgrade <dir> --dry-run` prints the whole plan — the topic it would
-/// create, every edit — and changes nothing: no file, no branch, no
-/// joined checkout.
+/// `upgrade <dir> --dry-run` prints every edit and changes nothing.
 #[test]
-fn normal_006_a_dry_run_raise_changes_no_file_or_branch() {
+fn normal_006_a_dry_run_raise_changes_no_file() {
     let env = TestEnv::new("upgrade_raise_dry_run");
     let (_, _, config) = raise_graph(&env);
     let ws = root_workspace(&env, &config);
     ok(&gs(&ws, &["sync"]));
+    run_git_pub(&ws, &["switch", "-q", "-c", "feat/bump"]);
+    ok(&gs(&ws, &["topic", "join", "imports/b"]));
     let child = ws.join("imports/b");
     let (root_before, child_before) = (config_text(&ws), config_text(&child));
-    let root_head = support::worktrees::head(&ws);
+    let heads = (
+        support::worktrees::head(&ws),
+        support::worktrees::head(&child),
+    );
 
     let out = gs(&ws, &["upgrade", "--dry-run", "imports/d"]);
     ok(&out);
     for expected in [
         "imports/d   v1.0.0 → v1.1.0",
-        "would join topic upgrade/d-v1.1.0: imports/b",
         "imports/b/.gitscale.toml",
         "(dry run: nothing changed)",
     ] {
@@ -211,32 +193,13 @@ fn normal_006_a_dry_run_raise_changes_no_file_or_branch() {
     }
     assert_eq!(config_text(&ws), root_before);
     assert_eq!(config_text(&child), child_before);
-    assert_eq!(branch(&ws).as_deref(), Some("main"));
-    assert_eq!(support::worktrees::head(&ws), root_head);
-    assert_eq!(branch(&child), None);
-    assert!(!git_ok(
-        &ws,
-        &["rev-parse", "--verify", "-q", "refs/heads/upgrade/d-v1.1.0"]
-    ));
-}
-
-/// `-c` names the topic a raise creates.
-#[test]
-fn normal_007_c_names_the_topic_a_raise_creates() {
-    let env = TestEnv::new("upgrade_raise_named_topic");
-    let (_, _, config) = raise_graph(&env);
-    let ws = root_workspace(&env, &config);
-    ok(&gs(&ws, &["sync"]));
-    let out = gs(&ws, &["upgrade", "-c", "feat/bump", "imports/d"]);
-    ok(&out);
-    assert!(
-        out.stdout
-            .contains("topic feat/bump (created): imports/b joined"),
-        "{}",
-        out.stdout
+    assert_eq!(
+        (
+            support::worktrees::head(&ws),
+            support::worktrees::head(&child)
+        ),
+        heads
     );
-    assert_eq!(branch(&ws).as_deref(), Some("feat/bump"));
-    assert_eq!(branch(&ws.join("imports/b")).as_deref(), Some("feat/bump"));
 }
 
 /// The newest release a raise picks stays in the pin's major and skips
@@ -246,6 +209,7 @@ fn normal_007_c_names_the_topic_a_raise_creates() {
 fn normal_008_a_raise_stays_in_its_major_and_skips_pre_releases_unless_asked() {
     let f = fixture("upgrade_raise_major", "");
     let ws = f.clone_root("ws");
+    run_git_pub(&ws, &["switch", "-q", "-c", "feat/bump"]);
     for tag in ["v1.2.0", "v1.3.0-rc.1", "v1.3.0-rc.2", "v2.0.0"] {
         let commit = f.core_commit("main", "lib.txt", tag);
         run_git_pub(&f.core, &["tag", tag, &commit]);
@@ -286,134 +250,12 @@ fn normal_008_a_raise_stays_in_its_major_and_skips_pre_releases_unless_asked() {
     assert_eq!(config_text(&ws), before.replace("v1.0.0", "v2.0.0"));
 }
 
-/// `upgrade --resolved --commit` commits `.gitscale.toml` alone: whatever
-/// else is staged stays staged, out of the commit.
+/// `upgrade --dry-run` on a topic reports the promotion, its edits and the
+/// remote branch it would delete, and changes nothing; the real run deletes
+/// the slot's topic branch on its remote, which placement and CI would
+/// otherwise keep matching by name.
 #[test]
-fn normal_009_resolved_commit_commits_the_config_alone() {
-    let env = TestEnv::new("upgrade_resolved_commit");
-    env.init_playground_git();
-    let (b, d) = diamond(&env);
-    env.write_config(&repos(&[
-        ("imports/b", &b, ", revision = \"v1.0.0\""),
-        ("imports/d", &d, ", revision = \"v1.2.0\""),
-    ]));
-    run_git_pub(&env.playground, &["add", ".gitscale.toml"]);
-    run_git_pub(&env.playground, &["commit", "-q", "-m", "config"]);
-    std::fs::write(env.playground.join("notes.txt"), "staged").unwrap();
-    run_git_pub(&env.playground, &["add", "notes.txt"]);
-
-    let out = env.run(&["upgrade", "--resolved", "--commit"]);
-    assert!(out.success, "{}{}", out.stdout, out.stderr);
-    assert!(
-        out.stdout
-            .contains("commit  .gitscale.toml: pin imports/d v1.5.0"),
-        "{}",
-        out.stdout
-    );
-    assert_eq!(
-        git(&env.playground, &["log", "-1", "--format=%s"]),
-        "pin imports/d v1.5.0"
-    );
-    assert_eq!(
-        git(
-            &env.playground,
-            &["show", "--name-only", "--format=", "HEAD"]
-        ),
-        ".gitscale.toml"
-    );
-    assert_eq!(
-        git(&env.playground, &["diff", "--cached", "--name-only"]),
-        "notes.txt"
-    );
-}
-
-/// `upgrade --resolved` changes only root entries that give a revision and
-/// are not overrides; named directories narrow it further.
-#[test]
-fn normal_010_resolved_leaves_overrides_and_unpinned_entries_alone() {
-    let env = TestEnv::new("upgrade_resolved_skips");
-    let d = tagged(&env, "d", &[("v1.2.0", ""), ("v1.5.0", "")]);
-    let e = tagged(&env, "e", &[("v1.2.0", ""), ("v1.5.0", "")]);
-    let f = tagged(&env, "f", &[("v1.2.0", ""), ("v1.5.0", "")]);
-    let b = dependant(
-        &env,
-        "b",
-        &[
-            ("libs/d", &d, ", revision = \"v1.5.0\""),
-            ("libs/e", &e, ", revision = \"v1.5.0\""),
-            ("libs/f", &f, ", revision = \"v1.5.0\""),
-        ],
-    );
-    let config = repos(&[
-        ("imports/b", &b, ", revision = \"v1.0.0\""),
-        ("imports/d", &d, ""),
-        ("imports/e", &e, ", revision = \"v1.2.0\", override = true"),
-        ("imports/f", &f, ", revision = \"v1.2.0\""),
-    ]);
-    env.write_config(&config);
-
-    let out = env.run(&[
-        "upgrade",
-        "--resolved",
-        "--dry-run",
-        "imports/b",
-        "imports/e",
-    ]);
-    assert!(out.success, "{}{}", out.stdout, out.stderr);
-    assert!(out.stdout.contains("already declares"), "{}", out.stdout);
-
-    let out = env.run(&["upgrade", "--resolved"]);
-    assert!(out.success, "{}{}", out.stdout, out.stderr);
-    assert!(
-        out.stdout.contains("Updated 1 entry in .gitscale.toml"),
-        "{}",
-        out.stdout
-    );
-    let expected = repos(&[
-        ("imports/b", &b, ", revision = \"v1.0.0\""),
-        ("imports/d", &d, ""),
-        ("imports/e", &e, ", revision = \"v1.2.0\", override = true"),
-        ("imports/f", &f, ", revision = \"v1.5.0\""),
-    ]);
-    assert_eq!(config_text(&env.playground), expected);
-}
-
-/// On a topic, `upgrade --resolved` writes what a merge would pin — the
-/// revision resolution would choose without the topic — never the topic
-/// branch itself.
-#[test]
-fn normal_011_resolved_on_a_topic_writes_the_pin_not_the_branch() {
-    let env = TestEnv::new("upgrade_resolved_topic");
-    let (b, d) = diamond(&env);
-    let ws = root_workspace(
-        &env,
-        &repos(&[
-            ("imports/b", &b, ", revision = \"v1.0.0\""),
-            ("imports/d", &d, ", revision = \"v1.2.0\""),
-        ]),
-    );
-    ok(&gs(&ws, &["sync"]));
-    run_git_pub(&ws, &["switch", "-q", "-c", "feat/x"]);
-    ok(&gs(&ws, &["topic", "join", "imports/d"]));
-    assert_eq!(branch(&ws.join("imports/d")).as_deref(), Some("feat/x"));
-
-    let out = gs(&ws, &["upgrade", "--resolved"]);
-    ok(&out);
-    assert!(
-        out.stdout.contains("v1.2.0 → v1.5.0") && out.stdout.contains("raised by imports/b"),
-        "{}",
-        out.stdout
-    );
-    let config = config_text(&ws);
-    assert!(config.contains("revision = \"v1.5.0\""), "{}", config);
-    assert!(!config.contains("feat/x"), "{}", config);
-}
-
-/// `upgrade --dry-run` on a topic reports the promotion and its edits and
-/// changes nothing; the real run then warns that the slot's topic branch
-/// still exists on its remote, which CI would keep matching by name.
-#[test]
-fn normal_012_a_dry_run_promotion_changes_nothing_and_the_real_one_warns_of_the_remote_branch() {
+fn normal_012_a_dry_run_promotion_changes_nothing_and_the_real_one_deletes_the_remote_branch() {
     let f = fixture("upgrade_promote_dry_run", "");
     let ws = f.clone_root("ws");
     run_git_pub(&ws, &["switch", "-q", "-c", "feat/x"]);
@@ -432,6 +274,7 @@ fn normal_012_a_dry_run_promotion_changes_nothing_and_the_real_one_warns_of_the_
     for expected in [
         "imports/core  promoted → v1.1.0",
         "imports/core  v1.0.0 → v1.1.0",
+        "imports/core: would delete origin/feat/x",
         "(dry run: nothing changed)",
     ] {
         assert!(
@@ -443,39 +286,88 @@ fn normal_012_a_dry_run_promotion_changes_nothing_and_the_real_one_warns_of_the_
     }
     assert_eq!(config_text(&ws), before);
     assert_eq!(branch(&child).as_deref(), Some("feat/x"));
+    assert!(git_ok(
+        &f.core,
+        &["rev-parse", "--verify", "-q", "refs/heads/feat/x"]
+    ));
 
     let out = gs(&ws, &["upgrade"]);
     ok(&out);
     assert!(
-        out.stdout
-            .contains("imports/core: branch feat/x still exists on its remote"),
+        out.stdout.contains("imports/core: deleted origin/feat/x"),
         "{}",
         out.stdout
     );
+    assert!(!git_ok(
+        &f.core,
+        &["rev-parse", "--verify", "-q", "refs/heads/feat/x"]
+    ));
     assert!(config_text(&ws).contains("revision = \"v1.1.0\""));
     assert_eq!(branch(&child), None);
+}
+
+/// A calendar raise stays in its major; `--major` crosses to the next.
+#[test]
+fn normal_022_a_calendar_raise_stays_in_its_major_and_major_crosses_it() {
+    let env = TestEnv::new("upgrade_raise_calver");
+    let core = tagged(
+        &env,
+        "core",
+        &[
+            ("v1-2026.10.01-1", ""),
+            ("v1-2026.10.05-1", ""),
+            ("v2-2026.11.02-1", ""),
+        ],
+    );
+    let ws = root_workspace(
+        &env,
+        &repos(&[("imports/core", &core, ", revision = \"v1-2026.10.01-1\"")]),
+    );
+    ok(&gs(&ws, &["sync"]));
+    run_git_pub(&ws, &["switch", "-q", "-c", "feat/bump"]);
+
+    let out = gs(&ws, &["upgrade", "--dry-run", "imports/core"]);
+    ok(&out);
+    assert!(
+        out.stdout
+            .contains("imports/core   v1-2026.10.01-1 → v1-2026.10.05-1"),
+        "{}",
+        out.stdout
+    );
+    let out = gs(&ws, &["upgrade", "--dry-run", "--major", "imports/core"]);
+    ok(&out);
+    assert!(
+        out.stdout
+            .contains("imports/core   v1-2026.10.01-1 → v2-2026.11.02-1"),
+        "{}",
+        out.stdout
+    );
 }
 
 // ---------------------------------------------------------------------------
 // Edge cases
 // ---------------------------------------------------------------------------
 
-/// `upgrade --resolved` edits table-style entries as well as inline ones.
+/// A raise edits table-style entries as well as inline ones, comments kept.
 #[test]
-fn edge_004_resolved_edits_table_style_entries() {
+fn edge_004_a_raise_edits_table_style_entries() {
     let env = TestEnv::new("res_write_table");
-    let (b, d) = diamond(&env);
-    env.write_config(&format!(
-        "[repos.\"imports/b\"]\nurl = \"{}\"\nrevision = \"v1.0.0\"\n\n\
-         [repos.\"imports/d\"]\nurl = \"{}\"\nrevision = \"v1.2.0\"  # held back?\n",
-        b.display(),
-        d.display()
-    ));
-    let out = env.run(&["upgrade", "--resolved"]);
-    assert!(out.success, "{}{}", out.stdout, out.stderr);
-    let config = std::fs::read_to_string(env.playground.join(".gitscale.toml")).unwrap();
+    let (b, d, _) = raise_graph(&env);
+    let ws = root_workspace(
+        &env,
+        &format!(
+            "[repos.\"imports/b\"]\nurl = \"{}\"\nrevision = \"v1.0.0\"\n\n\
+             [repos.\"imports/d\"]\nurl = \"{}\"\nrevision = \"v1.0.0\"  # held back?\n",
+            b.display(),
+            d.display()
+        ),
+    );
+    ok(&gs(&ws, &["sync"]));
+    run_git_pub(&ws, &["switch", "-q", "-c", "feat/bump"]);
+    ok(&gs(&ws, &["upgrade", "imports/d"]));
+    let config = config_text(&ws);
     assert!(
-        config.contains("revision = \"v1.5.0\"  # held back?"),
+        config.contains("revision = \"v1.1.0\"  # held back?"),
         "{}",
         config
     );
@@ -514,7 +406,7 @@ fn edge_013_promotion_leaves_a_slot_whose_change_no_tag_holds() {
     let out = gs(&ws, &["upgrade"]);
     ok(&out);
     assert!(
-        out.stdout.contains("imports/core  not tagged yet"),
+        out.stdout.contains("imports/core  no tag"),
         "{}",
         out.stdout
     );
@@ -614,19 +506,20 @@ fn edge_015_promotion_leaves_another_majors_entry_alone() {
 fn edge_016_a_raise_takes_a_dependency_by_its_link_path() {
     let env = TestEnv::new("upgrade_raise_link_name");
     let (_, _, config) = raise_graph(&env);
-    env.write_config(&config);
-    let out = env.run(&["upgrade", "--dry-run", "imports/b/libs/d"]);
-    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    let ws = root_workspace(&env, &config);
+    ok(&gs(&ws, &["sync"]));
+    run_git_pub(&ws, &["switch", "-q", "-c", "feat/bump"]);
+    let out = gs(&ws, &["upgrade", "--dry-run", "imports/b/libs/d"]);
+    ok(&out);
     assert!(
         out.stdout.contains("imports/d   v1.0.0 → v1.1.0"),
         "{}",
         out.stdout
     );
-    assert_eq!(config_text(&env.playground), config);
+    assert_eq!(config_text(&ws), config);
 }
 
-/// A requester asking for a branch is reported and left alone, and with only
-/// the root to edit no topic is created.
+/// A requester asking for a branch is reported and left alone.
 #[test]
 fn edge_017_a_requester_on_a_branch_is_reported_and_left_alone() {
     let env = TestEnv::new("upgrade_raise_branch_requester");
@@ -640,6 +533,7 @@ fn edge_017_a_requester_on_a_branch_is_reported_and_left_alone() {
         ]),
     );
     ok(&gs(&ws, &["sync"]));
+    run_git_pub(&ws, &["switch", "-q", "-c", "feat/bump"]);
     let child = ws.join("imports/b");
     let child_before = config_text(&child);
 
@@ -651,8 +545,6 @@ fn edge_017_a_requester_on_a_branch_is_reported_and_left_alone() {
         "{}",
         out.stdout
     );
-    assert!(!out.stdout.contains("topic"), "{}", out.stdout);
-    assert_eq!(branch(&ws).as_deref(), Some("main"));
     assert_eq!(branch(&child), None);
     assert_eq!(config_text(&child), child_before);
     assert!(config_text(&ws).contains("revision = \"v1.1.0\""));
@@ -661,11 +553,12 @@ fn edge_017_a_requester_on_a_branch_is_reported_and_left_alone() {
 /// Overrides stop a raise where they stand: a dependency the root overrides
 /// is not raised at all, and a requester the root overrides cannot be
 /// joined, so its pin is reported and left — while the root's own entry
-/// is still raised, with no topic created.
+/// is still raised.
 #[test]
 fn edge_018_root_overrides_hold_what_a_raise_would_change() {
     let env = TestEnv::new("upgrade_raise_overrides");
     env.init_playground_git();
+    run_git_pub(&env.playground, &["switch", "-q", "-c", "feat/bump"]);
     let (b, d, _) = raise_graph(&env);
 
     let held = repos(&[
@@ -695,7 +588,6 @@ fn edge_018_root_overrides_hold_what_a_raise_would_change() {
         "{}",
         out.stdout
     );
-    assert!(!out.stdout.contains("topic"), "{}", out.stdout);
     assert_eq!(
         config_text(&env.playground),
         repos(&[
@@ -705,7 +597,7 @@ fn edge_018_root_overrides_hold_what_a_raise_would_change() {
     );
     assert_eq!(
         git(&env.playground, &["symbolic-ref", "--short", "HEAD"]),
-        "main"
+        "feat/bump"
     );
 }
 
@@ -715,6 +607,7 @@ fn edge_018_root_overrides_hold_what_a_raise_would_change() {
 fn edge_019_a_raise_with_nothing_to_raise_says_why_and_changes_nothing() {
     let f = fixture("upgrade_raise_nothing", "");
     let ws = f.clone_root("ws");
+    run_git_pub(&ws, &["switch", "-q", "-c", "feat/bump"]);
     let before = config_text(&ws);
     let out = gs(&ws, &["upgrade", "imports/core"]);
     ok(&out);
@@ -744,7 +637,8 @@ fn edge_019_a_raise_with_nothing_to_raise_says_why_and_changes_nothing() {
 // ---------------------------------------------------------------------------
 
 /// Each misuse of `upgrade` is refused with what to do instead, and leaves
-/// the config and the root's branch as they were.
+/// the config and the root's branch as they were. Off a topic both forms
+/// refuse: only `git topic start` begins one.
 #[test]
 fn error_020_misused_options_are_refused_and_change_nothing() {
     let env = TestEnv::new("upgrade_option_errors");
@@ -755,61 +649,42 @@ fn error_020_misused_options_are_refused_and_change_nothing() {
         ("imports/d", &d, ", revision = \"v1.2.0\""),
     ]);
     env.write_config(&config);
-    for (args, message) in [
-        (
-            &["upgrade", "--resolved", "--major"][..],
-            "it takes neither --major nor -c",
-        ),
-        (
-            &["upgrade", "--resolved", "-c", "feat/y"][..],
-            "it takes neither --major nor -c",
-        ),
-        (
-            &["upgrade", "--major"][..],
-            "--major raises a named dependency",
-        ),
-        (
-            &["upgrade", "-c", "feat/y"][..],
-            "-c names the topic an upgrade of named dependencies creates",
-        ),
-        (&["upgrade"][..], "not on a topic"),
-        (
-            &["upgrade", "imports/nowhere"][..],
-            "imports/nowhere is not a checkout of this workspace",
-        ),
-        (
-            &["upgrade", "--resolved", "imports/nowhere"][..],
-            "imports/nowhere is not an entry of the root .gitscale.toml",
-        ),
-    ] {
+    let refused = |args: &[&str], message: &str| {
         let out = env.run(args);
         assert!(!out.success, "{:?}: {}", args, out.stdout);
         assert!(out.stderr.contains(message), "{:?}: {}", args, out.stderr);
         assert_eq!(config_text(&env.playground), config, "{:?}", args);
-        assert_eq!(
-            git(&env.playground, &["symbolic-ref", "--short", "HEAD"]),
-            "main",
-            "{:?}",
-            args
-        );
-    }
-
-    // On a topic, -c may not name another one.
-    run_git_pub(&env.playground, &["switch", "-q", "-c", "feat/x"]);
-    let out = env.run(&["upgrade", "-c", "feat/y", "imports/d"]);
-    assert!(!out.success, "{}", out.stdout);
-    assert!(
-        out.stderr.contains("already on topic feat/x"),
-        "{}",
-        out.stderr
+    };
+    refused(&["upgrade", "--major"], "--major raises a named dependency");
+    refused(&["upgrade"], "not on a topic: git topic start NAME");
+    refused(
+        &["upgrade", "imports/d"],
+        "not on a topic: git topic start NAME",
     );
-    assert_eq!(config_text(&env.playground), config);
+    refused(
+        &["upgrade", "--resolved"],
+        "unexpected argument '--resolved'",
+    );
+    refused(
+        &["upgrade", "-c", "feat/y", "imports/d"],
+        "unexpected argument '-c'",
+    );
+    assert_eq!(
+        git(&env.playground, &["symbolic-ref", "--short", "HEAD"]),
+        "main"
+    );
+
+    run_git_pub(&env.playground, &["switch", "-q", "-c", "feat/x"]);
+    refused(
+        &["upgrade", "imports/nowhere"],
+        "imports/nowhere is not a checkout of this workspace",
+    );
 }
 
 /// `upgrade` edits the configs of a developer machine's checkouts; in CI,
 /// which keeps none, it refuses.
 #[test]
-fn error_021a_a_raise_refuses_in_ci() {
+fn error_021_upgrade_refuses_in_ci() {
     let env = TestEnv::new("upgrade_ci_raise");
     let (b, d) = diamond(&env);
     let config = repos(&[
@@ -827,23 +702,338 @@ fn error_021a_a_raise_refuses_in_ci() {
     assert_eq!(config_text(&env.playground), config);
 }
 
-/// The docs say every form of `upgrade` refuses in CI; `--resolved` too.
+/// A promotion that would delete a remote branch holding work its release
+/// lacks fails before anything changes: the branch, the config and the
+/// checkout's place on the topic all stay.
 #[test]
-#[ignore = "bug: upgrade --resolved runs in CI; it returns before the CI refusal (upgrade.rs:68-82)"]
-fn error_021b_resolved_refuses_in_ci() {
-    let env = TestEnv::new("upgrade_ci_resolved");
-    let (b, d) = diamond(&env);
-    let config = repos(&[
-        ("imports/b", &b, ", revision = \"v1.0.0\""),
-        ("imports/d", &d, ", revision = \"v1.2.0\""),
-    ]);
-    env.write_config(&config);
-    let out = env.run_with_env(&[("CI", "true")], &["upgrade", "--resolved"]);
+fn error_023_promotion_fails_while_the_remote_branch_holds_unreleased_work() {
+    let f = fixture("upgrade_promote_unreleased", "");
+    let ws = f.clone_root("ws");
+    run_git_pub(&ws, &["switch", "-q", "-c", "feat/x"]);
+    ok(&gs(&ws, &["topic", "join", "imports/core"]));
+    let child = ws.join("imports/core");
+    identity(&child);
+    std::fs::write(child.join("lib.txt"), "v2").unwrap();
+    run_git_pub(&child, &["commit", "-q", "-am", "the change"]);
+    ok(&gs(&ws, &["push"]));
+    let released = f.core_commit("main", "lib.txt", "v2");
+    run_git_pub(&f.core, &["tag", "v1.1.0", &released]);
+    // Pushed after the merge by someone else: not in the release.
+    let later = f.core_commit("feat/x", "more.txt", "after the merge");
+    let before = config_text(&ws);
+
+    for args in [&["upgrade", "--dry-run"][..], &["upgrade"][..]] {
+        let out = gs(&ws, args);
+        assert!(!out.success, "{:?}: {}", args, out.stdout);
+        assert!(
+            out.stderr.contains(
+                "imports/core: origin/feat/x has changes v1.1.0 does not hold; merge or drop \
+                 them, then run again"
+            ),
+            "{:?}: {}",
+            args,
+            out.stderr
+        );
+    }
+    assert_eq!(git(&f.core, &["rev-parse", "feat/x"]), later);
+    assert_eq!(config_text(&ws), before);
+    assert_eq!(branch(&child).as_deref(), Some("feat/x"));
+}
+
+/// A remote that refuses the deletion fails the promotion with no config
+/// edited; once the deletion can go through, running it again completes.
+#[test]
+fn error_024_a_refused_deletion_changes_no_config_and_a_second_run_completes() {
+    let f = fixture("upgrade_promote_refused", "");
+    let ws = f.clone_root("ws");
+    run_git_pub(&ws, &["switch", "-q", "-c", "feat/x"]);
+    ok(&gs(&ws, &["topic", "join", "imports/core"]));
+    let child = ws.join("imports/core");
+    identity(&child);
+    std::fs::write(child.join("lib.txt"), "v2").unwrap();
+    run_git_pub(&child, &["commit", "-q", "-am", "the change"]);
+    ok(&gs(&ws, &["push"]));
+    let released = f.core_commit("main", "lib.txt", "v2");
+    run_git_pub(&f.core, &["tag", "v1.1.0", &released]);
+    let hook = f.core.join("hooks/pre-receive");
+    crate::support::hooks::write_script(&hook, "echo protected >&2\nexit 1\n");
+    let before = config_text(&ws);
+
+    let out = gs(&ws, &["upgrade", "--commit"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(
-        out.stderr.contains("CI keeps none to edit"),
+        out.stderr
+            .contains("imports/core: cannot delete origin/feat/x; no config was changed"),
         "{}",
         out.stderr
     );
-    assert_eq!(config_text(&env.playground), config);
+    assert_eq!(config_text(&ws), before);
+    assert_eq!(branch(&child).as_deref(), Some("feat/x"));
+
+    std::fs::remove_file(&hook).unwrap();
+    let out = gs(&ws, &["upgrade", "--commit"]);
+    ok(&out);
+    assert!(
+        out.stdout.contains("imports/core: deleted origin/feat/x"),
+        "{}",
+        out.stdout
+    );
+    assert!(config_text(&ws).contains("revision = \"v1.1.0\""));
+    assert_eq!(branch(&child), None);
+}
+
+/// Promoting a checkout only its dependants ask for: the release goes into
+/// the config of each requester on the topic, a requester left at its pin
+/// keeps its older request, and the higher one wins once both are read.
+#[test]
+fn normal_025_promoting_an_implicit_checkout_edits_the_requesters_on_the_topic() {
+    let env = TestEnv::new("upgrade_promote_implicit");
+    let d = tagged(&env, "d", &[("v1.0.0", "")]);
+    let b = dependant(&env, "b", &[("libs/d", &d, ", revision = \"v1.0.0\"")]);
+    let c = dependant(&env, "c", &[("libs/d", &d, ", revision = \"v1.0.0\"")]);
+    let config = format!(
+        "{}{}",
+        allow(&env),
+        repos(&[
+            ("imports/b", &b, ", revision = \"v1.0.0\""),
+            ("imports/c", &c, ", revision = \"v1.0.0\""),
+        ])
+    );
+    let ws = root_workspace(&env, &config);
+    ok(&gs(&ws, &["sync"]));
+    run_git_pub(&ws, &["switch", "-q", "-c", "feat/x"]);
+    ok(&gs(&ws, &["topic", "join", "imports/d", "imports/b"]));
+    let child = ws.join("imports/d");
+    identity(&child);
+    identity(&ws.join("imports/b"));
+    std::fs::write(child.join("VERSION"), "changed").unwrap();
+    run_git_pub(&child, &["commit", "-q", "-am", "the change"]);
+    ok(&gs(&ws, &["push"]));
+    let released = env.push_commit(&d, "main", "VERSION", "changed");
+    run_git_pub(&d, &["tag", "v1.1.0", &released]);
+    let c_before = config_text(&ws.join("imports/c"));
+
+    let out = gs(&ws, &["upgrade", "--commit"]);
+    ok(&out);
+    assert!(
+        out.stdout
+            .contains("imports/b/.gitscale.toml   libs/d  v1.0.0 → v1.1.0"),
+        "{}",
+        out.stdout
+    );
+    assert!(config_text(&ws.join("imports/b")).contains("revision = \"v1.1.0\""));
+    assert_eq!(config_text(&ws.join("imports/c")), c_before);
+    assert_eq!(config_text(&ws), config);
+    ok(&gs(&ws, &["sync"]));
+    assert_eq!(support::worktrees::head(&child), released);
+}
+
+/// A raise only takes a release whose history holds the pin: a newer tag on
+/// a line split off before the pin would lose what the pin had. `--major`
+/// relaxes that, since a new major is often cut on a line of its own.
+#[test]
+fn normal_026_a_raise_skips_a_line_split_off_before_the_pin_unless_crossing_a_major() {
+    let f = fixture("upgrade_raise_split_line", "");
+    f.core_commit(
+        "main",
+        ".gitscale.toml",
+        "[branches]\npinned = [\"main\", \"maint\"]\n",
+    );
+    let ws = f.clone_root("ws");
+    run_git_pub(&ws, &["switch", "-q", "-c", "feat/bump"]);
+    let pin = f.core_commit("main", "lib.txt", "v1.1");
+    run_git_pub(&f.core, &["tag", "v1.1.0", &pin]);
+    std::fs::write(
+        ws.join(".gitscale.toml"),
+        config_text(&ws).replace("v1.0.0", "v1.1.0"),
+    )
+    .unwrap();
+    run_git_pub(&f.core, &["branch", "maint", "v1.0.0"]);
+    let split = f.core_commit("maint", "fix.txt", "a fix");
+    run_git_pub(&f.core, &["tag", "v1.5.0", &split]);
+    let major = f.core_commit("maint", "fix.txt", "a major");
+    run_git_pub(&f.core, &["tag", "v2.0.0", &major]);
+    let newer = f.core_commit("main", "lib.txt", "v1.2");
+    run_git_pub(&f.core, &["tag", "v1.2.0", &newer]);
+
+    let out = gs(&ws, &["upgrade", "--dry-run", "imports/core"]);
+    ok(&out);
+    assert!(
+        out.stdout.contains("imports/core   v1.1.0 → v1.2.0"),
+        "{}",
+        out.stdout
+    );
+    let out = gs(&ws, &["upgrade", "--dry-run", "--major", "imports/core"]);
+    ok(&out);
+    assert!(
+        out.stdout.contains("imports/core   v1.1.0 → v2.0.0"),
+        "{}",
+        out.stdout
+    );
+}
+
+/// Promotion takes the newest release that holds the change: a newer
+/// hotfix cut from the pin, without the change, is walked past rather than
+/// reported as `no tag`.
+#[test]
+fn normal_027_promotion_takes_the_newest_release_that_holds_the_change() {
+    let f = fixture("upgrade_promote_past_hotfix", "");
+    let ws = f.clone_root("ws");
+    run_git_pub(&ws, &["switch", "-q", "-c", "feat/x"]);
+    ok(&gs(&ws, &["topic", "join", "imports/core"]));
+    let child = ws.join("imports/core");
+    identity(&child);
+    std::fs::write(child.join("lib.txt"), "v2").unwrap();
+    run_git_pub(&child, &["commit", "-q", "-am", "the change"]);
+    ok(&gs(&ws, &["push"]));
+    let released = f.core_commit("main", "lib.txt", "v2");
+    run_git_pub(&f.core, &["tag", "v1.1.0", &released]);
+    run_git_pub(&f.core, &["branch", "hotfix", "v1.0.0"]);
+    let hotfix = f.core_commit("hotfix", "other.txt", "a hotfix");
+    run_git_pub(&f.core, &["tag", "v1.2.0", &hotfix]);
+
+    let out = gs(&ws, &["upgrade", "--dry-run"]);
+    ok(&out);
+    assert!(
+        out.stdout.contains("imports/core  promoted → v1.1.0"),
+        "{}",
+        out.stdout
+    );
+}
+
+/// A repository's releases are the tags its pinned branches hold — by
+/// default its default branch alone — as its default branch's config says,
+/// so a pin older than the policy follows it too.
+#[test]
+fn normal_028_pinned_branches_bind_the_tags_a_raise_takes() {
+    let f = fixture("upgrade_release_branches", "");
+    let ws = f.clone_root("ws");
+    run_git_pub(&ws, &["switch", "-q", "-c", "feat/bump"]);
+    run_git_pub(&f.core, &["branch", "hotfix", "v1.0.0"]);
+    let hotfix = f.core_commit("hotfix", "fix.txt", "a hotfix");
+    run_git_pub(&f.core, &["tag", "v1.1.0", &hotfix]);
+
+    // On a branch it does not pin: no release.
+    let out = gs(&ws, &["upgrade", "--dry-run", "imports/core"]);
+    ok(&out);
+    assert!(
+        out.stdout
+            .contains("imports/core is already at its newest release, v1.0.0"),
+        "{}",
+        out.stdout
+    );
+
+    f.core_commit(
+        "main",
+        ".gitscale.toml",
+        "[branches]\npinned = [\"main\", \"hotfix\"]\n",
+    );
+    let out = gs(&ws, &["upgrade", "--dry-run", "imports/core"]);
+    ok(&out);
+    assert!(
+        out.stdout.contains("imports/core   v1.0.0 → v1.1.0"),
+        "{}",
+        out.stdout
+    );
+}
+
+/// Pinned branches that name no branch of the repository are an error that
+/// says which repository — not an empty list of candidates that would read
+/// as "no release".
+#[test]
+fn error_029_pinned_branches_matching_no_branch_say_so() {
+    let f = fixture("upgrade_release_branches_none", "");
+    let ws = f.clone_root("ws");
+    run_git_pub(&ws, &["switch", "-q", "-c", "feat/bump"]);
+    f.core_commit(
+        "main",
+        ".gitscale.toml",
+        "[branches]\npinned = [\"release/*\"]\n",
+    );
+    let out = gs(&ws, &["upgrade", "--dry-run", "imports/core"]);
+    assert!(!out.success, "{}", out.stdout);
+    assert!(
+        out.stderr.contains(&format!(
+            "no branch of {} is pinned: [branches] pinned = release/*, so it has no releases",
+            f.core.display()
+        )),
+        "{}",
+        out.stderr
+    );
+}
+
+/// A pin no release holds — cut on a branch the repository does not pin —
+/// says so, rather than `no tag`.
+#[test]
+fn edge_030_a_pin_no_release_holds_says_so() {
+    let f = fixture("upgrade_no_release_holds_pin", "");
+    let side = f.core_commit("side", "lib.txt", "side");
+    run_git_pub(&f.core, &["tag", "v1.0.1", &side]);
+    let ws = f.clone_root("ws");
+    std::fs::write(
+        ws.join(".gitscale.toml"),
+        config_text(&ws).replace("v1.0.0", "v1.0.1"),
+    )
+    .unwrap();
+    ok(&gs(&ws, &["sync"]));
+    run_git_pub(&ws, &["switch", "-q", "-c", "feat/x"]);
+    ok(&gs(&ws, &["topic", "join", "imports/core"]));
+    let child = ws.join("imports/core");
+    identity(&child);
+    std::fs::write(child.join("lib.txt"), "v2").unwrap();
+    run_git_pub(&child, &["commit", "-q", "-am", "the change"]);
+
+    let out = gs(&ws, &["upgrade", "--dry-run"]);
+    ok(&out);
+    assert!(
+        out.stdout
+            .contains("imports/core  no release contains v1.0.1"),
+        "{}",
+        out.stdout
+    );
+}
+
+/// A repository that publishes artefacts is released when its tag's image is
+/// there too — whatever form this workspace takes it in. Until then the
+/// promotion waits, saying so.
+#[test]
+fn normal_031_promotion_waits_for_the_image_of_a_repository_that_publishes_one() {
+    let f = fixture("upgrade_promote_waits_for_image", "");
+    let ws = f.clone_root("ws");
+    std::fs::write(
+        ws.join(".gitscale.toml"),
+        format!("{}{}", f.env.registries(), config_text(&ws)),
+    )
+    .unwrap();
+    run_git_pub(&ws, &["switch", "-q", "-c", "feat/x"]);
+    ok(&gs(&ws, &["topic", "join", "imports/core"]));
+    let child = ws.join("imports/core");
+    identity(&child);
+    std::fs::write(child.join("lib.txt"), "v2").unwrap();
+    run_git_pub(&child, &["commit", "-q", "-am", "the change"]);
+    ok(&gs(&ws, &["push"]));
+    f.core_commit("main", "lib.txt", "v2");
+    let released = f.core_commit(
+        "main",
+        ".gitscale.toml",
+        "[artefact]\ninclude = [\"dist/**\"]\n",
+    );
+    run_git_pub(&f.core, &["tag", "v1.1.0", &released]);
+
+    let out = gs(&ws, &["upgrade", "--dry-run"]);
+    ok(&out);
+    assert!(
+        out.stdout.contains("imports/core  tagged v1.1.0, no image"),
+        "{}",
+        out.stdout
+    );
+
+    f.env.publish(&f.core, "v1.1.0", &[("lib.bin", "built")]);
+    let out = gs(&ws, &["upgrade", "--dry-run"]);
+    ok(&out);
+    assert!(
+        out.stdout.contains("imports/core  promoted → v1.1.0"),
+        "{}",
+        out.stdout
+    );
 }

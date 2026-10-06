@@ -141,7 +141,7 @@ pub(crate) fn glob_match(pattern: &str, subject: &str) -> bool {
 }
 
 /// `*` and `?` matching, `*` crossing `/`, and nothing else special — what
-/// both the allowlist and `[develop] pinned` mean by a pattern. Case matters
+/// both the allowlist and `[branches] pinned` mean by a pattern. Case matters
 /// here; [`glob_match`] is the case-insensitive form repository names want.
 pub(crate) fn wildcard_match(pattern: &str, subject: &str) -> bool {
     let pat: Vec<char> = pattern.chars().collect();

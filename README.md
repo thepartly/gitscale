@@ -48,10 +48,10 @@ git scale ls
 ```
 
 ```
-    REPO             PATH   ARTEFACT   REF       EXPECTED   STATUS    RESOLUTION
-✔   imports/core     -      -          8c1d0e2   main       ok
-⤷   imports/shared   ../s   -          8c1d0e2   main       symlink
-✔   imports/utils    -      -          3f2a9c1   v2.3       ok        raised from v2.1 by imports/core, 2 requests
+    REPO             PATH   AS         REF       EXPECTED   STATUS    RESOLUTION
+✔   imports/core     -      source     8c1d0e2   main       ok
+⤷   imports/shared   ../s   source     8c1d0e2   main       symlink
+✔   imports/utils    -      source     3f2a9c1   v2.3       ok        raised from v2.1 by imports/core, 2 requests
 hint: git explain <dir> lists every request behind a revision
 ```
 
@@ -97,10 +97,10 @@ See [everyday workflow](docs/workflow.md) and [topics](docs/topics.md).
   plus gitlink entries.
 - **Read-only checkouts at their pins**, writable only once joined to the
   topic.
-- **Artefacts** — the build output the repository's own pipeline published with
-  `gitscale artefact publish`, one OCI image per commit, pulled from GitLab's
-  registry, GHCR or any other: instead of a checkout (`replace`) or laid over
-  one (`overlay`).
+- **Artefacts** — the build output of a release, published by the repository's
+  own pipeline with `gitscale artefact publish` to GitLab's registry, GHCR or
+  any other, and installed instead of a checkout — each workspace's choice, per
+  dependency, with `git scale prefer`.
 - **Transitive dependencies resolved as one graph**: every repository asks for
   what it needs, the highest version wins, each major is checked out once and
   linked into every dependant, and dependencies the root never names are

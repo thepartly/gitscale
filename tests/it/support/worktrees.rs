@@ -146,13 +146,12 @@ pub fn ci_job(dir: &Path, cache: &Path, branch: &str, args: &[&str]) -> super::C
     }
 }
 
-/// A root whose `meta/app` uses `app`'s artefact as `artefact_use`.
-pub fn artefact_workspace(env: &TestEnv, app: &Path, artefact_use: &str) -> PathBuf {
+/// A root whose `meta/app` is `app`, taken as `form`.
+pub fn artefact_workspace(env: &TestEnv, app: &Path, form: gitscale::prefer::Form) -> PathBuf {
     let config = format!(
-        "{}[repos]\n\"meta/app\" = {{ url = \"{}\", revision = \"main\", artefact = \"{}\" }}\n",
+        "{}[repos]\n\"meta/app\" = {{ url = \"{}\", revision = \"v1.0.0\" }}\n",
         env.registries(),
         app.display(),
-        artefact_use
     );
     let root = env.create_bare_repo("root", "main", &[(".gitscale.toml", &config)]);
     let ws = env.repos_remote.join("ws");
@@ -161,6 +160,7 @@ pub fn artefact_workspace(env: &TestEnv, app: &Path, artefact_use: &str) -> Path
         &["clone", "-q", root.to_str().unwrap(), ws.to_str().unwrap()],
     );
     identity(&ws);
+    super::prefer(&ws, app, form);
     ws
 }
 

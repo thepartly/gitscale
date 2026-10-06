@@ -296,21 +296,26 @@ allow = ["{}/*"]
     assert!(row.contains("implicit via repoA"), "{}", status);
 }
 
+/// A checkout taken as an artefact has the dependencies its repository's
+/// config declares, linked inside it like any checkout's.
 #[test]
-fn normal_006_an_artefact_config_layer_declares_dependencies() {
+fn normal_006_an_artefacts_dependencies_are_linked_inside_it() {
     let env = TestEnv::new("recursive_artefact_config");
     let bare_dep = env.create_bare_repo("dep", "main", &[("dep.txt", "dep content")]);
     let bare_art = env.create_bare_repo("art", "main", &[("README.md", "art")]);
-    run_git_pub(&bare_art, &["tag", "v1", "main"]);
-
-    // The producer's own .gitscale.toml declares the dependency; publish
-    // ships it as the image's config layer.
     let producer = format!(
         "[artefact]\ninclude = [\"dist/**\"]\n\n[repos]\n\"vendor/dep\" = {{ url = \"{}\", revision = \"main\" }}\n",
         bare_dep.display()
     );
-    let (published, _) =
-        env.publish_with(&bare_art, "v1", &producer, &[("art.bin", "binary")], &[]);
+    let released = env.push_commit(&bare_art, "main", ".gitscale.toml", &producer);
+    run_git_pub(&bare_art, &["tag", "v1.0.0", &released]);
+    let (published, _) = env.publish_with(
+        &bare_art,
+        "v1.0.0",
+        &producer,
+        &[("art.bin", "binary")],
+        &["v1.0.0"],
+    );
     assert!(
         published.success,
         "{}{}",
@@ -318,9 +323,10 @@ fn normal_006_an_artefact_config_layer_declares_dependencies() {
     );
 
     // Root declares both artefact and the dep
+    env.prefer(&bare_art, gitscale::prefer::Form::Artefact);
     env.write_config(&format!(
         r#"{}[repos]
-"meta/art" = {{ url = "{}", revision = "v1", artefact = "replace" }}
+"meta/art" = {{ url = "{}", revision = "v1.0.0" }}
 "dep" = {{ url = "{}", revision = "main" }}
 "#,
         env.registries(),
@@ -496,10 +502,10 @@ fn normal_010_calendar_versions_order_by_date_then_modifier() {
         &env,
         "d",
         &[
-            ("v2026.09.30-rc1", ""),
-            ("v2026.09.30", ""),
-            ("v2026.09.30-2", ""),
-            ("v2026.09.30-11", ""),
+            ("v1-2026.09.30-rc1", ""),
+            ("v1-2026.09.30", ""),
+            ("v1-2026.09.30-2", ""),
+            ("v1-2026.09.30-11", ""),
         ],
     );
     let b = tagged(
@@ -507,7 +513,7 @@ fn normal_010_calendar_versions_order_by_date_then_modifier() {
         "b",
         &[(
             "v1.0.0",
-            &repos(&[("libs/d", &d, ", revision = \"v2026.09.30-11\"")]),
+            &repos(&[("libs/d", &d, ", revision = \"v1-2026.09.30-11\"")]),
         )],
     );
     let c = tagged(
@@ -515,17 +521,17 @@ fn normal_010_calendar_versions_order_by_date_then_modifier() {
         "c",
         &[(
             "v1.0.0",
-            &repos(&[("libs/d", &d, ", revision = \"v2026.09.30-2\"")]),
+            &repos(&[("libs/d", &d, ", revision = \"v1-2026.09.30-2\"")]),
         )],
     );
     env.write_config(&repos(&[
         ("imports/b", &b, ", revision = \"v1.0.0\""),
         ("imports/c", &c, ", revision = \"v1.0.0\""),
-        ("imports/d", &d, ", revision = \"v2026.09.30\""),
+        ("imports/d", &d, ", revision = \"v1-2026.09.30\""),
     ]));
     let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
-    assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v2026.09.30-11"));
+    assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v1-2026.09.30-11"));
     // The reason is the calendar order, not position: b and c are siblings.
     let why = env.run(&["explain", "imports/d"]);
     assert!(why.success, "{}", why.stderr);
@@ -536,10 +542,11 @@ fn normal_010_calendar_versions_order_by_date_then_modifier() {
     );
 }
 
-/// An artefact's dependencies travel in its image's config layer: resolved
-/// before anything is installed, and linked inside the artefact checkout.
+/// The dependencies of a checkout taken as an artefact are resolved from its
+/// repository's config before anything is installed, checked out implicitly
+/// and linked inside the artefact.
 #[test]
-fn normal_011_an_artefact_brings_its_dependencies_in_its_config_layer() {
+fn normal_011_an_artefacts_dependencies_are_checked_out_implicitly() {
     let env = TestEnv::new("res_artefact_deps");
     let dep = tagged(&env, "dep", &[("v1.0.0", "")]);
     let art = env.create_bare_repo("art", "main", &[("README.md", "art")]);
@@ -547,22 +554,22 @@ fn normal_011_an_artefact_brings_its_dependencies_in_its_config_layer() {
         "[artefact]\ninclude = [\"dist/**\"]\n\n{}",
         repos(&[("vendor/dep", &dep, ", revision = \"v1.0.0\"")])
     );
-    let (published, _) = env.publish_with(&art, "main", &producer, &[("app.bin", "x")], &[]);
+    env.push_commit(&art, "main", ".gitscale.toml", &producer);
+    run_git_pub(&art, &["tag", "v1.0.0", "main"]);
+    let (published, _) =
+        env.publish_with(&art, "main", &producer, &[("app.bin", "x")], &["v1.0.0"]);
     assert!(
         published.success,
         "{}{}",
         published.stdout, published.stderr
     );
 
+    env.prefer(&art, gitscale::prefer::Form::Artefact);
     env.write_config(&format!(
         "{}{}{}",
         env.registries(),
         allow(&env),
-        repos(&[(
-            "meta/app",
-            &art,
-            ", revision = \"main\", artefact = \"replace\""
-        )])
+        repos(&[("meta/app", &art, ", revision = \"v1.0.0\"")])
     ));
     let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
@@ -901,15 +908,19 @@ fn normal_031_two_streams_of_one_monorepo_are_ordered_by_position() {
     assert!(out.stderr.contains("cannot order"), "{}", out.stderr);
 }
 
-/// A repository that moved from semver to calendar versions, asked for in
-/// both: a calendar version is a class of its own, so each gets a checkout
-/// rather than an error. Pinned as the docs describe it.
+/// A repository that moved from semver to calendar versions at its next
+/// major, asked for in both: two majors, so each gets a checkout rather than
+/// an error.
 #[test]
 fn normal_032_semver_and_calendar_versions_of_one_repository_get_a_checkout_each() {
     let env = TestEnv::new("resolution_semver_calver");
-    let d = tagged(&env, "d", &[("v1.5.0", ""), ("v2026.10.01", "")]);
+    let d = tagged(&env, "d", &[("v1.5.0", ""), ("v2-2026.10.01", "")]);
     let b = dependant(&env, "b", &[("libs/d", &d, ", revision = \"v1.5.0\"")]);
-    let c = dependant(&env, "c", &[("libs/d", &d, ", revision = \"v2026.10.01\"")]);
+    let c = dependant(
+        &env,
+        "c",
+        &[("libs/d", &d, ", revision = \"v2-2026.10.01\"")],
+    );
     env.write_config(&format!(
         "{}{}",
         allow(&env),
@@ -920,8 +931,8 @@ fn normal_032_semver_and_calendar_versions_of_one_repository_get_a_checkout_each
     ));
     let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
-    assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v2026.10.01"));
-    assert_eq!(head(&env, "imports/d_v1"), tag_commit(&d, "v1.5.0"));
+    assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v1.5.0"));
+    assert_eq!(head(&env, "imports/d_v2"), tag_commit(&d, "v2-2026.10.01"));
     assert!(status_row(&env, "imports/d").contains("2 majors"));
 }
 
@@ -1043,23 +1054,15 @@ fn normal_035_ssh_and_https_spellings_of_one_repository_share_a_checkout() {
     assert!(row.contains("raised from v1.2.0 by imports/b"), "{}", table);
 }
 
-/// An implicit checkout is an overlay when any request asks for one — the
-/// source, with the build laid over it — and still one checkout.
+/// An implicit checkout takes the form the workspace prefers, as a declared
+/// one does: here the artefact of its release.
 #[test]
-fn normal_036_an_implicit_checkout_is_an_overlay_when_any_request_asks_for_one() {
-    let env = TestEnv::new("resolution_implicit_overlay");
+fn normal_036_an_implicit_checkout_takes_the_workspaces_preference() {
+    let env = TestEnv::new("resolution_implicit_artefact");
     let art = env.artefact_repo("art", &[("art.bin", "built")]);
-    run_git_pub(&art, &["tag", "v1.0.0", "main"]);
-    let b = dependant(
-        &env,
-        "b",
-        &[(
-            "libs/art",
-            &art,
-            ", revision = \"v1.0.0\", artefact = \"overlay\"",
-        )],
-    );
+    let b = dependant(&env, "b", &[("libs/art", &art, ", revision = \"v1.0.0\"")]);
     let c = dependant(&env, "c", &[("libs/art", &art, ", revision = \"v1.0.0\"")]);
+    env.prefer(&art, gitscale::prefer::Form::Artefact);
     env.write_config(&format!(
         "{}{}{}",
         env.registries(),
@@ -1072,12 +1075,8 @@ fn normal_036_an_implicit_checkout_is_an_overlay_when_any_request_asks_for_one()
     let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     let dest = env.playground.join("imports/art");
-    assert!(dest.join(".git").is_file(), "a source checkout");
-    assert!(
-        dest.join("dist/art.bin").is_file(),
-        "with the build over it"
-    );
-    assert!(!env.playground.join("imports/art_artefact").exists());
+    assert!(!dest.join(".git").exists(), "not a source checkout");
+    assert!(dest.join("dist/art.bin").is_file(), "the image");
 }
 
 /// `git explain` with nothing named and no checkout more than one
@@ -1152,7 +1151,6 @@ fn edge_017_a_revision_a_dependency_asks_for_leaves_the_workspace_repo_alone() {
     let root_head = git_stdout(&env.playground, &["rev-parse", "HEAD"]);
     // No revision: the default branch's commit, whatever the branch is called.
     let bare_art = env.artefact_repo("art", &[("art.bin", "binary")]);
-    run_git_pub(&bare_art, &["tag", "v9", "main"]);
     let bare_a = env.create_bare_repo(
         "repoA",
         "main",
@@ -1161,16 +1159,17 @@ fn edge_017_a_revision_a_dependency_asks_for_leaves_the_workspace_repo_alone() {
             (
                 ".gitscale.toml",
                 &format!(
-                    "[repos]\n\"libs/art\" = {{ url = \"{}\", revision = \"v9\" }}\n",
+                    "[repos]\n\"libs/art\" = {{ url = \"{}\", revision = \"v1.0.0\" }}\n",
                     bare_art.display()
                 ),
             ),
         ],
     );
+    env.prefer(&bare_art, gitscale::prefer::Form::Artefact);
     env.write_config(&format!(
         r#"{}[repos]
 "repoA" = {{ url = "{}", revision = "main" }}
-"meta/art" = {{ url = "{}", artefact = "replace" }}
+"meta/art" = {{ url = "{}" }}
 "#,
         env.registries(),
         bare_a.display(),
@@ -1333,22 +1332,16 @@ fn edge_020_an_uncommitted_config_edit_takes_effect() {
     assert!(row.contains("ref-mismatch"), "{}", row);
 }
 
-/// The source and the built artefact of one repository are two checkouts.
+/// How the workspace takes a repository plays no part in resolution: two
+/// requests for it are one checkout, the image when the workspace prefers
+/// its artefact, and both requesters link to it.
 #[test]
-fn edge_021_an_artefact_beside_the_source_of_one_repository() {
+fn edge_021_one_checkout_whatever_form_the_workspace_takes_it_in() {
     let env = TestEnv::new("res_place_artefact");
     let d = env.artefact_repo("d", &[("d.bin", "built")]);
-    run_git_pub(&d, &["tag", "v1.0.0", "main"]);
     let b = dependant(&env, "b", &[("libs/d", &d, ", revision = \"v1.0.0\"")]);
-    let c = dependant(
-        &env,
-        "c",
-        &[(
-            "libs/d",
-            &d,
-            ", revision = \"v1.0.0\", artefact = \"replace\"",
-        )],
-    );
+    let c = dependant(&env, "c", &[("libs/d", &d, ", revision = \"v1.0.0\"")]);
+    env.prefer(&d, gitscale::prefer::Form::Artefact);
     env.write_config(&format!(
         "{}{}{}",
         env.registries(),
@@ -1361,19 +1354,16 @@ fn edge_021_an_artefact_beside_the_source_of_one_repository() {
     let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert!(
-        env.playground.join("imports/d/README.md").is_file(),
-        "the source"
-    );
-    assert!(
-        env.playground
-            .join("imports/d_artefact/dist/d.bin")
-            .is_file(),
+        env.playground.join("imports/d/dist/d.bin").is_file(),
         "the build"
     );
-    assert_eq!(
-        std::fs::read_link(env.playground.join("imports/c/libs/d")).unwrap(),
-        PathBuf::from("../../d_artefact")
-    );
+    assert!(!env.playground.join("imports/d/.git").exists(), "no source");
+    for requester in ["imports/b", "imports/c"] {
+        assert_eq!(
+            std::fs::read_link(env.playground.join(requester).join("libs/d")).unwrap(),
+            PathBuf::from("../../d")
+        );
+    }
 }
 
 /// Where the root's store holds history, a winner by position that is behind
@@ -1598,18 +1588,16 @@ fn edge_041_an_implicit_checkout_reads_its_dependencies_unless_every_request_say
     assert!(env.playground.join("imports/d/libs/e").is_symlink());
 }
 
-/// An implicit checkout of a class that has no suffix — a calendar version —
-/// whose plain name is the root's checkout of another major, is placed at
-/// `_any` beside it. Current behaviour, pinned: the suffix is the class's
-/// name, and nothing documents it.
+/// An implicit checkout of a calendar major whose plain name is the root's
+/// checkout of another major is placed beside it, with its major's suffix.
 #[test]
-fn edge_042_an_implicit_calendar_version_beside_a_root_major_is_placed_at_any() {
+fn edge_042_an_implicit_calendar_major_beside_a_root_major_takes_its_suffix() {
     let env = TestEnv::new("resolution_any_suffix");
-    let d = tagged(&env, "d", &[("v2.0.0", ""), ("v2026.10.01", "")]);
+    let d = tagged(&env, "d", &[("v2.0.0", ""), ("v1-2026.10.01", "")]);
     let b = dependant(
         &env,
         "b",
-        &[("libs/mylib", &d, ", revision = \"v2026.10.01\"")],
+        &[("libs/mylib", &d, ", revision = \"v1-2026.10.01\"")],
     );
     env.write_config(&format!(
         "{}{}",
@@ -1623,12 +1611,12 @@ fn edge_042_an_implicit_calendar_version_beside_a_root_major_is_placed_at_any() 
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(head(&env, "imports/mylib"), tag_commit(&d, "v2.0.0"));
     assert_eq!(
-        head(&env, "imports/mylib_any"),
-        tag_commit(&d, "v2026.10.01")
+        head(&env, "imports/mylib_v1"),
+        tag_commit(&d, "v1-2026.10.01")
     );
     assert_eq!(
         std::fs::read_link(env.playground.join("imports/b/libs/mylib")).unwrap(),
-        PathBuf::from("../../mylib_any")
+        PathBuf::from("../../mylib_v1")
     );
 }
 
@@ -2236,4 +2224,66 @@ fn perf_052_a_deep_chain_fetches_each_repository_once() {
     assert_eq!(fetches(&argvs).len(), chain.len());
     assert!(env.playground.join("imports/c009/VERSION").is_file());
     assert!(env.playground.join("imports/c008/libs/c009").is_symlink());
+}
+
+/// Calendar versions of two majors are two checkouts, as semver majors are.
+#[test]
+fn normal_057_calendar_majors_get_a_checkout_each() {
+    let env = TestEnv::new("resolution_calver_majors");
+    let d = tagged(
+        &env,
+        "d",
+        &[("v1-2026.10.01-1", ""), ("v2-2026.11.02-1", "")],
+    );
+    let b = dependant(
+        &env,
+        "b",
+        &[("libs/d", &d, ", revision = \"v1-2026.10.01-1\"")],
+    );
+    let c = dependant(
+        &env,
+        "c",
+        &[("libs/d", &d, ", revision = \"v2-2026.11.02-1\"")],
+    );
+    env.write_config(&format!(
+        "{}{}",
+        allow(&env),
+        repos(&[
+            ("imports/b", &b, ", revision = \"v1.0.0\""),
+            ("imports/c", &c, ", revision = \"v1.0.0\""),
+        ])
+    ));
+    let out = env.run(&["sync"]);
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    assert_eq!(head(&env, "imports/d"), tag_commit(&d, "v1-2026.10.01-1"));
+    assert_eq!(
+        head(&env, "imports/d_v2"),
+        tag_commit(&d, "v2-2026.11.02-1")
+    );
+}
+
+/// A tag with a prefix is not a version, so two of them asked for by
+/// siblings cannot be ordered, however their numbers compare.
+#[test]
+fn error_058_prefixed_tags_from_siblings_cannot_be_ordered() {
+    let env = TestEnv::new("resolution_prefixed_tags");
+    let d = tagged(&env, "d", &[("api-v1.4.0", ""), ("api-v1.5.0", "")]);
+    let b = dependant(&env, "b", &[("libs/d", &d, ", revision = \"api-v1.4.0\"")]);
+    let c = dependant(&env, "c", &[("libs/d", &d, ", revision = \"api-v1.5.0\"")]);
+    env.write_config(&format!(
+        "{}{}",
+        allow(&env),
+        repos(&[
+            ("imports/b", &b, ", revision = \"v1.0.0\""),
+            ("imports/c", &c, ", revision = \"v1.0.0\""),
+        ])
+    ));
+    let out = env.run(&["sync"]);
+    assert!(!out.success, "{}", out.stdout);
+    assert!(
+        out.stderr
+            .contains("cannot order api-v1.4.0 against api-v1.5.0"),
+        "{}",
+        out.stderr
+    );
 }

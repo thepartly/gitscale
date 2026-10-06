@@ -76,8 +76,8 @@ workspace/
 ```
 
 ```
-    REPO        PATH   ARTEFACT   REF       EXPECTED   STATUS   RESOLUTION
-✔   imports/d   -      -          3f2a9c1   v1.5.0     ok       raised from v1.2.0 by imports/c, 3 requests
+    REPO        PATH   AS         REF       EXPECTED   STATUS   RESOLUTION
+✔   imports/d   -      source     3f2a9c1   v1.5.0     ok       raised from v1.2.0 by imports/c, 3 requests
 hint: git explain <dir> lists every request behind a revision
 ```
 
@@ -93,20 +93,22 @@ Every entry in every config read is a request: who asked, the path it came by
 requests like any other — so the root can raise a dependency, but not lower it
 without an [override](#overrides).
 
-Requests land in checkouts — *slots* — keyed by three things:
+Requests land in checkouts — *slots* — keyed by two things:
 
 - **The repository**, by URL, normalised so that SSH and HTTPS spellings of one
   repository are the same.
-- **Its major**: the semver major, or for `0.x` the minor, as Cargo has it. A
-  calendar version is in one class of its own. A branch or a commit has no
+- **Its major**: the semver or calendar major, or for semver `0.x` the minor,
+  as Cargo has it. A branch or a commit has no
   major: it joins the checkout its repository's versions are in, and is an
   error when those are two majors.
-- **Source or artefact.** A built artefact and the source tree are different
-  files, and never share a checkout.
+
+How the workspace takes the checkout — its sources, or its
+[artefact](artefacts.md#choosing-how-a-checkout-arrives) — is no part of the
+key: every request for a repository is one request.
 
 An entry with no revision asks for nothing, and follows whatever the others
-ask for. In the root's config it still chooses where the checkout goes and
-whether it is an artefact; in a dependency's it only names the link inside
+ask for. In the root's config it still chooses where the checkout goes; in a
+dependency's it only names the link inside
 that dependency. When nobody asks for anything, the checkout follows the
 remote's default branch.
 
@@ -115,30 +117,30 @@ remote's default branch.
 | Request 1 | Request 2 | Result |
 |---|---|---|
 | semver | semver, same major | The higher version, spelt as its own tag (`1.2.4` stays `1.2.4`) |
-| calendar version | calendar version, same stream | The higher version |
+| calendar version | calendar version, same major | The higher version |
 | same revision, or the same commit | | Equal |
 | anything else | | **Position**: the request from the repository above the other wins |
 
-*Position* is what decides when two requests are not versions of one stream —
-a branch against a tag, a commit, tags of two streams. Repository P is *above*
+*Position* is what decides when two requests are not versions of one kind —
+a branch against a tag, a commit, semver against a calendar version. Repository P is *above*
 Q — dominates it — when every path from the root to Q passes through P: Q is in
 the workspace only because P needs it. The root is above everything, so a root
 entry at `main` wins over any dependency's version. Two requests neither of
 which is above the other cannot be ordered, and resolution fails:
 
 ```
-Error: cannot order main against v2026.09.30: they are not versions of one
-stream, and neither repository is above the other. Ask for versions in both,
+Error: cannot order main against v1-2026.09.30: they are not versions of one
+kind, and neither repository is above the other. Ask for versions in both,
 or set the revision in a repository above both, such as the root
 ```
 
 No git history is read, so a shallow CI checkout resolves exactly as a
 developer machine does. On a developer machine, where the stores hold the
 history anyway, a winner that turns out to be behind what a losing request
-asked for is flagged in `ls` — `behind imports/c's v2026.09.30` — without
+asked for is flagged in `ls` — `behind imports/c's v1-2026.09.30` — without
 changing the result.
 
-What counts as a semver or a calendar version, and what a stream is, is in
+What counts as a semver or a calendar version is in
 [revision kinds](dependencies.md#revision-kinds).
 
 ### Only selected revisions ask for more
@@ -199,8 +201,6 @@ allow = ["github.com/partner-org/*"]   # see below
   dependant declared: `vendor/shared` lands at `imports/shared`.
 - When dependants name it differently, the repository's own name from its URL.
 - A second major gets a suffix — see [two majors](#two-majors-of-one-repository).
-- An artefact checkout of a repository that also has a source checkout gets
-  `_artefact`.
 - Two repositories wanting one path is an error; declare one at the root under
   another directory.
 
@@ -209,15 +209,15 @@ Like every checkout, they are kept out of the root's `git status` — see
 
 ### Source or artefact
 
-An implicit checkout is a `replace` artefact when that is what was asked for,
-and an `overlay` when any request asks for one; otherwise it is a checkout of
-the source. Like every checkout it is detached and read-only until
-[joined to a topic](topics.md#git-topic-join--leave). To choose for yourself, declare it at
-the root with no revision — the root then chooses its path and whether it is an
-artefact, while the revision still comes from resolution:
+An implicit checkout arrives as any checkout does: its sources, unless the
+workspace [prefers](artefacts.md#choosing-how-a-checkout-arrives) its artefact,
+or cannot read its sources. Like every checkout it is detached
+and read-only until [joined to a topic](topics.md#git-topic-join--leave). To
+choose its path for yourself, declare it at the root with no revision — the
+revision still comes from resolution:
 
 ```toml
-"imports/d" = { url = "git@github.com:org/d.git", artefact = "overlay" }
+"imports/d" = { url = "git@github.com:org/d.git" }
 ```
 
 ### The allowlist
@@ -287,7 +287,7 @@ linked. `ls` prints it above the table and marks the rows `unresolved`.
 | Error | When |
 |---|---|
 | `cycle` | A chain of dependencies comes back to a repository already on it, the root included. Checked across every revision resolution considers, not only the ones selected, which is what guarantees resolution ends |
-| `cannot order` | Two requests that are not versions of one stream, neither from a repository above the other |
+| `cannot order` | Two requests that are not versions of one kind, neither from a repository above the other |
 | `override conflict` | An override below a request it is not above |
 | `conflicting overrides` | Two overrides neither above the other, at different commits |
 | `two repositories want` | Two implicit checkouts on one path |
@@ -307,8 +307,8 @@ the next [placement](workflow.md#placement).
   [`clean`](clean.md), never go through a link: the checkout it points to is
   reached under its own path.
 - `ls` shows them as `⤷ symlink`, with the link target in the `PATH` column.
-- An artefact's dependencies come from the `.gitscale.toml` its image carries,
-  and are linked inside the extracted artefact — see
+- A checkout taken as an artefact has its dependencies linked inside the
+  extracted image like any checkout's — see
   [artefacts](artefacts.md#what-gets-published).
 - Symlink dedup is a Unix mechanism; GitScale runs on Linux and macOS. Windows
   is [planned](plans/windows-support.md).
@@ -364,7 +364,7 @@ never touched.
 |---|---|
 | The [hook](hooks.md#git-hooks) in the root (clone, `switch`, a merging `pull`, `worktree add`) | Online |
 | `git scale sync`, `check`, `require`, `unrequire`, `git scale pull` | Online |
-| `git scale fetch` | Online: every store and artefact entry refreshed, nothing placed |
+| `git scale fetch` | Online: every store, and every artefact's image, refreshed; nothing placed |
 | The end of any other git command run with `git scale`; the [hook in a child](hooks.md#the-hook-in-a-child) | Fetch on miss |
 | `ls`, `explain` | Offline, in CI too: they show what was placed. `--fetch` goes online |
 | **Any placement in CI** | **Online** |
@@ -388,8 +388,9 @@ Resolution reads, per repository, its branches and tags and the
   git directory, and each config from that one commit fetched at depth 1
   without files beyond it — from the [cache](stores.md#the-ci-cache)'s snapshot
   when the runner has one.
-- **`replace` artefacts**: refs from `git ls-remote`, and the config from the
-  image's `gitscale` layer, kept with the images.
+- **A repository whose sources cannot be read**: its released versions from
+  its registry's tags, and the config from each image's `gitscale` layer, kept
+  with the images — see [no access](artefacts.md#no-access-to-the-sources).
 
 Offline, a repository nothing has fetched yet is `unresolved`, with a hint to
 run `git scale ls --fetch`.

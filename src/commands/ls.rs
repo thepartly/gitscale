@@ -7,8 +7,9 @@ use std::path::Path;
 
 use crate::config::load_workspace;
 use crate::git::{get_artefact_status, get_repo_status, is_tree_modified, Expected, RepoStatus};
+use crate::prefer::Form;
 use crate::promote::State;
-use crate::resolution::{Kind, Resolution, Slot};
+use crate::resolution::{Resolution, Slot};
 use crate::store::Sources;
 
 /// `git explain [--fetch] [DIR...]`.
@@ -64,7 +65,7 @@ fn resolve_or_report(
         Ok(resolution) => Ok(resolution),
         Err(e) => {
             writeln!(err, "error: {:#}", e)?;
-            Ok(unresolved(config, &format!("{:#}", e)))
+            crate::resolve::with_preferences(unresolved(config, &format!("{:#}", e)), config_root)
         }
     }
 }
@@ -107,7 +108,7 @@ pub fn run(
         for slot in &resolution.slots {
             let entry = slot.entry();
             let dest = config_root.join(&entry.directory);
-            if !entry.is_artefact() || dest.is_symlink() {
+            if slot.form() != Form::Artefact || dest.is_symlink() {
                 continue;
             }
             if verbose {
@@ -115,7 +116,8 @@ pub fn run(
             }
             // Status still reports, but must not pass off what the last
             // successful fetch saw as what `--fetch` just found.
-            if let Err(e) = artefacts.fetch(&entry) {
+            let commit = slot.commit.as_deref().unwrap_or_default();
+            if let Err(e) = artefacts.fetch(&entry, commit) {
                 writeln!(
                     err,
                     "  fetch {}: {} (showing the last fetched state)",
@@ -129,16 +131,20 @@ pub fn run(
     let entries = resolution.entries();
     for (entry, slot) in entries.iter().zip(&resolution.slots) {
         let dest = config_root.join(&entry.directory);
-        // An artefact on the topic may be its source instead.
-        if entry.is_artefact() && !crate::git::is_checkout(&dest) {
-            statuses.push(get_artefact_status(entry, &config_root));
+        let on_disk = crate::prefer::on_disk(&config_root, &entry.directory);
+        let image =
+            on_disk == Some(Form::Artefact) || (on_disk.is_none() && slot.form() == Form::Artefact);
+        if image && !dest.is_symlink() {
+            let mut status = get_artefact_status(entry, &config_root);
+            status.on_disk = on_disk;
+            statuses.push(status);
             continue;
         }
         let expected = Expected {
             branch: slot
                 .topic
                 .as_ref()
-                .filter(|t| t.developed || !entry.is_artefact())
+                .filter(|t| t.developed || slot.form() != Form::Artefact)
                 .map(|t| t.branch.clone()),
             commit: slot
                 .topic
@@ -146,6 +152,7 @@ pub fn run(
                 .map_or(slot.commit.clone(), |t| Some(t.commit.clone())),
         };
         let mut status = get_repo_status(entry, &config_root, &expected);
+        status.on_disk = on_disk;
         if status.exists && !status.is_symlink {
             if let Some(stores) = &sources.stores {
                 let store = stores.repo_path(&crate::git::remote_url(entry));
@@ -222,7 +229,26 @@ pub fn run(
     let warnings = warnings(&config_root);
     let rows: Vec<(&RepoStatus, &Slot)> = statuses.iter().zip(&resolution.slots).collect();
     if output_format == "json" {
-        print_json(&rows, &orphans, &topic, &warnings, out)?;
+        // A checkout whose hash cannot be taken has none: uncommitted
+        // changes, which no pipeline built, or a dependency that does not
+        // resolve here. `git scale hash` says why.
+        let ws = crate::hash::Workspace {
+            root: &config_root,
+            sources: &sources,
+            artefacts: Some(&artefacts),
+            resolution: &resolution,
+            online: crate::git::is_ci(),
+        };
+        let hashes: Vec<Option<String>> = resolution
+            .slots
+            .iter()
+            .map(|slot| {
+                crate::hash::of(&ws, Some(&slot.directory), false)
+                    .ok()
+                    .map(|h| h.hash)
+            })
+            .collect();
+        print_json(&rows, &hashes, &orphans, &topic, &warnings, out)?;
     } else {
         for warning in &warnings {
             writeln!(out, "warning: {}", warning)?;
@@ -341,9 +367,9 @@ fn unresolved(config: &crate::config::GitScaleConfig, reason: &str) -> Resolutio
             .map(|e| Slot {
                 directory: e.directory.clone(),
                 url: e.repo_url.clone(),
-                artefact: e.artefact,
+                preferred: None,
+                sourceless: false,
                 recursive: e.recursive,
-                kind: Kind::of(e),
                 class: crate::version::Class::Any,
                 declared: Some(e.revision.clone()),
                 implicit: false,
@@ -366,13 +392,13 @@ fn unresolved(config: &crate::config::GitScaleConfig, reason: &str) -> Resolutio
 /// whose dependencies cannot be read is one whose image is not here, which
 /// its own flags already say.
 fn is_unresolved(slot: &Slot) -> bool {
-    slot.unresolved.is_some() || (slot.unread.is_some() && slot.kind == Kind::Source)
+    slot.unresolved.is_some() || (slot.unread.is_some() && slot.form() != Form::Artefact)
 }
 
 /// The RESOLUTION column: how the row's revision was chosen, when there is
 /// anything to say beyond "the root asked for it". The winner only, and a
 /// count when more than one repository asked — `explain` has the rest.
-fn notes(slot: &Slot, topic: &TopicView, status: Option<&RepoStatus>) -> Vec<String> {
+fn notes(slot: &Slot, topic: &TopicView) -> Vec<String> {
     let mut notes = Vec::new();
     if let Some(on) = &slot.topic {
         notes.push(if on.developed {
@@ -380,14 +406,6 @@ fn notes(slot: &Slot, topic: &TopicView, status: Option<&RepoStatus>) -> Vec<Str
         } else {
             "topic, from remote".to_string()
         });
-        if slot.artefact == Some(crate::config::ArtefactUse::Replace) {
-            let sources = status.is_some_and(|s| s.artefact.is_none());
-            notes.push(if sources {
-                "sources".to_string()
-            } else {
-                format!("image {}", crate::git::short_sha(&on.commit))
-            });
-        }
         if let Some(waits) = topic.waits.get(&slot.directory).filter(|w| !w.is_empty()) {
             notes.push(format!("waits on {}", waits.join(", ")));
         }
@@ -411,7 +429,7 @@ fn notes(slot: &Slot, topic: &TopicView, status: Option<&RepoStatus>) -> Vec<Str
                 "see the error above".to_string()
             },
         );
-    } else if slot.unread.is_some() && slot.kind == Kind::Source {
+    } else if slot.unread.is_some() && slot.form() != Form::Artefact {
         notes.push("its dependencies are not fetched yet: run git scale ls --fetch".to_string());
     }
     if let Some(chosen) = slot.chosen.as_ref().filter(|_| slot.topic.is_none()) {
@@ -507,16 +525,15 @@ fn print_why(resolution: &Resolution, dirs: &[String], out: &mut dyn Write) -> R
             crate::version::Class::Any => "any version".to_string(),
             class => format!("major {}", class),
         };
+        let (form, why) = slot.arrival();
         writeln!(
             out,
-            "{}  {}  {}  {}{}",
+            "{}  {}  {}  {} ({})",
             slot.directory,
             slot.url,
             class,
-            slot.kind.label(),
-            slot.artefact
-                .map(|a| format!("  {}", a))
-                .unwrap_or_default()
+            form,
+            why.label()
         )?;
         match (&slot.chosen, &slot.unresolved) {
             (_, Some(reason)) => writeln!(out, "  unresolved  {}", reason)?,
@@ -789,12 +806,12 @@ fn print_table(
             if get_status_flags(s) == "missed" {
                 String::new()
             } else {
-                notes(slot, topic, Some(s)).join(", ")
+                notes(slot, topic).join(", ")
             }
         })
         .collect();
     let with_resolution = resolutions.iter().any(|r| !r.is_empty());
-    let mut headers = vec!["", "REPO", "PATH", "ARTEFACT", "REF", "EXPECTED", "STATUS"];
+    let mut headers = vec!["", "REPO", "PATH", "AS", "REF", "EXPECTED", "STATUS"];
     if with_resolution {
         headers.push("RESOLUTION");
     }
@@ -825,7 +842,7 @@ fn print_table(
             icon.to_string(),
             s.directory.clone(),
             path,
-            s.artefact_use.clone(),
+            form_cell(s.on_disk, slot.form()),
             ref_str,
             abbreviate_revision(&s.expected_ref),
             flags,
@@ -943,12 +960,23 @@ fn print_table(
     Ok(())
 }
 
+/// The AS cell: the form on disk, and the one the next placement gives when
+/// a preference changed it — `source → artefact`.
+fn form_cell(on_disk: Option<Form>, next: Form) -> String {
+    match on_disk {
+        Some(now) if now != next => format!("{} → {}", now, next),
+        Some(now) => now.to_string(),
+        None => next.to_string(),
+    }
+}
+
 fn pad(cell: &str, width: usize) -> String {
     format!("{:<width$}", cell, width = width)
 }
 
 fn print_json(
     rows: &[(&RepoStatus, &Slot)],
+    hashes: &[Option<String>],
     orphans: &[crate::resolve::OrphanLink],
     topic: &TopicView,
     warnings: &[String],
@@ -956,7 +984,8 @@ fn print_json(
 ) -> Result<()> {
     let mut data: Vec<serde_json::Value> = rows
         .iter()
-        .map(|(s, slot)| {
+        .zip(hashes)
+        .map(|((s, slot), hash)| {
             let mut row = serde_json::json!({
                 "directory": s.directory,
                 "exists": s.exists,
@@ -966,19 +995,19 @@ fn print_json(
                 "detached": s.is_detached,
                 "ahead": s.ahead,
                 "behind": s.behind,
-                "artefact_use": s.artefact_use,
                 "stale": s.is_stale,
                 "symlink": s.is_symlink,
                 "symlink_target": s.symlink_target,
                 "untracked_links": s.untracked_links,
                 "foreign": s.foreign,
+                "source_hash": hash,
             });
             add_resolution(&mut row, slot, topic, Some(s));
             // What an artefact has installed, and what the last fetch saw for
             // its revision — the commit and image digest of each.
             if let Some(artefact) = &s.artefact {
                 let side = |m: &Option<crate::artefact::Marker>| match m {
-                    Some(m) => serde_json::json!({"commit": m.commit, "digest": m.digest}),
+                    Some(m) => serde_json::json!({"tag": m.tag, "digest": m.digest}),
                     None => serde_json::Value::Null,
                 };
                 row["artefact"] = serde_json::json!({
@@ -1051,13 +1080,21 @@ fn add_resolution(
             |c| Some(c.kind.label()),
         ),
         "class": slot.class.describe(),
-        "kind": slot.kind.label(),
+        "as": status
+            .and_then(|s| s.on_disk)
+            .unwrap_or(slot.form())
+            .to_string(),
+        "as_reason": slot.arrival().1.label(),
+        "as_next": status
+            .and_then(|s| s.on_disk)
+            .filter(|now| *now != slot.form())
+            .map(|_| slot.form().to_string()),
         "implicit": slot.implicit,
         "resolution": resolution,
         "reason": chosen.map(|c| c.reason.label()),
         "unresolved": slot.unresolved,
         "unread": slot.unread,
-        "notes": notes(slot, topic, status),
+        "notes": notes(slot, topic),
         "requests": requests,
         "topic": slot.topic.as_ref().map(|t| serde_json::json!({
             "branch": t.branch,

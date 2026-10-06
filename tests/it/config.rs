@@ -141,10 +141,6 @@ fn error_006_two_entries_naming_one_directory_are_refused() {
 fn error_007_a_refused_value_says_why() {
     let env = TestEnv::new("config_errors_say_why");
     for (config, reason) in [
-        (
-            "[repos]\n\"a\" = { url = \"https://example.com/a.git\", artefact = \"yes\" }\n",
-            "\"replace\" or \"overlay\"",
-        ),
         ("[resolve]\nhoist_dir = \"../out\"\n", "'..'"),
         ("[clean]\nkeep_recent = \"soon\"\n", "soon"),
     ] {

@@ -140,7 +140,7 @@ fn normal_004_leave_takes_a_child_back_to_its_pin() {
 fn normal_005_a_pinned_branch_follows_no_topic() {
     let f = fixture(
         "wt_pinned",
-        "[develop]\npinned = [\"main\", \"staging\"]\n\n",
+        "[branches]\npinned = [\"main\", \"staging\"]\n\n",
     );
     let ws = f.clone_root("ws");
     f.core_commit("staging", "lib.txt", "staging");
@@ -245,14 +245,14 @@ fn normal_015_join_carries_uncommitted_edits_onto_the_topic() {
     assert!(writable(&child.join("lib.txt")));
 }
 
-/// Joining a `replace` artefact that is installed as its image makes it a
+/// Joining a checkout that is installed as its image makes it a
 /// worktree of its source, at the commit the image was built from, on the
 /// topic branch — and a sync keeps it so.
 #[test]
 fn normal_016_join_turns_an_installed_image_into_a_source_worktree() {
     let env = TestEnv::new("develop_artefact_image");
     let app = env.artefact_repo("app", &[("app.bin", "main build")]);
-    let ws = artefact_workspace(&env, &app, "replace");
+    let ws = artefact_workspace(&env, &app, gitscale::prefer::Form::Artefact);
     ok(&gs(&ws, &["sync"]));
     let dest = ws.join("meta/app");
     assert!(!dest.join(".git").exists(), "installed as its image");
@@ -276,7 +276,7 @@ fn normal_016_join_turns_an_installed_image_into_a_source_worktree() {
 fn normal_017_leave_puts_an_artefact_back_to_its_image() {
     let env = TestEnv::new("develop_artefact_stop");
     let app = env.artefact_repo("app", &[("app.bin", "main build")]);
-    let ws = artefact_workspace(&env, &app, "replace");
+    let ws = artefact_workspace(&env, &app, gitscale::prefer::Form::Artefact);
     ok(&gs(&ws, &["sync"]));
     let dest = ws.join("meta/app");
     run_git_pub(&ws, &["switch", "-q", "-c", "feat/x"]);
@@ -440,7 +440,7 @@ fn edge_007_a_dirty_child_stays_when_the_root_leaves_the_topic() {
 /// `pinned = []` pins nothing: the root's main follows every child's main.
 #[test]
 fn edge_008_an_empty_pinned_list_makes_the_default_branch_a_topic() {
-    let f = fixture("wt_unpinned", "[develop]\npinned = []\n\n");
+    let f = fixture("wt_unpinned", "[branches]\npinned = []\n\n");
     let ws = f.clone_root("ws");
     let child = ws.join("imports/core");
     assert_eq!(branch(&child).as_deref(), Some("main"));
@@ -457,7 +457,7 @@ fn edge_009_a_dependency_that_pins_the_topic_keeps_what_it_asks_for_at_its_pins(
     run_git_pub(&d, &["branch", "staging", "main"]);
     let staging_d = env.push_commit(&d, "staging", "d.txt", "d staging");
     let b_config = format!(
-        "[develop]\npinned = [\"staging\"]\n\n[repos]\n\"libs/d\" = {{ url = \"{}\", revision = \"v1.0.0\" }}\n",
+        "[branches]\npinned = [\"staging\"]\n\n[repos]\n\"libs/d\" = {{ url = \"{}\", revision = \"v1.0.0\" }}\n",
         d.display()
     );
     let b = env.create_bare_repo("b", "main", &[(".gitscale.toml", &b_config)]);
@@ -1172,7 +1172,7 @@ fn normal_041_start_in_a_plain_clone_branches_from_the_remote_default() {
 fn error_042_start_refuses_existing_and_pinned_names() {
     let f = fixture(
         "topic_start_refuse",
-        "[develop]\npinned = [\"main\", \"release/*\"]\n\n",
+        "[branches]\npinned = [\"main\", \"release/*\"]\n\n",
     );
     let ws = f.clone_root("ws");
     run_git_pub(&ws, &["branch", "local-one"]);
@@ -1454,7 +1454,7 @@ fn normal_050_status_says_what_each_joined_repository_still_needs() {
     ok(&out);
     let core = row(&out.stdout, "imports/core");
     assert!(core.contains(" 1 ") && core.contains(" no "), "{}", core);
-    assert!(core.ends_with("not tagged yet"), "{}", core);
+    assert!(core.ends_with("no tag"), "{}", core);
     assert!(
         row(&out.stdout, ".").ends_with("waits on imports/core"),
         "{}",
@@ -1919,4 +1919,101 @@ fn edge_060_a_worktree_deleted_by_hand_comes_back_with_switch() {
     assert!(out.stdout.ends_with("cd ../PROJ-15\n"), "{}", out.stdout);
     assert_eq!(branch(&wt.join("imports/core")).as_deref(), Some("PROJ-15"));
     assert_eq!(head(&wt.join("imports/core")), work);
+}
+
+/// `git topic join --dependants <dir>` joins the checkouts whose configs ask
+/// for less than the dependency's newest release — how a raise begins — and
+/// leaves those already asking for it.
+#[test]
+fn normal_061_join_dependants_of_a_dependency_joins_those_asking_for_less() {
+    use crate::support::resolution::{allow, dependant, repos, root_workspace, tagged};
+    let env = TestEnv::new("topic_dependants_raise");
+    let d = tagged(&env, "d", &[("v1.0.0", ""), ("v1.1.0", "")]);
+    let b = dependant(&env, "b", &[("libs/d", &d, ", revision = \"v1.0.0\"")]);
+    let c = dependant(&env, "c", &[("libs/d", &d, ", revision = \"v1.1.0\"")]);
+    let ws = root_workspace(
+        &env,
+        &format!(
+            "{}{}",
+            allow(&env),
+            repos(&[
+                ("imports/b", &b, ", revision = \"v1.0.0\""),
+                ("imports/c", &c, ", revision = \"v1.0.0\""),
+            ])
+        ),
+    );
+    ok(&gs(&ws, &["sync"]));
+    run_git_pub(&ws, &["switch", "-q", "-c", "feat/raise"]);
+
+    let out = gs(&ws, &["topic", "join", "--dependants", "imports/d"]);
+    ok(&out);
+    assert!(
+        out.stdout.contains("imports/b on feat/raise"),
+        "{}",
+        out.stdout
+    );
+    assert!(!out.stdout.contains("imports/c"), "{}", out.stdout);
+    assert_eq!(branch(&ws.join("imports/b")).as_deref(), Some("feat/raise"));
+    assert_eq!(branch(&ws.join("imports/c")), None);
+    assert_eq!(branch(&ws.join("imports/d")), None);
+}
+
+/// `git topic join --dependants` alone climbs one level from the topic's
+/// changes: the dependants of each checkout carrying one — commits on the
+/// topic, or uncommitted work — while none of them is on the topic. One taken
+/// off stays off, a checkout joined with nothing to carry is not climbed
+/// from, and the root is never joined.
+#[test]
+fn normal_062_join_dependants_climbs_one_level_from_the_topics_changes() {
+    use crate::support::resolution::{allow, dependant, repos, root_workspace, tagged};
+    let env = TestEnv::new("topic_dependants_climb");
+    let d = tagged(&env, "d", &[("v1.0.0", "")]);
+    let b = dependant(&env, "b", &[("libs/d", &d, ", revision = \"v1.0.0\"")]);
+    let c = dependant(&env, "c", &[("libs/d", &d, ", revision = \"v1.0.0\"")]);
+    let x = dependant(&env, "x", &[("libs/b", &b, ", revision = \"v1.0.0\"")]);
+    let ws = root_workspace(
+        &env,
+        &format!(
+            "{}{}",
+            allow(&env),
+            repos(&[
+                ("imports/c", &c, ", revision = \"v1.0.0\""),
+                ("imports/x", &x, ", revision = \"v1.0.0\""),
+            ])
+        ),
+    );
+    ok(&gs(&ws, &["sync"]));
+    run_git_pub(&ws, &["switch", "-q", "-c", "feat/climb"]);
+    let out = gs(&ws, &["topic", "join", "--dependants"]);
+    ok(&out);
+    assert!(out.stdout.contains("nothing to join"), "{}", out.stdout);
+
+    ok(&gs(&ws, &["topic", "join", "imports/d"]));
+    let d_dir = ws.join("imports/d");
+    identity(&d_dir);
+    std::fs::write(d_dir.join("VERSION"), "changed").unwrap();
+    run_git_pub(&d_dir, &["commit", "-q", "-am", "the change"]);
+    let out = gs(&ws, &["topic", "join", "--dependants"]);
+    ok(&out);
+    for joined in ["imports/b on feat/climb", "imports/c on feat/climb"] {
+        assert!(out.stdout.contains(joined), "{}: {}", joined, out.stdout);
+    }
+    assert_eq!(branch(&ws.join("imports/x")), None);
+
+    ok(&gs(&ws, &["topic", "leave", "imports/c"]));
+    let out = gs(&ws, &["topic", "join", "--dependants"]);
+    ok(&out);
+    assert!(out.stdout.contains("nothing to join"), "{}", out.stdout);
+    assert_eq!(branch(&ws.join("imports/c")), None);
+
+    std::fs::write(ws.join("imports/b/VERSION"), "in progress").unwrap();
+    let out = gs(&ws, &["topic", "join", "--dependants"]);
+    ok(&out);
+    assert!(
+        out.stdout.contains("imports/x on feat/climb"),
+        "{}",
+        out.stdout
+    );
+    assert_eq!(branch(&ws.join("imports/c")), None);
+    assert_eq!(branch(&ws).as_deref(), Some("feat/climb"));
 }

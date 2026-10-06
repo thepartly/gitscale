@@ -272,7 +272,7 @@ fn plan(
         let dir = config_root.join(&entry.directory);
         let name = entry.directory.as_str();
 
-        if entry.is_artefact() {
+        if crate::prefer::on_disk(config_root, name) == Some(crate::prefer::Form::Artefact) {
             targets.push(skipped(name, &dir, "artefact"));
             continue;
         }
@@ -313,15 +313,6 @@ fn plan(
         excludes.extend(nested_checkouts(&all, Path::new(&entry.directory)));
         if let Some(links) = managed_links.get(&entry.directory) {
             excludes.extend(links.iter().cloned());
-        }
-        // An overlay's files are ignored build output, and exactly what the
-        // overlay is for.
-        if entry.is_overlay() {
-            excludes.extend(
-                crate::artefact::overlay_files(config_root, &entry.directory)
-                    .into_iter()
-                    .map(|file| format!("/{}", file)),
-            );
         }
         targets.push(Target {
             name: name.to_string(),

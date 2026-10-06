@@ -7,12 +7,14 @@ pub mod config;
 pub mod exclude;
 pub mod git;
 pub mod gitlab;
+pub mod hash;
 pub mod hooks;
 pub mod ledger;
 pub mod man;
 pub mod oci_layout;
 pub mod output;
 pub mod paths;
+pub mod prefer;
 pub mod progress;
 pub mod promote;
 pub mod registry;
@@ -146,15 +148,10 @@ enum Commands {
         #[command(subcommand)]
         action: Option<TopicAction>,
     },
-    /// Raise pins: promote a topic's released repositories, raise named
-    /// dependencies to their newest release, or write what resolution
-    /// selected into the root config
+    /// Raise pins on the topic: promote its released repositories, or raise
+    /// named dependencies to their newest release
     Upgrade {
-        /// Write the revision resolution selected into the root's own
-        /// entries, with no tag lookup
-        #[arg(long)]
-        resolved: bool,
-        /// Let a raise cross a semver major
+        /// Let a raise cross a major
         #[arg(long)]
         major: bool,
         /// Commit each edited .gitscale.toml, that file alone
@@ -163,12 +160,8 @@ enum Commands {
         /// Print the plan and change nothing
         #[arg(long)]
         dry_run: bool,
-        /// The topic to create when none is active and a repository other
-        /// than the root has to be edited
-        #[arg(short = 'c', long = "create", value_name = "BRANCH")]
-        create: Option<String>,
-        /// Dependencies to raise to their newest release, in every config
-        /// that asks for them
+        /// Dependencies to raise to their newest release, in the topic's
+        /// configs that ask for them
         dirs: Vec<String>,
     },
     /// Put every checkout where resolution says, against the remotes as
@@ -182,7 +175,7 @@ enum Commands {
         dirs: Vec<String>,
     },
     /// Remove untracked files from the root and each checkout, keeping every
-    /// checkout, link and overlay. Without -f, only lists them
+    /// checkout and link. Without -f, only lists them
     Clean {
         /// Only list what would go (also the default without -f)
         #[arg(short = 'n')]
@@ -218,19 +211,38 @@ enum Commands {
     },
     /// Add a dependency to the root's .gitscale.toml and check it out
     Require {
-        /// Use the repository's published artefact: instead of a checkout
-        /// (replace), or laid over one (overlay)
-        #[arg(long, value_parser = ["replace", "overlay"])]
-        artefact: Option<String>,
         dir: String,
         url: String,
         revision: Option<String>,
     },
     /// Remove a dependency from the root's .gitscale.toml
     Unrequire { dir: String },
+    /// How checkouts arrive: their sources, or the published artefact of
+    /// their release. Without a form, show the preferences. Only records:
+    /// the next placement applies it
+    Prefer {
+        /// Their sources: the default, removing a preference
+        #[arg(long, group = "form")]
+        source: bool,
+        /// The artefact of their release, in place of the sources
+        #[arg(long, group = "form")]
+        artefact: bool,
+        dirs: Vec<String>,
+    },
     /// The merge gate: fail while any checkout comes from a topic branch
     /// rather than a pinned revision
     Check,
+    /// The source hash of the root, or of checkouts: what each one's own
+    /// pipeline builds, from its tree and its dependencies' as it resolves
+    /// them
+    Hash {
+        /// Hash each repository's commit, leaving uncommitted changes out
+        #[arg(long)]
+        committed: bool,
+        #[arg(short, long, value_parser = ["text", "json"], default_value = "text")]
+        format: String,
+        dirs: Vec<String>,
+    },
     /// Publish artefacts, and see what the registry holds for each entry
     Artefact {
         #[command(subcommand)]
@@ -261,6 +273,11 @@ enum TopicAction {
     /// Put checkouts on the topic, from the commit each is at, writable; an
     /// artefact becomes a checkout of its source
     Join {
+        /// Join the dependants instead: of each checkout named that ask for
+        /// less than its newest release, or, with none named, of the
+        /// topic's changes, one level up
+        #[arg(long)]
+        dependants: bool,
         /// Checkouts to join: their directory, or the path of a link a
         /// repository has to one
         dirs: Vec<String>,
@@ -328,24 +345,29 @@ enum TopicAction {
 #[derive(Subcommand)]
 enum ArtefactAction {
     /// Pack the files the [artefact] table selects and push them to the
-    /// registry, as the image for one commit
+    /// registry, as the image of the sources checked out: tagged with their
+    /// source hash, and with RELEASE when one is given
     Publish {
-        /// The commit to publish for (full SHA). Default: the CI job's
-        /// commit, else HEAD
-        #[arg(long, value_name = "SHA")]
-        commit: Option<String>,
-        /// Replace an image already published for this commit with different
-        /// files
+        /// Replace an image already published for these sources, or a
+        /// version tag naming another image
         #[arg(long)]
         force: bool,
         /// List what each layer would hold and its digest, without pushing
         #[arg(long)]
         dry_run: bool,
+        /// Pack nothing: release the image already published for these
+        /// sources — the branch build a squash merge kept
+        #[arg(long, conflicts_with = "force", requires = "release")]
+        reuse: bool,
+        /// The release this commit is: the image is tagged with it
+        release: Option<String>,
     },
-    /// Show, for each artefact entry, the image, the commit its revision
-    /// names now, whether that commit is published, and what is installed
+    /// Show, for each checkout taken as an artefact, the image, the release
+    /// it is taken at, whether that release is published, and what is
+    /// installed
     Show { dirs: Vec<String> },
-    /// List the commits each artefact entry has images for in the registry
+    /// List the releases each checkout taken as an artefact has images for,
+    /// with the source hash of each
     List { dirs: Vec<String> },
 }
 
@@ -631,7 +653,9 @@ fn run_command(cli: Cli, io: Io, out: &mut dyn Write, err: &mut dyn Write) -> Re
         Commands::Topic { action } => {
             let action = match action {
                 None => commands::topic::Action::Print,
-                Some(TopicAction::Join { dirs }) => commands::topic::Action::Join(dirs),
+                Some(TopicAction::Join { dirs, dependants }) => {
+                    commands::topic::Action::Join { dirs, dependants }
+                }
                 Some(TopicAction::Leave { dirs }) => commands::topic::Action::Leave(dirs),
                 Some(TopicAction::Start {
                     from,
@@ -668,21 +692,17 @@ fn run_command(cli: Cli, io: Io, out: &mut dyn Write, err: &mut dyn Write) -> Re
             commands::topic::run(root, action, verbose, no_cache, interactive, out, err)
         }
         Commands::Upgrade {
-            resolved,
             major,
             commit,
             dry_run,
-            create,
             dirs,
         } => commands::upgrade::run(
             root,
             &commands::upgrade::Options {
                 dirs: &dirs,
-                resolved,
                 major,
                 commit,
                 dry_run,
-                create: create.as_deref(),
             },
             verbose,
             no_cache,
@@ -721,17 +741,11 @@ fn run_command(cli: Cli, io: Io, out: &mut dyn Write, err: &mut dyn Write) -> Re
             err,
         ),
         Commands::Gc { keep_recent } => commands::clean::gc(root, keep_recent.as_deref(), out),
-        Commands::Require {
-            artefact,
-            dir,
-            url,
-            revision,
-        } => commands::require::require(
+        Commands::Require { dir, url, revision } => commands::require::require(
             root,
             &dir,
             &url,
             revision.as_deref().unwrap_or_default(),
-            artefact.as_deref(),
             verbose,
             no_cache,
             interactive,
@@ -742,12 +756,31 @@ fn run_command(cli: Cli, io: Io, out: &mut dyn Write, err: &mut dyn Write) -> Re
             commands::require::unrequire(root, &dir, verbose, no_cache, interactive, out, err)
         }
         Commands::Check => commands::check::run(root, verbose, no_cache, out),
+        Commands::Prefer {
+            source,
+            artefact,
+            dirs,
+        } => {
+            use crate::prefer::Form;
+            let form = match (source, artefact) {
+                (true, _) => Some(Form::Source),
+                (_, true) => Some(Form::Artefact),
+                _ => None,
+            };
+            commands::prefer::run(root, form, &dirs, no_cache, out)
+        }
+        Commands::Hash {
+            committed,
+            format,
+            dirs,
+        } => commands::hash::run(root, &dirs, committed, &format, verbose, no_cache, out),
         Commands::Artefact { action } => match action {
             ArtefactAction::Publish {
-                commit,
                 force,
                 dry_run,
-            } => commands::artefact::publish(root, commit.as_deref(), force, dry_run, out),
+                reuse,
+                release,
+            } => commands::artefact::publish(root, release.as_deref(), force, dry_run, reuse, out),
             ArtefactAction::Show { dirs } => commands::artefact::show(root, &dirs, out),
             ArtefactAction::List { dirs } => commands::artefact::list(root, &dirs, out),
         },

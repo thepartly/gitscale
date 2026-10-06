@@ -1,20 +1,19 @@
-//! `gitscale upgrade`: raise pins, in three forms that differ only in where
-//! the new revision comes from.
+//! `git upgrade`: raise pins, on a topic, in two forms that differ only in
+//! where the new revision comes from.
 //!
 //! * `upgrade` — promotion. For each slot of the topic whose change is in the
-//!   newest calver tag of its pin's stream, that tag is written into the
-//!   topic's configs that ask for less, and the slot leaves the topic.
+//!   newest release of its pin's kind and major, that tag is written into the
+//!   topic's configs that ask for less, its topic branch is deleted on its
+//!   remote, and the slot leaves the topic.
 //! * `upgrade <dir>...` — the newest release of each named dependency,
-//!   written into every config that asks for it; the repositories those
-//!   configs belong to join the topic, which is created — a new branch of
-//!   the root — when there is none.
-//! * `upgrade --resolved` — the revision resolution already selected,
-//!   written into the root's own entries. No tag is looked up, and no topic
-//!   is needed.
+//!   written into the topic's configs that ask for less. A requester not on
+//!   the topic is named, with the command that joins it.
 //!
-//! This is the one command that looks for newer tags; resolution never does.
-//! Files are edited with `toml_edit`, so comments and key order survive, and
-//! committed only with `--commit`.
+//! Only the root and the checkouts on the topic are edited: joining is
+//! `git topic join`'s, and a topic begins only with `git topic start`. This is
+//! the one command that looks for newer tags; resolution never does. Files are
+//! edited with `toml_edit`, so comments and key order survive, and committed
+//! only with `--commit`.
 
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,19 +23,16 @@ use std::path::{Path, PathBuf};
 use crate::artefact::Artefacts;
 use crate::checkout::Placer;
 use crate::config::{load_workspace, set_revisions, GitScaleConfig, RepoEntry, CONFIG_FILENAME};
-use crate::promote::{self, State};
+use crate::paths::Here;
+use crate::promote::{self, below, Containment, State};
 use crate::resolution::{Resolution, Slot};
-use crate::store::Sources;
-use crate::version;
+use crate::store::{Sources, Stores};
 
 pub struct Options<'a> {
     pub dirs: &'a [String],
-    pub resolved: bool,
     pub major: bool,
     pub commit: bool,
     pub dry_run: bool,
-    /// The topic branch to create when there is none (`-c`).
-    pub create: Option<&'a str>,
 }
 
 /// One revision to write into one config.
@@ -63,30 +59,27 @@ pub fn run(
     out: &mut dyn Write,
 ) -> Result<()> {
     let (config, config_root) = load_workspace(root)?;
-    let here = crate::paths::Here::new(root, &config_root)?;
+    let here = Here::new(root, &config_root)?;
     let sources = Sources::new(&config_root, no_cache)?;
-    let artefacts = Artefacts::new(&config, &config_root, sources.images());
-    if opts.resolved {
-        if opts.major || opts.create.is_some() {
-            bail!("--resolved writes what resolution selected: it takes neither --major nor -c");
-        }
-        return resolved(
-            &config,
-            &config_root,
-            &here,
-            &sources,
-            &artefacts,
-            opts,
-            verbose,
-            out,
-        );
-    }
     if sources.stores.is_none() {
         bail!(
             "upgrade edits configs in the checkouts of a developer machine; CI keeps none to \
              edit"
         );
     }
+    if opts.dirs.is_empty() && opts.major {
+        bail!(
+            "--major raises a named dependency: git upgrade --major <dir>. Promotion stays in \
+             the major each pin is in"
+        );
+    }
+    let Some(branch) = crate::topic::root(&config, &config_root, true)
+        .topic()
+        .map(str::to_string)
+    else {
+        bail!("not on a topic: git topic start NAME");
+    };
+    let artefacts = Artefacts::new(&config, &config_root, sources.images());
     let resolution = crate::resolve::workspace(
         &config,
         &config_root,
@@ -96,32 +89,26 @@ pub fn run(
         verbose,
     )?;
     if opts.dirs.is_empty() {
-        if opts.major {
-            bail!(
-                "--major raises a named dependency: git upgrade --major <dir>. Promotion \
-                 stays in the major each pin is in"
-            );
-        }
-        if opts.create.is_some() {
-            bail!("-c names the topic an upgrade of named dependencies creates");
-        }
         promote_topic(
             &config,
             &config_root,
             &sources,
             &artefacts,
             &resolution,
+            &branch,
             opts,
             out,
         )
     } else {
+        let stores = sources.stores.as_ref().expect("checked above");
         raise(
             &config,
             &config_root,
             &here,
+            stores,
+            &artefacts,
             &resolution,
             opts,
-            verbose,
             out,
         )
     }
@@ -131,25 +118,17 @@ pub fn run(
 // Promotion
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn promote_topic(
     config: &GitScaleConfig,
     config_root: &Path,
     sources: &Sources,
     artefacts: &Artefacts,
     resolution: &Resolution,
+    branch: &str,
     opts: &Options,
     out: &mut dyn Write,
 ) -> Result<()> {
-    let Some(branch) = crate::topic::root(config, config_root, true)
-        .topic()
-        .map(str::to_string)
-    else {
-        bail!(
-            "not on a topic: promotion raises the pins of a topic's repositories once they are \
-             released. Name what to raise — git upgrade <dir> — or write what resolution \
-             selected with git upgrade --resolved"
-        );
-    };
     let topic = resolution.topic_slots();
     if topic.is_empty() {
         writeln!(out, "Nothing on topic {} to promote.", branch)?;
@@ -164,7 +143,7 @@ fn promote_topic(
     for slot in &topic {
         let planted = resolution.planted_in(&slot.directory);
         let url = slot.url.clone();
-        let has_image = move |commit: &str| artefacts.has_image(&url, commit);
+        let has_image = move |tag: &str| artefacts.has_image(&url, tag);
         let store = stores.repo_path(&crate::ci::remote_url(&slot.url));
         let state = promote::assess(config_root, &store, slot, &planted, Some(&has_image));
         states.insert(slot.directory.clone(), state);
@@ -227,41 +206,128 @@ fn promote_topic(
         leaving.push((*slot, tag.clone()));
     }
 
+    // Before anything changes: a branch that can't be deleted without losing
+    // work stops the promotion here.
+    let branches = remote_branches(stores, &leaving)?;
     print_edits(&edits, out)?;
-    if !opts.dry_run {
-        let placer = Placer {
-            config_root,
-            sources,
-            artefacts,
-            verbose: false,
-            fetch: true,
-        };
-        for (slot, tag) in &leaving {
-            let left = leave_topic(config_root, resolution, &placer, slot, tag)?;
-            writeln!(out, "  {}  left the topic: {}", slot.directory, left)?;
-            if crate::commands::topic::remote_has_branch(&slot.url, &branch) {
-                writeln!(
-                    out,
-                    "  {}: branch {} still exists on its remote; placement and CI keep matching \
-                     it by name until it is deleted",
-                    slot.directory, branch
-                )?;
-            }
+    let next = promote::next_to_merge(&requests, &promoted);
+    if opts.dry_run {
+        for remote in &branches {
+            writeln!(
+                out,
+                "  {}: would delete origin/{}",
+                remote.dir, remote.branch
+            )?;
         }
-        let committed = apply(&edits, opts.commit, out)?;
-        let next = promote::next_to_merge(&requests, &promoted);
         if !next.is_empty() {
             writeln!(out, "next to merge: {}", next.join(", "))?;
         }
-        to_push(config_root, &committed, out)?;
+        writeln!(out, "(dry run: nothing changed)")?;
         return Ok(());
     }
-    let next = promote::next_to_merge(&requests, &promoted);
+    // Deleted before the pin bump is written, so the pipeline of the bump
+    // never builds from a branch that still matches.
+    for remote in &branches {
+        remote.delete(stores)?;
+        writeln!(out, "  {}: deleted origin/{}", remote.dir, remote.branch)?;
+    }
+    let placer = Placer {
+        config_root,
+        sources,
+        artefacts,
+        verbose: false,
+        fetch: true,
+    };
+    for (slot, tag) in &leaving {
+        let left = leave_topic(config_root, resolution, &placer, slot, tag)?;
+        writeln!(out, "  {}  left the topic: {}", slot.directory, left)?;
+    }
+    let committed = apply(&edits, opts.commit, out)?;
     if !next.is_empty() {
         writeln!(out, "next to merge: {}", next.join(", "))?;
     }
-    writeln!(out, "(dry run: nothing changed)")?;
-    Ok(())
+    to_push(config_root, &committed, out)
+}
+
+/// A promoted slot's topic branch on its remote, at the tip its release was
+/// checked to hold.
+struct RemoteBranch {
+    dir: String,
+    url: String,
+    branch: String,
+    tip: String,
+}
+
+impl RemoteBranch {
+    /// Delete it on its remote — only while it is still at the tip checked,
+    /// so a push made since fails the deletion instead of being lost.
+    fn delete(&self, stores: &Stores) -> Result<()> {
+        let lease = format!("--force-with-lease=refs/heads/{}:{}", self.branch, self.tip);
+        crate::git::run_git(
+            &[
+                "push",
+                "--quiet",
+                &lease,
+                &self.url,
+                &format!(":refs/heads/{}", self.branch),
+            ],
+            Some(&stores.repo_path(&self.url)),
+            true,
+        )
+        .with_context(|| {
+            format!(
+                "{}: cannot delete origin/{}; no config was changed. Run git upgrade again once \
+                 it can be",
+                self.dir, self.branch
+            )
+        })?;
+        Ok(())
+    }
+}
+
+/// The promoted slots' topic branches still on their remotes. Each must hold
+/// nothing its release does not, or the promotion fails before anything
+/// changes: deleting it would lose that work, and keeping it would leave
+/// placement and CI building from it.
+fn remote_branches(stores: &Stores, leaving: &[(&Slot, String)]) -> Result<Vec<RemoteBranch>> {
+    let mut found = Vec::new();
+    for (slot, tag) in leaving {
+        let Some(topic) = &slot.topic else {
+            continue;
+        };
+        let url = crate::ci::remote_url(&slot.url);
+        let name = format!("refs/heads/{}", topic.branch);
+        let Some((tip, _)) =
+            crate::git::ls_remote_revision(&url, &name, true).with_context(|| {
+                format!(
+                    "{}: cannot ask its remote for {}",
+                    slot.directory, topic.branch
+                )
+            })?
+        else {
+            continue;
+        };
+        let store = stores.repo_path(&url);
+        if crate::git::resolve_ref(&store, &format!("{}^{{commit}}", tip)).is_none() {
+            crate::git::run_git(&["fetch", "--quiet", &url, &name], Some(&store), true)
+                .with_context(|| format!("{}: cannot fetch {}", slot.directory, topic.branch))?;
+        }
+        if promote::containment(&store, tag, &tip)? != Containment::Contained {
+            bail!(
+                "{}: origin/{} has changes {} does not hold; merge or drop them, then run again",
+                slot.directory,
+                topic.branch,
+                tag
+            );
+        }
+        found.push(RemoteBranch {
+            dir: slot.directory.clone(),
+            url,
+            branch: topic.branch.clone(),
+            tip,
+        });
+    }
+    Ok(found)
 }
 
 /// The last line after `--commit`: the repositories that now have commits
@@ -272,22 +338,26 @@ fn to_push(config_root: &Path, committed: &[PathBuf], out: &mut dyn Write) -> Re
     }
     let mut names: Vec<String> = committed
         .iter()
-        .map(|repo| {
-            let rel = repo
-                .strip_prefix(config_root)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            if rel.is_empty() {
-                ".".to_string()
-            } else {
-                rel
-            }
-        })
+        .map(|repo| name_of(config_root, repo))
         .collect();
     names.sort_by_key(|n| (n == ".", n.clone()));
     names.dedup();
     writeln!(out, "to push: {} — git scale push", names.join(", "))?;
     Ok(())
+}
+
+/// The repository at `repo` as the root names it: its directory, `.` for the
+/// root itself.
+fn name_of(config_root: &Path, repo: &Path) -> String {
+    let rel = repo
+        .strip_prefix(config_root)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if rel.is_empty() {
+        ".".to_string()
+    } else {
+        rel
+    }
 }
 
 /// Take a promoted slot off the topic: its branch deleted, detached at the
@@ -322,10 +392,7 @@ fn leave_topic(
         )
         .with_context(|| format!("{} stays on {}", slot.directory, topic.branch))?;
     }
-    let mut off = slot.clone();
-    off.topic = None;
-    off.commit = Some(commit);
-    let placed = placer.place(&off)?;
+    let placed = placer.place(&slot.off_topic(tag, &commit))?;
     Ok(format!("{} at {}", placed, tag))
 }
 
@@ -343,29 +410,18 @@ fn on_its_branch(config_root: &Path, slot: &Slot) -> bool {
 // Raising named dependencies
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn raise(
     config: &GitScaleConfig,
     config_root: &Path,
-    here: &crate::paths::Here,
+    here: &Here,
+    stores: &Stores,
+    artefacts: &Artefacts,
     resolution: &Resolution,
     opts: &Options,
-    verbose: bool,
     out: &mut dyn Write,
 ) -> Result<()> {
-    let current = crate::topic::root(config, config_root, true)
-        .topic()
-        .map(str::to_string);
-    if let (Some(current), Some(asked)) = (&current, opts.create) {
-        if current != asked {
-            bail!(
-                "already on topic {}; -c names a topic to create from the default branch",
-                current
-            );
-        }
-    }
     let mut edits = Vec::new();
-    let mut joiners: Vec<&Slot> = Vec::new();
-    let mut raised = Vec::new();
     for dir in opts.dirs {
         let slot = here.slot(resolution, dir)?;
         if let Some(entry) = config
@@ -380,41 +436,27 @@ fn raise(
             )?;
             continue;
         }
-        let current = match (&slot.topic, &slot.chosen) {
-            (Some(topic), _) => topic.pin.as_ref().map(|p| p.revision.clone()),
-            (None, Some(chosen)) => Some(chosen.revision.clone()),
-            _ => None,
+        let target = promote::target(stores, artefacts, slot, opts.major)?;
+        let (pin, tag) = match target.release(&slot.directory) {
+            Ok((pin, tag)) => (pin.to_string(), tag.to_string()),
+            Err(why) => {
+                writeln!(out, "{}", why)?;
+                continue;
+            }
         };
-        let Some(current) = current.filter(|c| version::parse(c).is_some()) else {
-            writeln!(
-                out,
-                "{} is not pinned to a version; nothing to raise from",
-                slot.directory
-            )?;
-            continue;
-        };
-        let pinned = version::parse(&current).expect("checked above");
-        let tags = release_tags(&slot.url)?;
-        let Some((tag, newest)) =
-            promote::newest(tags.iter().map(String::as_str), &pinned, opts.major)
-        else {
-            writeln!(
-                out,
-                "{} has no release to raise {} to",
-                slot.directory, current
-            )?;
-            continue;
-        };
-        if pinned.compare(&newest) != Some(std::cmp::Ordering::Less) {
+        if !slot
+            .requests
+            .iter()
+            .any(|r| below(&r.revision, &tag) == Some(true))
+        {
             writeln!(
                 out,
                 "{} is already at its newest release, {}",
-                slot.directory, current
+                slot.directory, pin
             )?;
             continue;
         }
-        writeln!(out, "{}   {} → {}", slot.directory, current, tag)?;
-        raised.push(slot.directory.clone());
+        writeln!(out, "{}   {} → {}", slot.directory, pin, tag)?;
         for request in &slot.requests {
             let label = if request.from == "root" {
                 CONFIG_FILENAME.to_string()
@@ -465,10 +507,16 @@ fn raise(
                     )?;
                     continue;
                 }
-                if !on_its_branch(config_root, requester)
-                    && !joiners.iter().any(|j| j.directory == requester.directory)
-                {
-                    joiners.push(requester);
+                if !on_its_branch(config_root, requester) {
+                    writeln!(
+                        out,
+                        "  {}   {} asks for {}: git topic join {}",
+                        label,
+                        request.directory,
+                        request.revision,
+                        here.show(&config_root.join(&requester.directory))
+                    )?;
+                    continue;
                 }
                 config_root.join(&requester.directory)
             };
@@ -483,45 +531,6 @@ fn raise(
         }
     }
 
-    if !joiners.is_empty() {
-        let branch = match (&current, opts.create) {
-            (Some(current), _) => current.clone(),
-            (None, Some(asked)) => asked.to_string(),
-            (None, None) => generated_branch(&raised, &edits),
-        };
-        let names: Vec<String> = joiners.iter().map(|j| j.directory.clone()).collect();
-        if opts.dry_run {
-            writeln!(out, "  would join topic {}: {}", branch, names.join(", "))?;
-        } else {
-            // No topic yet: the root's new branch is the topic.
-            if current.is_none() {
-                crate::git::run_git(
-                    &["switch", "--quiet", "-c", &branch],
-                    Some(config_root),
-                    true,
-                )
-                .with_context(|| format!("cannot create branch {} in the root", branch))?;
-            }
-            crate::commands::topic::run(
-                Some(config_root),
-                crate::commands::topic::Action::Join(names.clone()),
-                verbose,
-                false,
-                false,
-                &mut std::io::sink(),
-                &mut std::io::sink(),
-            )?;
-            let created = if current.is_none() { " (created)" } else { "" };
-            writeln!(
-                out,
-                "  topic {}{}: {} joined",
-                branch,
-                created,
-                names.join(", ")
-            )?;
-        }
-    }
-
     print_edits(&edits, out)?;
     if opts.dry_run {
         writeln!(out, "(dry run: nothing changed)")?;
@@ -530,12 +539,7 @@ fn raise(
     let committed = apply(&edits, opts.commit, out)?;
     let mut next: Vec<String> = Vec::new();
     for edit in &edits {
-        let dir = edit
-            .repo
-            .strip_prefix(config_root)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let dir = if dir.is_empty() { ".".to_string() } else { dir };
+        let dir = name_of(config_root, &edit.repo);
         if !next.contains(&dir) {
             next.push(dir);
         }
@@ -549,176 +553,6 @@ fn raise(
     to_push(config_root, &committed, out)
 }
 
-/// Every release tag of the repository at `url`, from its remote.
-fn release_tags(url: &str) -> Result<Vec<String>> {
-    let (refs, _) = crate::git::ls_remote_full(&crate::ci::remote_url(url))
-        .with_context(|| format!("cannot list the tags of {}", url))?;
-    Ok(refs
-        .into_iter()
-        .filter_map(|(_, name)| name.strip_prefix("refs/tags/").map(str::to_string))
-        .collect())
-}
-
-/// The topic an upgrade creates when there is none: named after the one
-/// dependency and its new tag, or the day for several.
-fn generated_branch(raised: &[String], edits: &[Edit]) -> String {
-    match raised {
-        [one] => {
-            let name = Path::new(one)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| one.clone());
-            let tag = edits
-                .iter()
-                .find(|e| &e.dependency == one)
-                .map(|e| e.to.clone())
-                .unwrap_or_default();
-            format!("upgrade/{}-{}", name, tag)
-        }
-        _ => format!("upgrade/{}", chrono::Local::now().format("%Y-%m-%d")),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Writing what resolution selected
-// ---------------------------------------------------------------------------
-
-#[allow(clippy::too_many_arguments)]
-fn resolved(
-    config: &GitScaleConfig,
-    config_root: &Path,
-    here: &crate::paths::Here,
-    sources: &Sources,
-    artefacts: &Artefacts,
-    opts: &Options,
-    verbose: bool,
-    out: &mut dyn Write,
-) -> Result<()> {
-    let resolution =
-        crate::resolve::workspace(config, config_root, true, sources, Some(artefacts), verbose)?;
-    let mut dirs = Vec::new();
-    for dir in opts.dirs {
-        let rel = here.relative(dir)?.to_string_lossy().into_owned();
-        if !config.repos.iter().any(|e| e.directory == rel) {
-            bail!("{} is not an entry of the root {}", dir, CONFIG_FILENAME);
-        }
-        dirs.push(rel);
-    }
-
-    // Only entries that already give a revision: one without leaves it to
-    // the dependencies on purpose, and an override is the root's own choice.
-    struct Change {
-        directory: String,
-        from: String,
-        to: String,
-        by: String,
-        branch: bool,
-    }
-    let mut changes = Vec::new();
-    for entry in &config.repos {
-        if entry.revision.is_empty()
-            || entry.is_override
-            || (!dirs.is_empty() && !dirs.contains(&entry.directory))
-        {
-            continue;
-        }
-        let Some(slot) = resolution.slot(&entry.directory) else {
-            continue;
-        };
-        // On a topic: what a merge would pin, never the topic branch.
-        let (to, by, kind) = match (&slot.topic, &slot.chosen) {
-            (Some(topic), _) => match &topic.pin {
-                Some(pin) => (pin.revision.clone(), pin.by.clone(), None),
-                None => continue,
-            },
-            (None, Some(chosen)) => (
-                chosen.revision.clone(),
-                chosen.by.clone(),
-                Some(chosen.kind),
-            ),
-            _ => continue,
-        };
-        if to == entry.revision {
-            continue;
-        }
-        changes.push(Change {
-            directory: entry.directory.clone(),
-            from: entry.revision.clone(),
-            to,
-            by,
-            branch: kind == Some(crate::resolution::RevKind::Branch),
-        });
-    }
-
-    if changes.is_empty() {
-        writeln!(
-            out,
-            "Every root entry already declares the revision it resolves to."
-        )?;
-        return Ok(());
-    }
-    let width = |f: &dyn Fn(&Change) -> &str| {
-        changes
-            .iter()
-            .map(|c| f(c).chars().count())
-            .max()
-            .unwrap_or(0)
-    };
-    let (dw, fw, tw) = (
-        width(&|c| &c.directory),
-        width(&|c| &c.from),
-        width(&|c| &c.to),
-    );
-    for change in &changes {
-        let moving = if change.branch {
-            ", a branch: the pin will move"
-        } else {
-            ""
-        };
-        writeln!(
-            out,
-            "{:<dw$}   {:<fw$} → {:<tw$}   raised by {}{}",
-            change.directory,
-            change.from,
-            change.to,
-            change.by,
-            moving,
-            dw = dw,
-            fw = fw,
-            tw = tw,
-        )?;
-    }
-    let count = crate::cache::plural(changes.len(), "entry", "entries");
-    if opts.dry_run {
-        writeln!(out, "{} would change (dry run: nothing changed)", count)?;
-        return Ok(());
-    }
-    let edits: Vec<Edit> = changes
-        .iter()
-        .map(|c| Edit {
-            repo: config_root.to_path_buf(),
-            label: CONFIG_FILENAME.to_string(),
-            key: c.directory.clone(),
-            from: c.from.clone(),
-            to: c.to.clone(),
-            dependency: c.directory.clone(),
-        })
-        .collect();
-    set_revisions(
-        &config_root.join(CONFIG_FILENAME),
-        &edits
-            .iter()
-            .map(|e| (e.key.clone(), e.to.clone()))
-            .collect::<Vec<_>>(),
-    )?;
-    writeln!(out, "Updated {} in {}", count, CONFIG_FILENAME)?;
-    if opts.commit {
-        let committed = commit_configs(&edits, out)?;
-        to_push(config_root, &committed, out)?;
-    }
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Shared
 // ---------------------------------------------------------------------------
@@ -726,14 +560,6 @@ fn resolved(
 /// Whether `entry` asks for the repository `slot` checks out.
 fn same_repo(entry: &RepoEntry, slot: &Slot) -> bool {
     crate::urls::normalize(&entry.repo_url) == crate::urls::normalize(&slot.url)
-}
-
-/// Whether `revision` is a version below `tag`: `None` when the two are not
-/// versions of one stream, so nothing can be said.
-fn below(revision: &str, tag: &str) -> Option<bool> {
-    let (have, want) = (version::parse(revision)?, version::parse(tag)?);
-    have.compare(&want)
-        .map(|order| order == std::cmp::Ordering::Less)
 }
 
 fn print_edits(edits: &[Edit], out: &mut dyn Write) -> Result<()> {

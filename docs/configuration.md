@@ -7,7 +7,7 @@
 - [`singleton`](#singleton)
 - [`[registries]`](#registries)
 - [`[artefact]`](#artefact)
-- [`[develop]`](#develop)
+- [`[branches]`](#branches)
 - [`[topic]`](#topic)
 - [`[clean]`](#clean)
 - [`[hooks]`](#hooks)
@@ -29,7 +29,7 @@ A checked-out sub-repository may carry its own `.gitscale.toml`. Which parts of
 it are read, and when, is covered under [nested configs](#nested-configs).
 
 Unknown keys and unknown tables are ignored on read, except inside
-[`[artefact]`](#artefact), [`[resolve]`](#resolve), [`[develop]`](#develop),
+[`[artefact]`](#artefact), [`[resolve]`](#resolve), [`[branches]`](#branches),
 [`[topic]`](#topic) and [`[forward]`](#forward), where a misspelt key would
 quietly do less than meant. [`git scale require` and `unrequire`](cli.md#git-scale-require--unrequire)
 and [`git upgrade`](cli.md#git-upgrade) edit the file in place: comments, key
@@ -40,8 +40,8 @@ order and unknown tables are kept.
 ```toml
 [repos]
 "imports/core"  = { url = "git@github.com:org/core.git", revision = "main" }
-"imports/utils" = { url = "https://github.com/org/utils.git", revision = "v2.1.0", artefact = "overlay" }
-"meta/frontend" = { url = "https://github.com/org/frontend.git", revision = "main", artefact = "replace" }
+"imports/utils" = { url = "https://github.com/org/utils.git", revision = "v2.1.0" }
+"meta/frontend" = { url = "https://github.com/org/frontend.git", revision = "main" }
 "vendor/tools"  = { url = "https://github.com/org/tools.git", recursive = false }
 
 [registries]
@@ -51,7 +51,7 @@ order and unknown tables are kept.
 include = ["dist/**"]
 exclude = ["**/*.map"]
 
-[develop]
+[branches]
 pinned = ["main", "staging", "release/*"]
 
 [topic]
@@ -86,7 +86,6 @@ the config.
 |---|---|---|---|
 | `url` | string | **required** | Repository URL: HTTPS, SSH (`git@host:owner/repo.git` or `ssh://git@host/owner/repo.git`), or a local path |
 | `revision` | string | `""` | Branch, tag or full commit SHA (40 or 64 hex digits). A minimum: [resolution](recursive-dependencies.md#how-a-revision-is-chosen) may raise it to what a dependency asks for. Empty asks for nothing, leaving it to the dependencies — or, when nobody asks, the remote's default branch. See [pinning a revision](dependencies.md#pinning-a-revision) |
-| `artefact` | string | unset | `"replace"`: the published image instead of a checkout. `"overlay"`: a checkout with the image's build output laid over it. See [artefacts](dependencies.md#artefacts-replace-and-overlay) |
 | `recursive` | bool | `true` | Read this repository's own `.gitscale.toml`: resolve its transitive dependencies, and clean it by its own `[clean]` rules. With `false`, that config is not read at all, and [`clean`](clean.md#per-repo-clean) cleans the repository without its keep-list |
 | `override` | bool | `false` | Exactly this revision, and nothing higher: wins over every request from a repository below this one, and must agree with the rest. Needs a `revision`. See [overrides](recursive-dependencies.md#overrides) |
 | `singleton` | bool | unset | `true`: this repository may be checked out only once, whatever majors are asked for. `false`: relaxes a `true` from repositories below this one. See [singleton](recursive-dependencies.md#singleton) |
@@ -183,16 +182,19 @@ that matches it, and a group that matches nothing fails the publish. Every
 file shipped must be tracked and unmodified at the commit, or ignored — the
 [artefact policy](artefacts.md#the-artefact-policy).
 
-This table belongs to the producing repository. A workspace that declares an
-artefact entry never reads it.
+This table belongs to the producing repository. A workspace that takes it as
+an artefact never reads it: what it ships is in the image. How a checkout
+arrives is no config's to say — see [`git scale prefer`](artefacts.md#choosing-how-a-checkout-arrives).
 
-## `[develop]`
+## `[branches]`
 
-Which of this repository's branches are **pinned**: built from pins, never a
-[topic](topics.md).
+This repository's long-lived branches, its **pinned** ones. A pinned branch is
+built from pins, never a [topic](topics.md); merges into it are
+[gated](topics.md#topics-in-ci); and the version tags it holds are the
+repository's releases.
 
 ```toml
-[develop]
+[branches]
 pinned = ["main", "staging", "release/*"]
 ```
 
@@ -200,10 +202,16 @@ pinned = ["main", "staging", "release/*"]
 |---|---|---|---|
 | `pinned` | array of strings | the remote's default branch (`main` and `master` when unknown) | Branch names or globs (`*` matches any run of characters). A written list is exactly what is pinned: the default branch is not implied, and `[]` makes every branch a topic |
 
-In the root, it decides whether the root's branch is a topic. In a dependency,
-read at the revision selected, it holds what that repository asks for at its
-pins when the topic's branch is one it pins — see
-[pinned dependencies](topics.md#inside-a-topic).
+Where it is read:
+
+- **In the root:** whether the root's branch is a topic, and whether
+  [`git scale check`](cli.md#git-scale-check) gates a merge into it.
+- **In a dependency, at its default branch:** which tags are its releases, for
+  [`git upgrade`](topics.md#promotion-git-upgrade). A pin older than the list
+  follows it too.
+- **In a dependency, at the revision selected:** when the topic's branch is one
+  it pins, what it asks for stays at its pins — see
+  [pinned dependencies](topics.md#inside-a-topic).
 
 ## `[topic]`
 
@@ -265,13 +273,15 @@ sequence.
 ## Nested configs
 
 When a checked-out repository carries its own `.gitscale.toml` and the entry is
-`recursive = true` (the default), GitScale reads three things from it:
+`recursive = true` (the default), GitScale reads these from it:
 
 - **`[repos]`** — to resolve [transitive dependencies](recursive-dependencies.md):
   every entry is a request, resolved with the rest of the workspace, checked
   out once and linked instead of nested.
 - **`singleton`** — whether the repository allows only one checkout of itself.
-- **`[develop]`** — which branches it [pins](#develop) for its dependencies.
+- **`[branches]`** — which branches it [pins](#branches): for its
+  dependencies at the revision selected, and for its releases, read by
+  `upgrade` from its default branch.
 - **`[clean]`** — to decide what [`clean`](clean.md) keeps in that repository.
 
 Everything else in a nested config — `[resolve]`, `[registries]`, `[artefact]`,

@@ -14,7 +14,9 @@
 - [`git scale clean`](#git-scale-clean)
 - [`git scale gc`](#git-scale-gc)
 - [`git scale require` / `unrequire`](#git-scale-require--unrequire)
+- [`git scale prefer`](#git-scale-prefer)
 - [`git scale check`](#git-scale-check)
+- [`git scale hash`](#git-scale-hash)
 - [`git scale artefact`](#git-scale-artefact)
 - [`git scale cache`](#git-scale-cache)
 - [`git scale hook`](#git-scale-hook)
@@ -53,12 +55,14 @@ it meets the same bar. Every top-level command also works as `git scale
 | [`ls`](#git-scale-ls) (`list`) | Every checkout: its revision, how it was chosen, its state |
 | [`explain`](#git-explain) | Every request behind a checkout's revision, and which one won |
 | [`topic`](#git-topic) | Begin, go to, join, show and end topics |
-| [`upgrade`](#git-upgrade) | Promote a topic's released repositories, raise dependencies, or write what resolution selected |
+| [`upgrade`](#git-upgrade) | Promote a topic's released repositories, or raise dependencies to their newest release |
 | [`sync`](#git-scale-sync) | Put every checkout where resolution says, against the remotes now |
-| [`clean`](#git-scale-clean) | Remove untracked files, keeping every checkout, link and overlay |
+| [`clean`](#git-scale-clean) | Remove untracked files, keeping every checkout and link |
 | [`gc`](#git-scale-gc) | Compact the stores and drop images nothing uses |
 | [`require`](#git-scale-require--unrequire) / [`unrequire`](#git-scale-require--unrequire) | Add or remove a dependency, and place the workspace |
-| [`check`](#git-scale-check) | The merge gate: fail while anything comes from a topic branch |
+| [`prefer`](#git-scale-prefer) | How checkouts arrive: their sources, or the artefact of their release |
+| [`check`](#git-scale-check) | The merge gate: fail while anything comes from a topic branch or a build |
+| [`hash`](#git-scale-hash) | The source hash of the root or a checkout: what its own pipeline builds |
 | [`artefact`](#git-scale-artefact) | Publish build output as an artefact, and see what the registry holds |
 | [`cache`](#git-scale-cache) | Inspect and maintain the CI cache |
 | [`hook`](#git-scale-hook) | Install or inspect GitScale's git hooks and man pages |
@@ -191,7 +195,7 @@ sequence.
 | Command | Then |
 |---|---|
 | `pull` | [Placement](workflow.md#placement), online: every checkout up to date, detached ones included |
-| `fetch` | Every store of the root and every artefact entry's commit and image refreshed. Nothing is placed |
+| `fetch` | Every store of the root, and the image of every release taken as an artefact, refreshed. Nothing is placed |
 | anything else | When it moved any repository's `HEAD`: placement, fetching only what resolution lacks. Otherwise nothing |
 
 See [when resolution asks the remotes](recursive-dependencies.md#when-resolution-asks-the-remotes).
@@ -326,6 +330,7 @@ git explain
 ```
 git topic [GLOBAL]
 git topic join [GLOBAL] <DIR>...
+git topic join [GLOBAL] --dependants [DIR...]
 git topic leave [GLOBAL] <DIR>...
 git topic start [GLOBAL] [--from BRANCH] [--worktree | --no-worktree] [--dir DIR] <NAME>
 git topic switch [GLOBAL] [--worktree | --no-worktree] [--dir DIR] <NAME>
@@ -338,6 +343,7 @@ git topic finish [GLOBAL] [--force] [NAME]
 |---|---|
 | `git topic` | Print the topic branch of the checkout the current directory is in; off a topic, nothing, exit 1. Offline |
 | `join <DIR>...` | Put checkouts on the topic, from the commit each is at, writable — see [join and leave](topics.md#git-topic-join--leave) |
+| `join --dependants [DIR...]` | Join the checkouts that ask for each `DIR` below its newest release; with none, those asking for the topic's changes, one level up |
 | `leave <DIR>...` | Take them back to their pins, their topic branches deleted |
 | `start <NAME>` | Begin a topic from the remote's default branch, or `--from BRANCH` — see [starting, switching and finishing](topics.md#starting-switching-and-finishing-topics) |
 | `switch <NAME>` | Go to an existing branch of the root: a topic, a colleague's, or a pinned one |
@@ -371,39 +377,36 @@ git topic finish
 ## `git upgrade`
 
 ```
-git upgrade [GLOBAL] [--resolved] [--major] [--commit] [--dry-run] [-c, --create BRANCH] [DIR...]
+git upgrade [GLOBAL] [--major] [--commit] [--dry-run] [DIR...]
 ```
 
 | Option | Meaning |
 |---|---|
-| `--resolved` | Write the revision resolution selected into the root's own entries, with no tag lookup |
-| `--major` | Let a raise cross a semver major |
+| `--major` | Let a raise cross a major |
 | `--commit` | Commit each edited `.gitscale.toml`, that file alone |
 | `--dry-run` | Print the plan and change nothing |
-| `-c, --create <BRANCH>` | The topic to create when none is active and a repository other than the root has to be edited |
 
-With no directories: promote the topic's slots whose change a release now
-holds, writing that release into the topic's configs and taking them off the
-topic. With directories: raise each to its newest release in every config that
-asks for it, joining the requesters to a topic — created in the root when
-there is none. With `--resolved`: record what resolution selected. Edits keep
-comments and key order. With `--commit`, the last line names the repositories
-that now have commits to push — a promotion edits other topic checkouts'
-configs too:
+On a topic only. With no directories: promote the topic's slots whose change a
+release now holds — writing that release into the topic's configs, deleting
+their topic branches on their remotes, taking them off the topic. With
+directories: raise each to its newest release — a tag holding its pin, on a
+release branch where the repository names them — in the topic's configs that
+ask for it; a requester off the topic is named with the `git topic join` that
+brings it in. Edits keep comments and key order. With `--commit`, the last line
+names the repositories that now have commits to push — a promotion edits other
+topic checkouts' configs too:
 
 ```
 to push: imports/b, . — git scale push
 ```
 
-Refuses in CI. See [promotion](topics.md#promotion-git-upgrade),
-[raising](topics.md#raising-a-dependency-git-upgrade-dir) and
-[`--resolved`](topics.md#writing-what-resolution-selected-git-upgrade---resolved).
+Refuses in CI. See [promotion](topics.md#promotion-git-upgrade) and
+[raising](topics.md#raising-a-dependency-git-upgrade-dir).
 
 ```
 git upgrade --commit
 git upgrade imports/d
 git upgrade .                    # inside imports/d
-git upgrade --resolved --dry-run
 ```
 
 ## `git scale sync`
@@ -442,7 +445,7 @@ git scale clean [GLOBAL] [-n] [-f] [-d] [-x | -X] [-e PATTERN]... [-q] [DIR...]
 
 `git clean` with these flags in the root and each checkout (or the named ones;
 `.` is the root), each once, never through a link. Always kept: every
-checkout at every level, an overlay's files, managed links, `.gitscale.toml`
+checkout at every level, managed links, `.gitscale.toml`
 and each repository's `[clean] exclude`. See [cleaning](clean.md).
 
 ```
@@ -468,7 +471,7 @@ period dropped. Refuses in CI. See [compacting](clean.md#compacting-git-scale-gc
 ## `git scale require` / `unrequire`
 
 ```
-git scale require [GLOBAL] [--artefact replace|overlay] <DIR> <URL> [REVISION]
+git scale require [GLOBAL] <DIR> <URL> [REVISION]
 git scale unrequire [GLOBAL] <DIR>
 ```
 
@@ -477,7 +480,6 @@ git scale unrequire [GLOBAL] <DIR>
 | `DIR` | Where the checkout goes, from the current directory |
 | `URL` | The repository URL |
 | `REVISION` | Branch, tag or commit SHA. Left out, no revision is written |
-| `--artefact <USE>` | `replace` or `overlay`: consume the repository's published [artefact](artefacts.md) |
 
 Edit the root's `.gitscale.toml` in place — comments, key order and tables
 GitScale does not know about are kept — then place the workspace, online.
@@ -489,8 +491,32 @@ holds nothing and reports it otherwise. See
 
 ```
 git scale require imports/utils https://github.com/acme/utils.git v2.1.0
-git scale require --artefact replace meta/svc https://github.com/acme/svc.git main
 git scale unrequire imports/utils
+```
+
+## `git scale prefer`
+
+```
+git scale prefer [GLOBAL] [DIR...]
+git scale prefer [GLOBAL] --source|--artefact <DIR>...
+```
+
+| Option | Meaning |
+|---|---|
+| `--source` | Its sources: the default, so this removes the preference |
+| `--artefact` | The published image of its release, in place of the sources |
+
+Without a form: the preferences of the `DIR`s, or every preference with the
+checkouts it applies to. With one — exactly one, and at least one `DIR` — the
+preference for each checkout's repository, every major of it, in every
+worktree of the root. It only records: the next placement applies it, and
+`git scale ls` shows `source → artefact` meanwhile. See
+[choosing how a checkout arrives](artefacts.md#choosing-how-a-checkout-arrives).
+
+```
+git scale prefer --artefact imports/billing-sdk
+git scale prefer
+git scale pull
 ```
 
 ## `git scale check`
@@ -500,10 +526,42 @@ git scale check [GLOBAL]
 ```
 
 The merge gate: fails while any checkout resolves from a topic branch rather
-than a revision written in a config, naming each one and how to fix it. In a
+than a revision written in a config, or any config pins a
+[build](dependencies.md#build), naming each one and how to fix it. In a
 merge request pipeline whose target is not a branch the root pins, it passes
 without checking. Resolves online; needs no history. See
 [the merge gate](topics.md#topics-in-ci).
+
+## `git scale hash`
+
+```
+git scale hash [GLOBAL] [--committed] [-f, --format text|json] [DIR...]
+```
+
+The source hash of the root, or of each `DIR`: one SHA-256 of what that
+repository's own pipeline builds at the commit it is at. Text: `<hash>  <DIR>`
+per line, like `sha256sum`. Tag an image with it, and any workspace can tell
+which image holds exactly the sources it has.
+
+- **What it covers:** the repository's tree, and the tree of every repository
+  its config reaches, each once — its config resolved as if it were the root,
+  from this workspace's stores: on a topic branch with that topic's branches,
+  at its pin with pins only. So a checkout hashes as its own pipeline does,
+  whatever the workspace around it raised. An entry with `recursive = false`
+  adds its own tree and nothing below it.
+- **The input:** a line `<normalised url> <tree id>` per repository, the
+  repository itself first and the rest sorted. Git's object ids, so a squash
+  merge that changes no file keeps the hash.
+- **Offline.** A source with uncommitted changes fails it:
+  `imports/core has uncommitted changes; commit them, or --committed to hash its commit`.
+
+| Option | Meaning |
+|---|---|
+| `--committed` | Hash each source's commit, its uncommitted changes left out |
+| `-f, --format <FORMAT>` | `text` (default), or `json`: per `DIR`, the hash and each source's URL, its directory in this workspace, commit and tree |
+
+`git scale ls --format json` carries the same hash as `source_hash` on each
+checkout.
 
 ## `git scale artefact`
 
@@ -513,23 +571,24 @@ git scale artefact <publish|show|list> [GLOBAL] [OPTIONS]
 
 | Subcommand | Purpose |
 |---|---|
-| [`publish`](artefacts.md#artefact-publish) | Pack the files this repository's [`[artefact]`](configuration.md#artefact) table selects — one layer per group — and push them to its registry as the image for one commit. Run in the pipeline, after the build |
-| [`show [DIR...]`](artefacts.md#artefact-show) | For each artefact entry: the image, the commit its revision names now, whether that commit is published and with what layers, what is installed, and how the two compare |
-| [`list [DIR...]`](artefacts.md#artefact-list) | The commits each artefact entry has images for, labelled with the branches and tags that name them now, and which one is installed |
+| [`publish [RELEASE]`](artefacts.md#artefact-publish) | Pack the files this repository's [`[artefact]`](configuration.md#artefact) table selects — one layer per group — and push them to its registry as the image of the sources checked out, tagged with their source hash, and with `RELEASE` when one is given. Run in the pipeline, after the build; tagging the commit in git is the pipeline's, after it |
+| [`show [DIR...]`](artefacts.md#artefact-show) | For each checkout taken as an artefact, or each named: the release it is at, the image, whether that release is published, from which sources and with what layers, what is installed, and how the two compare |
+| [`list [DIR...]`](artefacts.md#artefact-list) | The releases each such checkout has images of, newest first, with the source hash of each, and which one is installed |
 
 | Option | Subcommand | Meaning |
 |---|---|---|
-| `--commit <SHA>` | `publish` | The commit to publish for, as a full SHA. Default: the CI job's commit (`CI_COMMIT_SHA`, `GITHUB_SHA`), else `HEAD` |
-| `--force` | `publish` | Replace an image already published for this commit with different files. Without it that is an error; publishing the same files again is always a no-op |
+| `RELEASE` | `publish` | The release this commit is: a version, such as `v1.4.0` or `v1-2026.10.06-153012`. The caller names it; one already tagging another commit is refused |
+| `--force` | `publish` | Replace an image already published for these sources with different files, or move a release naming another image. Without it either is an error; publishing the same files again is always a no-op |
 | `--dry-run` | `publish` | List every file of every layer and the layer digests, and send nothing. Needs no registry and no commit — the way to check what the patterns select |
+| `--reuse` | `publish` | Pack nothing: release the image of these sources — the branch build a squash merge kept — as `RELEASE`, which it needs. Fails when there is no such image. See [releasing without rebuilding](artefacts.md#releasing-without-rebuilding) |
 
 `-C` names the producing repository for `publish`, the workspace for `show` and
-`list`. `show` and `list` change nothing: they ask the remote and the
-registry, and read what is installed. Naming an entry that is not an artefact
-entry is an error.
+`list`. `show` and `list` change nothing: they ask the registry, and read what
+is installed. A named checkout must be one taken as an artefact.
 
 ```
 gitscale artefact publish
+gitscale artefact publish --reuse v1-2026.10.06-153012
 gitscale artefact publish --dry-run
 git scale artefact show
 git scale artefact list meta/app

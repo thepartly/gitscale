@@ -1,6 +1,7 @@
 //! What `git scale fetch` does after git's own fetch in each repository:
-//! refresh every store of the root, and each artefact entry's commit and
-//! image. Nothing is placed: the next placement uses what this brought.
+//! refresh every store of the root, and what the registry has for each
+//! artefact's release. Nothing is placed: the next placement uses what this
+//! brought.
 
 use anyhow::Result;
 use std::io::Write;
@@ -34,10 +35,12 @@ pub fn refresh(
         Some(&artefacts),
         verbose,
     );
-    // One job per artefact entry and per store, each named as the workspace
-    // knows it: a store by the checkouts made from it, else by its own name.
+    // One job per checkout taken as an artefact, and per other store, each
+    // named as the workspace knows it: a store by the checkouts made from
+    // it, else by its own name.
     enum Job {
-        Artefact(crate::config::RepoEntry),
+        /// The entry, and the commit its release is.
+        Artefact(crate::config::RepoEntry, String),
         Store(std::path::PathBuf),
     }
     let mut jobs: Vec<(String, Job)> = Vec::new();
@@ -47,15 +50,26 @@ pub fn refresh(
         .unwrap_or_default();
     for slot in slots {
         let entry = slot.entry();
-        if entry.is_artefact() && !config_root.join(&entry.directory).is_symlink() {
-            jobs.push((entry.directory.clone(), Job::Artefact(entry)));
+        let image = slot.form() == crate::prefer::Form::Artefact;
+        if image && !config_root.join(&entry.directory).is_symlink() {
+            let commit = slot.commit.clone().unwrap_or_default();
+            jobs.push((entry.directory.clone(), Job::Artefact(entry, commit)));
         }
     }
+    let imaged = |path: &std::path::Path| {
+        slots.iter().any(|s| {
+            s.form() == crate::prefer::Form::Artefact
+                && sources
+                    .stores
+                    .as_ref()
+                    .is_some_and(|st| st.repo_path(&crate::ci::remote_url(&s.url)) == path)
+        })
+    };
     if let Some(stores) = &sources.stores {
-        for path in stores.all() {
+        for path in stores.all().into_iter().filter(|p| !imaged(p)) {
             let label = slots
                 .iter()
-                .filter(|s| !s.entry().is_artefact())
+                .filter(|s| s.form() == crate::prefer::Form::Source)
                 .find(|s| stores.repo_path(&crate::ci::remote_url(&s.url)) == path)
                 .map(|s| s.directory.clone())
                 .unwrap_or_else(|| {
@@ -78,12 +92,8 @@ pub fn refresh(
         &names,
         interactive,
         |name| match by_name[name] {
-            Job::Artefact(entry) => match artefacts.fetch(entry) {
-                Ok(commit) => RepoStatus::Ok(format!(
-                    "{} (artefact {})",
-                    name,
-                    crate::git::short_sha(&commit)
-                )),
+            Job::Artefact(entry, commit) => match artefacts.fetch(entry, commit) {
+                Ok(()) => RepoStatus::Ok(format!("{} (artefact {})", name, entry.revision)),
                 Err(e) => RepoStatus::Fail(format!("{}: {}", name, e)),
             },
             Job::Store(path) => match sources.stores.as_ref().map(|s| s.update_path(path)) {

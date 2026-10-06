@@ -2,37 +2,39 @@
 
 Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Regenerate with `GITSCALE_UPDATE_CATALOG=1 cargo test --test it catalog::`. The naming rules are in [testing.md](testing.md).
 
-623 integration tests (266 normal, 207 edge, 133 error, 17 perf), 50 of them ignored; 169 unit tests.
+641 integration tests (275 normal, 204 edge, 144 error, 18 perf), 44 of them ignored; 168 unit tests.
 
 | Feature | normal | edge | error | perf | total |
 |---|---:|---:|---:|---:|---:|
-| [artefact](#artefact) | 22 | 19 | 19 | 6 | 66 |
-| [cache](#cache) | 16 | 7 | 4 | 0 | 27 |
+| [artefact](#artefact) | 25 | 13 | 25 | 7 | 70 |
+| [cache](#cache) | 14 | 7 | 4 | 0 | 25 |
 | [catalog](#catalog) | 2 | 0 | 0 | 0 | 2 |
 | [check](#check) | 9 | 2 | 2 | 0 | 13 |
 | [ci_auth](#ci_auth) | 4 | 10 | 2 | 0 | 16 |
 | [ci_checkout](#ci_checkout) | 4 | 4 | 4 | 0 | 12 |
-| [clean](#clean) | 15 | 19 | 11 | 0 | 45 |
+| [clean](#clean) | 15 | 18 | 11 | 0 | 44 |
 | [cli](#cli) | 5 | 1 | 4 | 0 | 10 |
 | [config](#config) | 1 | 1 | 5 | 0 | 7 |
 | [exclude](#exclude) | 2 | 1 | 0 | 0 | 3 |
 | [forward](#forward) | 22 | 1 | 3 | 1 | 27 |
+| [hash](#hash) | 4 | 2 | 1 | 0 | 7 |
 | [hook](#hook) | 19 | 22 | 10 | 1 | 52 |
 | [links](#links) | 10 | 14 | 0 | 0 | 24 |
-| [ls](#ls) | 20 | 9 | 3 | 1 | 33 |
+| [ls](#ls) | 19 | 9 | 3 | 1 | 32 |
 | [man](#man) | 1 | 0 | 0 | 0 | 1 |
 | [network](#network) | 2 | 0 | 1 | 0 | 3 |
 | [output](#output) | 5 | 0 | 0 | 0 | 5 |
 | [placement](#placement) | 6 | 14 | 8 | 1 | 29 |
 | [post_sync](#post_sync) | 4 | 7 | 9 | 0 | 20 |
+| [prefer](#prefer) | 2 | 1 | 1 | 0 | 4 |
 | [registry](#registry) | 11 | 9 | 8 | 2 | 30 |
-| [require](#require) | 4 | 4 | 6 | 0 | 14 |
-| [resolution](#resolution) | 25 | 15 | 13 | 3 | 56 |
+| [require](#require) | 3 | 4 | 6 | 0 | 13 |
+| [resolution](#resolution) | 26 | 15 | 14 | 3 | 58 |
 | [skill](#skill) | 5 | 5 | 3 | 0 | 13 |
 | [stores](#stores) | 3 | 10 | 2 | 1 | 16 |
 | [sync](#sync) | 5 | 7 | 0 | 1 | 13 |
-| [topic](#topic) | 31 | 17 | 12 | 0 | 60 |
-| [upgrade](#upgrade) | 11 | 8 | 3 | 0 | 22 |
+| [topic](#topic) | 33 | 17 | 12 | 0 | 62 |
+| [upgrade](#upgrade) | 12 | 9 | 5 | 0 | 26 |
 | [workspace](#workspace) | 2 | 1 | 1 | 0 | 4 |
 
 ## Integration tests
@@ -41,27 +43,23 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 
 | ID | Kind | Test | What it holds |
 |---|---|---|---|
-| artefact-001 | normal | `normal_001_publish_tags_the_commit_and_annotates_the_image` |  |
+| artefact-001 | normal | `normal_001_publish_tags_the_source_hash_and_annotates_the_image` | The image is tagged with the source hash of what it was built from and with the commit's version tags — never the commit — and records the commit, its tree and the hash. |
 | artefact-002 | normal | `normal_002_a_dry_run_lists_the_layers_and_sends_nothing` |  |
-| artefact-003 | normal | `normal_003_an_annotated_tag_resolves_to_its_commit` |  |
-| artefact-004 | normal | `normal_004_a_full_sha_is_used_as_given` |  |
-| artefact-005 | normal | `normal_005_no_revision_follows_the_default_branch` |  |
-| artefact-006 | normal | `normal_006_sync_installs_a_replace_image` |  |
-| artefact-007 | normal | `normal_007_sync_takes_a_newly_published_image` |  |
+| artefact-003 | normal | `normal_003_an_annotated_tag_is_a_release` |  |
+| artefact-004 | error | `error_004_an_artefact_needs_a_release` | An artefact is only ever a release's: a commit, a branch, or no revision at all fails the checkout, naming who asks for it. |
+| artefact-006 | normal | `normal_006_sync_installs_the_image_of_a_release` |  |
+| artefact-007 | normal | `normal_007_sync_takes_the_image_of_a_newer_release` |  |
 | artefact-008 | normal | `normal_008_fetch_records_what_the_registry_holds_and_installs_nothing` |  |
-| artefact-009 | normal | `normal_009_ls_says_behind_and_missing_after_a_fetch` |  |
-| artefact-010 | normal | `normal_010_a_republished_commit_shows_as_changed_and_sync_takes_it` |  |
-| artefact-011 | normal | `normal_011_ls_json_carries_the_installed_commit_and_digest` |  |
-| artefact-012 | normal | `normal_012_changing_the_configured_revision_is_a_ref_mismatch` |  |
+| artefact-009 | normal | `normal_009_ls_says_missing_after_a_fetch` | A release wanted that has no image yet is `missing` once a fetch has looked; published, the checkout is only at the wrong release until a sync. |
+| artefact-010 | normal | `normal_010_a_republished_release_shows_as_changed_and_sync_takes_it` |  |
+| artefact-011 | normal | `normal_011_ls_json_carries_the_installed_release_and_digest` |  |
+| artefact-012 | normal | `normal_012_wanting_another_release_is_a_ref_mismatch` |  |
 | artefact-013 | normal | `normal_013_records_live_in_the_git_directory_not_the_checkout` | What gitscale records about a checkout lives in the workspace's git directory, never in the checkout, whose every file is the artefact's. |
 | artefact-014 | normal | `normal_014_show_says_what_the_registry_and_the_checkout_hold` |  |
-| artefact-015 | normal | `normal_015_list_shows_every_published_commit_with_its_refs` |  |
+| artefact-015 | normal | `normal_015_list_shows_every_release_with_its_source_hash` | `list` shows each release with an image, newest first, with the source hash it was built from — not the builds no release names. |
 | artefact-016 | normal | `normal_016_placement_prunes_cold_images_once_a_day` | Placement prunes the image store by itself — at most once a day, so the cost on every other placement is one stat. |
-| artefact-017 | normal | `normal_017_an_artefact_on_a_topic_is_the_tips_image_or_its_source` | On the topic, an artefact that replaces its checkout is the image of the branch tip when one is published, and that tip's source when not. |
-| artefact-018 | normal | `normal_018_an_overlay_lays_the_build_over_the_source` | An overlay is the source checkout with the image's untracked files laid over it: tracked files are the checkout's own, and the next overlay removes what this one wrote before laying its own. `clean` keeps them. |
+| artefact-017 | normal | `normal_017_an_artefact_on_a_topic_is_its_sources` | On the topic, a checkout taken as an artefact is its sources: the topic's branch of it, followed. Off the topic, the image of its release again. |
 | artefact-019 | edge | `edge_019_a_dry_run_lists_files_without_a_registry` | The way to see what would ship: a dry run lists the files even where the image cannot be worked out yet — no registry mapping, no commit. |
-| artefact-020 | edge | `edge_020_an_all_hex_tag_name_is_a_tag` |  |
-| artefact-021 | edge | `edge_021_a_branch_name_matches_exactly` |  |
 | artefact-022 | edge | `edge_022_an_installed_image_is_readonly_at_every_depth` | Read-only applies to the whole archive, not just its top level, dot files included — and an update still gets past the read-only files it replaces. What gitscale records about the checkout is kept outside it. |
 | artefact-023 | edge | `edge_023_sync_after_fetch_still_downloads_the_artefact` | A fetch only looks: an artefact it found in the registry is still to be downloaded by the sync that follows. |
 | artefact-024 | edge | `edge_024_an_old_style_checkout_is_replaced_on_sync` | A directory gitscale has no record of installing — one from an older gitscale, or made by hand — is replaced by `sync`, dot files and all. |
@@ -77,7 +75,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | artefact-034 | error | `error_034_sync_fails_when_nothing_is_published` |  |
 | artefact-035 | error | `error_035_a_corrupt_artefact_is_not_taken_as_current` | An archive that cannot be unpacked leaves nothing that later passes for the artefact: running sync again tries again, rather than taking the half-made directory as done. |
 | artefact-036 | error | `error_036_show_reports_an_entry_it_cannot_look_up_and_fails` |  |
-| artefact-037 | error | `error_037_show_and_list_refuse_an_entry_that_is_not_an_artefact` |  |
+| artefact-037 | normal | `normal_037_show_and_list_name_nothing_while_nothing_is_taken_as_an_artefact` |  |
 | artefact-038 | perf | `perf_038_an_identical_republish_uploads_nothing` |  |
 | artefact-039 | perf | `perf_039_a_sync_downloads_only_the_layer_that_changed` |  |
 | artefact-040 | perf | `perf_040_an_up_to_date_sync_asks_the_registry_nothing` |  |
@@ -85,28 +83,36 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | artefact-042 | perf | `perf_042_in_ci_without_the_cache_every_layer_is_downloaded` | A CI job without the cache keeps nothing: the config layer resolution reads is downloaded again by the install, four blobs a sync. |
 | artefact-043 | perf | `perf_043_parallel_cold_ci_jobs_download_each_blob_once` | N cold CI jobs on one runner, sharing its cache, download each blob once. |
 | artefact-044 | normal | `normal_044_foreign_layer_media_types_unpack_in_order` | Images other tools publish unpack too: a Docker-typed gzip layer and an uncompressed OCI tar layer, in order, so a later layer's file replaces an earlier one's. gitscale's own publisher writes neither, but an artefact is an ordinary image, and the docs say any registry and tool works. |
-| artefact-045 | normal | `normal_045_publish_in_a_gitlab_job_tags_the_jobs_commit_under_its_project` | In a GitLab job, `publish` tags the job's commit (`CI_COMMIT_SHA`) — not whatever `HEAD` is — under the job's project (`CI_PROJECT_URL`), which is the URL consumers declare. A wrong commit or image name would publish an artefact no consumer ever finds, or one under another commit's tag. |
-| artefact-046 | normal | `normal_046_publish_in_a_github_workflow_tags_its_commit_under_its_repository` | The same in a GitHub workflow: `GITHUB_SHA` is the commit, and `GITHUB_SERVER_URL`/`GITHUB_REPOSITORY` name the repository. |
-| artefact-047 | normal | `normal_047_an_overlay_is_readonly_off_a_topic_and_writable_on_its_branch` | An overlay's files are read-only on a detached checkout, as the rest of it is, and writable once the checkout is on a topic branch somebody develops in: a build there has to be able to replace them. |
-| artefact-048 | edge | `edge_048_an_overlay_never_replaces_a_tracked_file_or_the_config` | An overlay lays only what the checkout does not track: a tracked file is the commit's own, and the image's `.gitscale.toml` is for consumers to read, never laid over the checkout's. An image that ships either with other content — from another tool, or a forced publish — must not change the source the checkout holds. |
-| artefact-049 | edge | `edge_049_a_recreated_overlay_checkout_gets_its_build_again` | **ignored: bug: overlay is skipped when its record names the commit, though the files are gone** An overlay checkout deleted by hand — or by a CI runner's `git clean` of the root — and cloned again at the same commit gets its build again. What gitscale recorded about the old checkout says nothing about the new one: a source tree without its build is what the overlay exists to prevent. |
-| artefact-050 | edge | `edge_050_an_overlay_on_a_topic_without_an_image_keeps_the_previous_build` | On a topic, a branch tip with no image yet keeps the overlay that is there: the checkout moves to the tip, and the previous build stays, as the topics table in the docs says. |
+| artefact-045 | normal | `normal_045_publish_in_a_gitlab_job_names_the_image_after_its_project` | In a GitLab job, `publish` names the image after the job's project (`CI_PROJECT_URL`), which is the URL consumers declare: under any other name no consumer would find it. |
+| artefact-046 | normal | `normal_046_publish_in_a_github_workflow_names_the_image_after_its_repository` | The same in a GitHub workflow: `GITHUB_SERVER_URL`/`GITHUB_REPOSITORY` name the repository. |
 | artefact-051 | edge | `edge_051_an_image_with_a_readonly_directory_installs_and_updates` | **ignored: bug: a layer with a 0555 directory cannot be unpacked, nor the checkout replaced** An image whose directories are read-only — as another tool may write them — still installs, and the next version still replaces it. gitscale makes the files read-only itself; a directory it cannot write into would leave the checkout impossible to install or update. |
 | artefact-052 | edge | `edge_052_whiteout_files_are_unpacked_as_ordinary_files` | OCI whiteout files (`.wh.<name>`) are unpacked as ordinary files, and the file they delete stays. This pins current behaviour: gitscale's own images never hold whiteouts, and whether foreign multi-layer images should get OCI deletion semantics is the owner's call. |
-| artefact-053 | edge | `edge_053_publish_commit_checks_the_policy_against_that_commit` | `publish --commit` checks the artefact policy against the commit named, not `HEAD`: a file tracked there that the working tree has changed since breaks it. A short SHA is refused: an image is tagged with a full one. |
 | artefact-054 | edge | `edge_054_publish_ships_no_link_out_of_the_repository_unless_selected` | A repository holds symlinks out of itself that no artefact ships — the links gitscale plants for its own dependencies. `publish` ignores them, unless a pattern selects one: then it refuses, since such a link would point at nothing on the consumer's machine, or at something else. |
 | artefact-055 | edge | `edge_055_a_dry_run_outside_git_says_what_it_could_not_check` | A dry run where there is no commit and no remote still lists every file, and says what it could not work out — the commit, the image, and so the policy — rather than failing or pretending it checked. |
-| artefact-056 | edge | `edge_056_ls_fetch_on_a_topic_calls_the_installed_tip_ok` | On a topic, a `replace` entry installed from the branch tip's image is what the topic asks for: `ls --fetch` calls it ok, not behind the pinned revision. |
-| artefact-057 | edge | `edge_057_a_forced_republish_brings_the_dependencies_it_declares` | **ignored: bug: resolution reads the config layer of the image held for the commit, not the republished one** A forced re-publish that changes the image's `.gitscale.toml` changes what resolution reads: after a fetch says the image changed, the sync that installs the new files also brings the dependencies the new config declares. Files from one build and dependencies from another would be a checkout nobody published. |
-| artefact-058 | error | `error_058_a_registry_failing_mid_update_keeps_the_installed_version` | A registry that serves a damaged layer during an update leaves the installed version alone: everything is downloaded and checked before the old files go, as the docs promise. The installed files, the record of them and `ls` all still say the old commit. |
+| artefact-057 | edge | `edge_057_a_forced_republish_brings_the_dependencies_it_declares` | **ignored: bug: resolution reads the config layer of the image held for the release, not the republished one** A forced re-publish that changes the image's `.gitscale.toml` changes what resolution reads: after a fetch says the image changed, the sync that installs the new files also brings the dependencies the new config declares. Files from one build and dependencies from another would be a checkout nobody published. |
+| artefact-058 | error | `error_058_a_registry_failing_mid_update_keeps_the_installed_version` | A registry that serves a damaged layer during an update leaves the installed version alone: everything is downloaded and checked before the old files go, as the docs promise. The installed files, the record of them and `ls` all still say the old release. |
 | artefact-059 | error | `error_059_an_image_index_is_refused_rather_than_installed_empty` | **ignored: bug: a manifest without layers (an OCI index) is installed as an empty artefact** A tag that names an image index — what `docker buildx` pushes with provenance, or a multi-platform image — is not an image with no layers. Taking it for one would wipe the installed files and record an empty checkout as the artefact, and every later sync would succeed doing it again. |
 | artefact-060 | error | `error_060_archive_entries_that_leave_the_checkout_are_refused` | Nothing in an archive may land outside the checkout or be anything but a file, a directory or a symlink inside it: a `..` path, an absolute path, a hard link, a FIFO, and symlinks out — relative or absolute — each fail the whole install, and leave no half-unpacked checkout behind. |
 | artefact-061 | error | `error_061_a_symlink_through_a_symlink_cannot_point_out_of_the_checkout` | **ignored: bug: symlink targets are checked against the entry's path, not where it resolves** A symlink is judged by where it really resolves, not by its path in the archive: with `a/b -> ..`, an entry `a/b/l -> ../x` passes a check on its path (two levels down, one up) but lands at the top of the checkout, pointing out of it. The docs promise no symlink pointing out of the directory. |
-| artefact-062 | error | `error_062_an_overlay_never_writes_through_a_symlink_in_the_checkout` | **ignored: bug: the overlay copies files through symlinked directories of the checkout** An overlay writes only inside its checkout. A path in the image under a directory the checkout holds as a symlink — tracked, or a dependency link gitscale planted — must not be followed: here `link -> ../../victim` would have the overlay write into another directory of the workspace. |
 | artefact-063 | error | `error_063_an_unknown_layer_media_type_is_refused` | A layer of a kind gitscale cannot unpack — a Helm chart, say — fails the install with the media type named, rather than being unpacked as a tar or skipped. |
 | artefact-064 | error | `error_064_a_manifest_naming_an_invalid_digest_is_refused` | A manifest whose layer digest is not a well-formed sha256 digest is refused before the digest is ever used as a file name in the image store: `sha256:../../escape` would otherwise name a path outside it. |
-| artefact-065 | error | `error_065_an_overlay_without_an_image_fails_off_a_topic` | Off a topic, an overlay entry whose commit has no image fails, rather than handing over the sources without their build. |
 | artefact-066 | error | `error_066_ls_fetch_without_the_registry_shows_the_last_fetched_state` | `ls --fetch` that cannot reach the registry still prints the table, says the entry's row is what the last successful fetch saw, and does not pass that off as fresh. |
+| artefact-067 | normal | `normal_067_publish_releases_an_image_already_there` | A release named for a commit already published goes on its image, uploading nothing. |
+| artefact-068 | normal | `normal_068_reuse_releases_the_image_of_the_same_sources` | A squash merge that changes no file gives `main` a new commit with the branch build's sources: `publish --reuse` releases that build's image, as it is, packing and uploading nothing. |
+| artefact-069 | error | `error_069_reuse_fails_without_an_image_of_these_sources` | With no image of these sources there is nothing to reuse: `--reuse` fails, a dry run as well, so a release pipeline stops before it tags. |
+| artefact-070 | normal | `normal_070_without_access_to_its_sources_a_checkout_is_its_artefact` | A repository whose sources cannot be read is its artefact, with nothing to configure: its release found in its registry, its dependencies in its image's config layer, and its source hash from the tree its image records. |
+| artefact-071 | error | `error_071_without_access_a_branch_revision_needs_the_sources` | Without its sources, a branch cannot be resolved: only released versions. |
+| artefact-072 | edge | `edge_072_an_unreachable_remote_is_not_taken_for_one_without_access` | A remote that cannot be reached is not one that refused: its registry is not asked instead, and the fetch error is what is said. |
+| artefact-073 | error | `error_073_reuse_leaves_a_release_already_published_alone` | A release tag already naming an image stays where it is: `--reuse` refuses to move it, as a release is published once. |
+| artefact-074 | error | `error_074_publish_fails_on_a_source_hash_it_cannot_take` | A dependency that does not resolve leaves the source hash unknown: a dry run says so and lists the layers, a publish fails, as `--reuse` could not find the image it would push. |
+| artefact-075 | normal | `normal_075_without_access_a_raise_takes_the_newest_registry_version` | Without access to its sources, a raise takes the newest version its registry has: releases are cut in order on the producer's release branches, so the newest holds every one before it. |
+| artefact-076 | perf | `perf_076_an_artefact_downloads_none_of_its_history` | A checkout taken as an artefact downloads none of its history: its refs are listed, its config read from its image, and nothing of git is kept for it — someone without access, or not wanting the sources, gets only the build. |
+| artefact-077 | error | `error_077_a_release_must_be_a_version` | A release is named with a version; anything else is refused before anything is packed. |
+| artefact-078 | error | `error_078_a_release_of_another_commit_is_refused` | A release already made of another commit is never taken over: refused before anything is packed or pushed. |
+| artefact-080 | normal | `normal_080_a_build_pinned_by_its_source_hash_is_taken` | A build pinned by its source hash is taken as it is — here by a workspace that cannot read the sources, which no branch would reach: its files, its dependencies, and `build` as its revision's kind. |
+| artefact-081 | error | `error_081_check_refuses_a_build_pin` | A build pin is for trying a build out, never for shipping: the merge gate refuses it, naming the config that holds it. |
+| artefact-082 | error | `error_082_a_build_pin_needs_a_build` | A source hash that names no build fails, saying so; a malformed one too. |
+| artefact-083 | normal | `normal_083_with_access_a_build_pin_is_its_commit` | With access to the sources, a build pin is a checkout of the commit the build was made from. |
 
 ### cache
 
@@ -131,14 +137,12 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | cache-017 | edge | `edge_017_a_sha_pinned_entry_needs_no_ref_advertisement` |  |
 | cache-018 | edge | `edge_018_compact_works_from_outside_any_workspace` |  |
 | cache-019 | error | `error_019_an_unknown_period_is_refused_before_anything_is_deleted` |  |
-| cache-020 | normal | `normal_020_update_warms_overlay_images` | **ignored: bug: cache update warms only replace entries' images, not overlays'** `cache update` warms an overlay entry's image as well as its source: a CI job lays that image over the checkout, and with it already in the cache downloads no blob at all. |
 | cache-021 | normal | `normal_021_compact_evicts_a_cold_image_entry_whole` | An image entry nothing has used within the period goes whole, blobs and all, and `compact` counts it as an evicted entry. |
 | cache-022 | edge | `edge_022_compact_keeps_the_images_resolution_just_read` | **ignored: bug: config layers resolution reads are recorded without a use marker, so compact drops them at once** What resolution read into the cache seconds ago — an artefact's config layer, read by a CI `fetch` — is recently used: `compact` with a period of a month keeps it. |
 | cache-023 | edge | `edge_023_compact_removes_half_written_downloads` | A download a killed job left half-written is garbage: `compact` removes it from an entry it keeps, and leaves every blob a held image needs. |
-| cache-024 | error | `error_024_update_fails_for_an_unpublished_artefact_and_says_why` | `cache update` for an artefact whose commit has no image fails, and says it may not have been published yet, rather than warming something else. |
+| cache-024 | error | `error_024_update_fails_for_an_unpublished_artefact_and_says_why` | `cache update` for an artefact whose release has no image fails, and says so, rather than warming something else. |
 | cache-025 | error | `error_025_status_refuses_a_workspace_config_that_does_not_parse` | `cache status` does not need a workspace, but one whose config does not parse is an error, not a reason to guess at names. |
 | cache-026 | error | `error_026_without_a_cache_location_the_commands_say_how_to_set_one` | With no `GITSCALE_CACHE_DIR`, `XDG_DATA_HOME` or `HOME` there is nowhere to keep a cache: the cache commands say which variable to set. |
-| cache-027 | normal | `normal_027_status_names_an_overlay_image_after_its_entry` | **ignored: bug: cache status names an overlay's image entry by its cache name, not the entry** An overlay entry's image is named after the directory that declares it, as its snapshot is: one row for the repository, with both columns filled, rather than a second row under the cache's own name. |
 
 ### catalog
 
@@ -153,7 +157,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 |---|---|---|---|
 | check-001 | normal | `normal_001_gates_only_merges_into_pinned_branches` | A merge request into a branch the root does not pin is not gated. |
 | check-002 | normal | `normal_002_fails_a_merge_request_into_a_pinned_branch` | The gate's main case: a merge request into the branch the root pins, with a checkout taken from the topic, fails with exit 1 and says what would ship, what was tested and both ways out. |
-| check-003 | normal | `normal_003_pinned_globs_decide_which_targets_are_gated` | `[develop] pinned` decides which merge targets are gated, globs included: a merge into `release/1.0` is checked, and with that list set, `main` — which it does not name — is not. |
+| check-003 | normal | `normal_003_pinned_globs_decide_which_targets_are_gated` | `[branches] pinned` decides which merge targets are gated, globs included: a merge into `release/1.0` is checked, and with that list set, `main` — which it does not name — is not. |
 | check-004 | normal | `normal_004_on_github_the_base_ref_and_the_event_default_decide` | On GitHub the target is `GITHUB_BASE_REF` and the default branch comes from the event payload: a pull request into the repository's default branch is gated even when that branch is not called `main`, and one into another branch is not. |
 | check-005 | normal | `normal_005_names_the_config_of_the_dependency_that_pins_it` | The pin that would ship is named with the file it is written in: for a dependency's dependency, that repository's own `.gitscale.toml`. |
 | check-006 | normal | `normal_006_lists_every_checkout_taken_from_the_topic` | Every checkout taken from the topic is named, not only the first: fixing one at a time against a gate that hides the rest is a pipeline per slot. |
@@ -163,7 +167,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | check-010 | error | `error_010_in_ci_a_failed_fetch_fails_rather_than_answer_from_old_refs` | A gate that cannot fetch fails, though an earlier job fetched: runners keep the build directory between jobs, and refs fetched then would answer for a branch that has moved since. |
 | check-011 | error | `error_011_a_repository_it_cannot_fetch_fails_the_check` | A repository the gate cannot fetch, and never has, is an error with exit 1: a gate that cannot resolve must not pass. |
 | check-012 | normal | `normal_012_without_a_pipeline_default_origin_head_names_the_default_branch` | With no default branch from the pipeline — a GitHub event without a payload — the root's own `origin/HEAD` names it: a pull request into a default branch called `trunk` is gated. |
-| check-013 | edge | `edge_013_a_replace_artefact_from_the_topic_blocks` | A `replace` artefact taken from the topic — the image of its branch tip — blocks like a source checkout: a merge would ship the pinned image, not the one tested. |
+| check-013 | edge | `edge_013_an_artefact_from_the_topic_blocks` | An artefact taken from the topic — the image of its branch tip — blocks like a source checkout: a merge would ship the pinned image, not the one tested. |
 
 ### ci_auth
 
@@ -228,7 +232,6 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | clean-019 | normal | `normal_019_a_dry_run_names_why_it_skips_what_it_skips` | The dry run says why it leaves a repository alone, so a skipped one is never mistaken for a clean one: an artefact, a checkout not cloned yet, and an entry that is a symlink each name their reason. |
 | clean-020 | normal | `normal_020_an_anchored_exclude_keeps_only_the_match_at_each_repo_root` | A leading `/` anchors a pattern at the root of each repository cleaned — the workspace's and every checkout's — and nowhere deeper. |
 | clean-021 | normal | `normal_021_gc_takes_its_period_from_the_config_unless_the_flag_overrides_it` | `gc` without `--keep-recent` keeps what `[clean] keep_recent` says, not the built-in three months, and the flag overrides the config. The summary counts the stores it collected. |
-| clean-022 | edge | `edge_022_overlay_files_named_with_glob_characters_survive` | **ignored: bug: overlay file names reach git clean -e unescaped, so [slug].js is read as a glob and deleted** An overlay's files are kept by name, and a name is not a pattern: build output such as a Next.js `pages/[slug].js` must survive a clean like any other overlay file. |
 | clean-023 | edge | `edge_023_a_checkout_named_with_glob_characters_survives_the_root_clean` | **ignored: bug: checkout directories reach git clean -e unescaped, so a name with [ ] is a glob and the checkout is deleted** A declared checkout is kept by its directory's name, whatever characters that name holds: an artefact checkout, which has no `.git` for git to recognise, named `meta/app[1]` must survive the workspace's clean. |
 | clean-024 | edge | `edge_024_a_stray_directory_is_removed_with_a_clone_made_inside_it` | An entry's directory holding no repository is removed whole, as the docs say — and that includes a repository somebody cloned by hand inside it, commits and all. This pins the current behaviour: it contradicts the rule that a nested repository gitscale does not manage is reported rather than deleted, and is listed as a decision for the owner. |
 | clean-025 | edge | `edge_025_a_symlinked_entry_is_skipped_and_its_target_left_alone` | An entry that is a symlink to somebody's own checkout is skipped, and nothing is removed from what it points at. |
@@ -319,6 +322,18 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | forward-025 | edge | `edge_025_add_all_never_stages_the_links_gitscale_planted` | The links gitscale plants in a checkout are not its owner's work: staging everything on the topic stages the real changes, never the links. |
 | forward-026 | perf | `perf_026_a_moved_head_places_without_fetching_what_is_not_missing` | A command that moved a `HEAD` but left nothing for resolution to lack places the workspace without fetching a single store; `pull` fetches each one. |
 | forward-027 | normal | `normal_027_gitscale_options_after_the_git_command_are_gitscales` | GitScale's options may follow the git command too, up to `--`; what is left is git's. |
+
+### hash
+
+| ID | Kind | Test | What it holds |
+|---|---|---|---|
+| hash-001 | normal | `normal_001_a_checkout_hashes_as_its_own_pipeline_would` | A repository's hash in another workspace is the one its own pipeline takes, though that workspace raised one of its dependencies: B is hashed with D at v1.0.0, which it asks for, not at the v1.1.0 checked out. |
+| hash-002 | normal | `normal_002_it_follows_trees_not_commits` | The hash is of trees: a commit that changes no file keeps it, a dependency at other content changes it. |
+| hash-003 | normal | `normal_003_a_checkout_on_the_topic_hashes_with_the_topics_branches` | A checkout at its pin hashes with its dependencies at their pins; joined to the topic, with the topic's branches — as its pipeline on the topic branch would build it. |
+| hash-004 | edge | `edge_004_recursive_false_keeps_an_entrys_dependencies_out` | An entry with `recursive = false` reaches only that repository, not its dependencies. |
+| hash-005 | edge | `edge_005_ls_json_carries_each_checkouts_source_hash` | `ls --format json` carries each checkout's source hash. |
+| hash-006 | error | `error_006_uncommitted_changes_fail_unless_committed` | Uncommitted changes in a source fail the hash, which would not be of anything built; `--committed` hashes the commit, changes left out. |
+| hash-007 | normal | `normal_007_a_checkout_hashes_the_same_as_source_and_as_artefact` | How the workspace takes a checkout changes nothing of what it was built from: the same hash as its sources and as its artefact. |
 
 ### hook
 
@@ -423,7 +438,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | ls-011 | normal | `normal_011_counts_commits_ahead_of_and_behind_the_upstream` | On a topic branch with an upstream, commits on either side are counted: `+N` with `⇑`, `-N` with `⇓`, both with `⇅` — in the table and as `ahead` and `behind` in the JSON. |
 | ls-012 | normal | `normal_012_a_symlinked_entry_shows_where_it_points` | An entry whose directory is a symlink to a checkout somewhere else is reported as `symlink` alone, with `⤷`, where it points in PATH and the ref of what it points at — and the same in the JSON. |
 | ls-013 | normal | `normal_013_json_lists_the_untracked_links` | Planted links git sees as untracked — once GitScale's block in the checkout's `info/exclude` is gone — are listed in the JSON, relative to the checkout, and do not make it unclean there either. |
-| ls-014 | normal | `normal_014_json_carries_an_artefacts_remote_state_and_flags` | An artefact's JSON carries what the last fetch saw beside what is installed, and the flags they make: `behind` and `missing` while the new commit has no image, `behind` once it has. The table's icon follows: `!` in bright red, then `⇓` in yellow. |
+| ls-014 | normal | `normal_014_json_carries_an_artefacts_remote_state_and_flags` | An artefact's JSON carries what the last fetch saw beside what is installed, and the flags they make: `ref-mismatch` and `missing` while the release wanted has no image, `ref-mismatch` once it has. The table's icon follows: `!`, then `≠`, both in bright red. |
 | ls-015 | normal | `normal_015_fetch_reports_what_the_registry_has_now` | `ls --fetch` asks the registry itself: the same run reports what it just found, with no separate `fetch` before it. |
 | ls-016 | normal | `normal_016_a_topic_is_named_with_what_may_merge_next` | On a topic, the table starts with the topic's branch and what may merge next, and the JSON carries both as an object of their own, with the row's `topic` saying which branch it is on and that it is joined here. |
 | ls-017 | normal | `normal_017_a_topic_branch_only_the_remote_has_is_from_remote` | A topic branch only the remote has yet is `topic, from remote` until a placement puts it on a local branch. |
@@ -440,7 +455,6 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | ls-027 | perf | `perf_027_without_fetch_ls_asks_nothing_of_the_network` | Without `--fetch`, `ls` reads only this machine: not one registry request, and no attempt at a remote that has gone away. |
 | ls-028 | normal | `normal_028_a_topic_slot_waits_on_the_topic_slots_it_asks_for` | A topic slot that asks for another topic slot not yet promoted waits on it, and the one waited on is what may merge next. |
 | ls-029 | normal | `normal_029_a_topic_branch_behind_the_pin_says_rebase_it` | A topic branch cut before the release the graph now pins is behind it, and the row says what to do: rebase. |
-| ls-030 | normal | `normal_030_a_replace_artefact_on_a_topic_says_image_or_sources` | A `replace` artefact on a topic says which it is: the image of the branch tip, by commit, or the tip's sources when that commit has no image. |
 | ls-031 | edge | `edge_031_a_shallow_checkout_behind_its_upstream_is_stale` | `stale` stands in for a behind count where a depth-1 checkout has no history to count: a shallow checkout on a branch whose upstream has moved is `stale`, with `≠` in bright red, and `"stale": true` in the JSON. gitscale's own CI checkouts are detached and so have no upstream; this puts one on a branch by hand to reach the flag. |
 | ls-032 | edge | `edge_032_a_checkout_git_cannot_read_is_not_ok` | **ignored: bug: ls reads a failed git status as clean, so a checkout git cannot read shows ok** A checkout git cannot read — its `.git` names a git directory that is gone — is not `ok`: git could not say whether it is clean, or where its HEAD is, and `ls` must not claim either. |
 
@@ -527,6 +541,15 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | post_sync-019 | error | `error_019_the_refusal_escapes_and_shortens_the_command` | The refused command is echoed for the developer to read, so it is made safe for a terminal first: escape sequences that could repaint the screen show as text, and a long command is cut short. |
 | post_sync-020 | error | `error_020_a_host_that_only_folds_to_an_allowed_one_is_refused` | **ignored: bug: matching lowercases with Unicode rules, so a U+212A host passes for one spelled with k** Some non-ASCII letters lowercase to ASCII ones: U+212A KELVIN SIGN becomes `k`. A host spelled with it is a different host from the one spelled with `k`, and must not pass for it. |
 
+### prefer
+
+| ID | Kind | Test | What it holds |
+|---|---|---|---|
+| prefer-001 | normal | `normal_001_prefer_records_and_the_next_placement_applies_it` | `prefer` records and changes nothing; `ls` shows the form to come, and the next placement applies it — artefact, and back to sources. |
+| prefer-002 | normal | `normal_002_a_preference_follows_the_repository_into_every_worktree` | A preference is the repository's, not the directory's: a checkout moved to another directory keeps it, and every worktree of the root sees it. |
+| prefer-003 | edge | `edge_003_a_checkout_holding_work_keeps_its_sources` | A checkout holding work is never replaced by its artefact: the placement reports it and keeps it, and the work stays. |
+| prefer-004 | error | `error_004_a_form_needs_checkouts_it_names` | A form needs the checkouts it is for; a name no checkout has is an error, and nothing is recorded. |
+
 ### registry
 
 | ID | Kind | Test | What it holds |
@@ -567,8 +590,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | ID | Kind | Test | What it holds |
 |---|---|---|---|
 | require-001 | normal | `normal_001_requires_an_entry_reports_it_and_checks_it_out` | The entry is written, said, and checked out at the revision it names. |
-| require-002 | normal | `normal_002_requires_an_artefact_entry` |  |
-| require-003 | edge | `edge_003_keeps_comments_and_every_other_table` | Edited in place: comments, key order and tables gitscale does not know about are all still there. |
+| require-003 | edge | `edge_003_keeps_comments_and_every_other_table` | Edited in place: comments, key order, keys of other entries and tables gitscale does not know about are all still there, after `require` and after `unrequire`. |
 | require-004 | error | `error_004_refuses_a_directory_already_declared` |  |
 | require-005 | error | `error_005_refuses_an_entry_the_config_would_reject` | `require` holds an entry to the rules every later command reads the config by, rather than writing one that leaves the workspace unloadable. |
 | require-006 | edge | `edge_006_creates_a_config_when_none_exists` | With no config anywhere above, `require` starts one at the top of the repository, and every later command can read it. |
@@ -590,12 +612,12 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | resolution-003 | normal | `normal_003_a_tag_a_dependency_asks_for_lands_detached_and_readonly` | A tag a dependency asks for, for a root entry without a revision, is where the checkout lands — not on the default branch's tip — and its files are readonly. |
 | resolution-004 | normal | `normal_004_sync_moves_to_a_revision_a_dependency_starts_asking_for` | A revision a child pins for a root entry that has none is applied by sync too, as a fresh clone would — including one the sync itself brings in. |
 | resolution-005 | normal | `normal_005_an_undeclared_dependency_is_checked_out_implicitly_where_allowed` | A dependency the root does not declare is checked out implicitly, under `imports/` and readonly — but only from somewhere the allowlist covers. The root's own entries allow their host and owner; a local path is never allowed that way, only by `[resolve] allow`. |
-| resolution-006 | normal | `normal_006_an_artefact_config_layer_declares_dependencies` |  |
+| resolution-006 | normal | `normal_006_an_artefacts_dependencies_are_linked_inside_it` | A checkout taken as an artefact has the dependencies its repository's config declares, linked inside it like any checkout's. |
 | resolution-007 | normal | `normal_007_a_dependency_raises_the_root_and_ls_and_explain_say_why` |  |
 | resolution-008 | normal | `normal_008_an_override_at_the_root_holds_a_dependency_down` |  |
 | resolution-009 | normal | `normal_009_two_majors_get_a_checkout_each_unless_one_is_a_singleton` |  |
 | resolution-010 | normal | `normal_010_calendar_versions_order_by_date_then_modifier` |  |
-| resolution-011 | normal | `normal_011_an_artefact_brings_its_dependencies_in_its_config_layer` | An artefact's dependencies travel in its image's config layer: resolved before anything is installed, and linked inside the artefact checkout. |
+| resolution-011 | normal | `normal_011_an_artefacts_dependencies_are_checked_out_implicitly` | The dependencies of a checkout taken as an artefact are resolved from its repository's config before anything is installed, checked out implicitly and linked inside the artefact. |
 | resolution-012 | normal | `normal_012_in_ci_resolution_reads_each_config_from_its_commit` | In CI, resolution reads each config from the commit the checkout is built from, with no history fetched; and a move is never refused. |
 | resolution-013 | normal | `normal_013_an_override_in_a_dependency_reaches_only_what_it_is_above` | An override in a dependency: it wins over what that dependency is above, and must agree with what it is not. |
 | resolution-014 | normal | `normal_014_explain_shows_the_shared_checkouts_or_the_ones_named` |  |
@@ -605,7 +627,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | resolution-018 | edge | `edge_018_an_override_from_above_works_around_a_missing_revision` | A dependency pinned to a revision its repository does not have fails resolution — unless the root overrides that dependency, which is how it works around a broken pin it cannot edit. |
 | resolution-019 | edge | `edge_019_ls_is_unresolved_until_fetched` | Offline, `ls` reads what is on this machine: a repository nothing has fetched yet is unresolved until `ls --fetch`. In CI, where checkouts hold no history, that is the light stores resolution keeps. |
 | resolution-020 | edge | `edge_020_an_uncommitted_config_edit_takes_effect` | A dependency's checkout at the selected commit is read from disk, so an edit to its `.gitscale.toml` not yet committed takes effect at once. |
-| resolution-021 | edge | `edge_021_an_artefact_beside_the_source_of_one_repository` | The source and the built artefact of one repository are two checkouts. |
+| resolution-021 | edge | `edge_021_one_checkout_whatever_form_the_workspace_takes_it_in` | How the workspace takes a repository plays no part in resolution: two requests for it are one checkout, the image when the workspace prefers its artefact, and both requesters link to it. |
 | resolution-022 | edge | `edge_022_a_winner_behind_a_request_is_flagged_where_history_is_local` | Where the root's store holds history, a winner by position that is behind what a losing request asked for is flagged — and still wins. |
 | resolution-023 | edge | `edge_023_a_missed_row_has_no_resolution_text` | A row with nothing on disk says `missed` and nothing more, even where resolution has a story to tell. |
 | resolution-024 | error | `error_024_two_branches_nothing_orders_fail_the_sync` |  |
@@ -616,17 +638,17 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | resolution-029 | normal | `normal_029_the_root_declares_each_major_under_its_own_name` | The root may declare each major of one repository itself, under names of its own: each dependency is linked to the checkout of the major it asked for, and nothing is hoisted. |
 | resolution-030 | normal | `normal_030_a_root_entry_without_a_revision_takes_the_lowest_major` | A root entry with no revision for a repository its dependencies want at two majors is the lowest of them; the other is placed beside it. |
 | resolution-031 | normal | `normal_031_two_streams_of_one_monorepo_are_ordered_by_position` | Tags of two streams of one monorepo are not compared as versions: the request from the repository above the other wins, and two siblings cannot be ordered at all. |
-| resolution-032 | normal | `normal_032_semver_and_calendar_versions_of_one_repository_get_a_checkout_each` | A repository that moved from semver to calendar versions, asked for in both: a calendar version is a class of its own, so each gets a checkout rather than an error. Pinned as the docs describe it. |
+| resolution-032 | normal | `normal_032_semver_and_calendar_versions_of_one_repository_get_a_checkout_each` | A repository that moved from semver to calendar versions at its next major, asked for in both: two majors, so each gets a checkout rather than an error. |
 | resolution-033 | normal | `normal_033_a_pre_release_beats_the_version_before_it_and_loses_to_its_release` | A pre-release is above the version before it and below its own release, as semver orders them. |
 | resolution-034 | normal | `normal_034_the_roots_origin_allows_implicit_dependencies_from_its_owner` | The root repository's own origin allows implicit dependencies from its host and owner, with no `[resolve] allow`: a workspace of one organisation needs no allowlist for that organisation's repositories. |
 | resolution-035 | normal | `normal_035_ssh_and_https_spellings_of_one_repository_share_a_checkout` | The SSH and HTTPS spellings of one repository are one repository: a dependency asking for it over SSH raises the root's HTTPS entry and is linked to that one checkout, instead of getting a second checkout of it. |
-| resolution-036 | normal | `normal_036_an_implicit_checkout_is_an_overlay_when_any_request_asks_for_one` | An implicit checkout is an overlay when any request asks for one — the source, with the build laid over it — and still one checkout. |
+| resolution-036 | normal | `normal_036_an_implicit_checkout_takes_the_workspaces_preference` | An implicit checkout takes the form the workspace prefers, as a declared one does: here the artefact of its release. |
 | resolution-037 | edge | `edge_037_two_requests_naming_one_commit_agree_whatever_they_name` | Two requests naming one commit agree, whatever they name — here a branch and a tag from two siblings, which position alone could not order. |
 | resolution-038 | edge | `edge_038_a_new_lower_major_takes_the_plain_name_without_losing_work` | A new, lower major takes the plain name, and the checkout there moves to it — but never at the cost of work: a commit on no branch stops the move, and once it is gone the old major lands beside it. |
 | resolution-039 | edge | `edge_039_a_branch_beats_a_tag_of_the_same_name_and_ref_prefixes_choose` | A name that is both a branch and a tag is the branch, as git has it; `refs/tags/` and `refs/heads/` choose explicitly. |
 | resolution-040 | edge | `edge_040_a_branch_named_like_a_version_is_a_branch` | Only a tag is read as a version: a branch called `v9.0.0` is a branch, so it joins the checkout of the versions asked for instead of making a major 9 of its own. |
 | resolution-041 | edge | `edge_041_an_implicit_checkout_reads_its_dependencies_unless_every_request_says_not` | An implicit checkout's own dependencies are read unless every request for it says `recursive = false`. |
-| resolution-042 | edge | `edge_042_an_implicit_calendar_version_beside_a_root_major_is_placed_at_any` | An implicit checkout of a class that has no suffix — a calendar version — whose plain name is the root's checkout of another major, is placed at `_any` beside it. Current behaviour, pinned: the suffix is the class's name, and nothing documents it. |
+| resolution-042 | edge | `edge_042_an_implicit_calendar_major_beside_a_root_major_takes_its_suffix` | An implicit checkout of a calendar major whose plain name is the root's checkout of another major is placed beside it, with its major's suffix. |
 | resolution-043 | error | `error_043_a_repository_depending_on_itself_is_a_cycle` | A repository that lists itself as a dependency is a cycle, refused before anything is cloned. |
 | resolution-044 | error | `error_044_a_dependency_on_the_root_repository_is_a_cycle` | A dependency that asks for the root repository — known by its origin — closes a loop through the root, and is refused like any cycle rather than checking the root out inside itself. |
 | resolution-045 | error | `error_045_conflicting_overrides_from_siblings_fail` | Two overrides at different commits, neither from a repository above the other, are a conflict only an override above both can settle. |
@@ -641,6 +663,8 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | resolution-054 | error | `error_054_an_invalid_dependency_config_names_where_it_was_read` | A dependency's config that is not valid TOML fails resolution, naming the file by the checkout and revision it was read at. |
 | resolution-055 | error | `error_055_a_cycle_at_a_revision_that_loses_still_fails` | A cycle is refused even when it exists only at a revision that loses: c v1.0.0 asks for b, c v1.1.0 does not, and b raises c to v1.1.0. The check covers every revision resolution considers, which is what guarantees it ends. |
 | resolution-056 | normal | `normal_056_explain_says_when_no_checkout_is_shared` | `git explain` with nothing named and no checkout more than one repository asks for says so, rather than printing nothing. |
+| resolution-057 | normal | `normal_057_calendar_majors_get_a_checkout_each` | Calendar versions of two majors are two checkouts, as semver majors are. |
+| resolution-058 | error | `error_058_prefixed_tags_from_siblings_cannot_be_ordered` | A tag with a prefix is not a version, so two of them asked for by siblings cannot be ordered, however their numbers compare. |
 
 ### skill
 
@@ -718,7 +742,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | topic-013 | error | `error_013_leave_refuses_while_the_remote_has_the_branch` | A topic branch the remote has keeps being followed: stopping refuses until it is deleted there. |
 | topic-014 | normal | `normal_014_leaving_and_rejoining_a_topic_keeps_unpushed_commits` | Leaving a topic never loses its commits: a joined child with commits nobody pushed goes back to its pin when the root leaves, and back onto its branch, commits and all, when the root returns — as the topics guide promises. |
 | topic-015 | normal | `normal_015_join_carries_uncommitted_edits_onto_the_topic` | Edits made in a checkout before it is joined come along onto the topic branch: `git topic join` is how they get somewhere they can be committed. |
-| topic-016 | normal | `normal_016_join_turns_an_installed_image_into_a_source_worktree` | Joining a `replace` artefact that is installed as its image makes it a worktree of its source, at the commit the image was built from, on the topic branch — and a sync keeps it so. |
+| topic-016 | normal | `normal_016_join_turns_an_installed_image_into_a_source_worktree` | Joining a checkout that is installed as its image makes it a worktree of its source, at the commit the image was built from, on the topic branch — and a sync keeps it so. |
 | topic-017 | normal | `normal_017_leave_puts_an_artefact_back_to_its_image` | `git topic leave` on a joined artefact puts its image back: off the topic an artefact is what its registry holds, not a source checkout. |
 | topic-018 | normal | `normal_018_sync_fast_forwards_a_joined_child_to_its_pushed_upstream` | A joined child whose topic branch a colleague pushed to is fast-forwarded to it by the next sync. |
 | topic-019 | normal | `normal_019_push_pushes_the_root_topic_branch_unless_s_names_others` | On a topic, `git scale push` pushes the root's topic branch too, as its upstream; with `-s`, only the checkouts named. |
@@ -763,33 +787,39 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | topic-058 | edge | `edge_058_finish_force_in_a_bare_clone_drops_a_childs_branch` | In a bare clone, `finish --force` removes the worktree of an abandoned topic with its checkouts, and drops the child's branch from the store. |
 | topic-059 | edge | `edge_059_finish_refuses_to_drop_commits_no_remote_has` | A merged topic still has a branch in a store with a commit no remote has — a major's own, left behind: `finish` refuses to drop it unless `--force`. |
 | topic-060 | edge | `edge_060_a_worktree_deleted_by_hand_comes_back_with_switch` | A topic's worktree deleted by hand: `list` shows the topic with no worktree, and `switch` makes it again, the joined checkout back on its branch with the commit no remote has. |
+| topic-061 | normal | `normal_061_join_dependants_of_a_dependency_joins_those_asking_for_less` | `git topic join --dependants <dir>` joins the checkouts whose configs ask for less than the dependency's newest release — how a raise begins — and leaves those already asking for it. |
+| topic-062 | normal | `normal_062_join_dependants_climbs_one_level_from_the_topics_changes` | `git topic join --dependants` alone climbs one level from the topic's changes: the dependants of each checkout carrying one — commits on the topic, or uncommitted work — while none of them is on the topic. One taken off stays off, a checkout joined with nothing to carry is not climbed from, and the root is never joined. |
 
 ### upgrade
 
 | ID | Kind | Test | What it holds |
 |---|---|---|---|
-| upgrade-001 | normal | `normal_001_resolved_records_the_resolved_revisions_and_keeps_comments` |  |
 | upgrade-002 | normal | `normal_002_promotes_a_child_whose_change_is_released` | Once a release tag holds a joined child's change, `upgrade` writes the tag into the root's config, deletes the child's topic branch and detaches it at the tag. |
 | upgrade-003 | normal | `normal_003_raises_a_named_dependency_to_its_newest_release` | `upgrade <dir>` raises a dependency to its newest release in the root's config. |
-| upgrade-004 | edge | `edge_004_resolved_edits_table_style_entries` | `upgrade --resolved` edits table-style entries as well as inline ones. |
-| upgrade-005 | normal | `normal_005_raising_creates_the_topic_and_edits_every_requester` | `upgrade <dir>` with a requester other than the root, and no topic: the root's new branch becomes the topic, the requester is joined to it, and both configs get the new release in place, comments kept. With `--commit` each config is committed alone, as `pin <dep> <tag>`. |
-| upgrade-006 | normal | `normal_006_a_dry_run_raise_changes_no_file_or_branch` | `upgrade <dir> --dry-run` prints the whole plan — the topic it would create, every edit — and changes nothing: no file, no branch, no joined checkout. |
-| upgrade-007 | normal | `normal_007_c_names_the_topic_a_raise_creates` | `-c` names the topic a raise creates. |
+| upgrade-004 | edge | `edge_004_a_raise_edits_table_style_entries` | A raise edits table-style entries as well as inline ones, comments kept. |
+| upgrade-005 | normal | `normal_005_a_raise_edits_the_topics_configs_and_names_requesters_off_it` | `upgrade <dir>` edits only the configs on the topic: a requester off it is named with the command that joins it, and left as it is. Joined by `git topic join --dependants`, it is edited in place, comments kept, and with `--commit` each config is committed alone, as `pin <dep> <tag>`. |
+| upgrade-006 | normal | `normal_006_a_dry_run_raise_changes_no_file` | `upgrade <dir> --dry-run` prints every edit and changes nothing. |
 | upgrade-008 | normal | `normal_008_a_raise_stays_in_its_major_and_skips_pre_releases_unless_asked` | The newest release a raise picks stays in the pin's major and skips pre-releases; a pre-release pin may move to a later pre-release, and `--major` crosses majors. |
-| upgrade-009 | normal | `normal_009_resolved_commit_commits_the_config_alone` | `upgrade --resolved --commit` commits `.gitscale.toml` alone: whatever else is staged stays staged, out of the commit. |
-| upgrade-010 | normal | `normal_010_resolved_leaves_overrides_and_unpinned_entries_alone` | `upgrade --resolved` changes only root entries that give a revision and are not overrides; named directories narrow it further. |
-| upgrade-011 | normal | `normal_011_resolved_on_a_topic_writes_the_pin_not_the_branch` | On a topic, `upgrade --resolved` writes what a merge would pin — the revision resolution would choose without the topic — never the topic branch itself. |
-| upgrade-012 | normal | `normal_012_a_dry_run_promotion_changes_nothing_and_the_real_one_warns_of_the_remote_branch` | `upgrade --dry-run` on a topic reports the promotion and its edits and changes nothing; the real run then warns that the slot's topic branch still exists on its remote, which CI would keep matching by name. |
+| upgrade-012 | normal | `normal_012_a_dry_run_promotion_changes_nothing_and_the_real_one_deletes_the_remote_branch` | `upgrade --dry-run` on a topic reports the promotion, its edits and the remote branch it would delete, and changes nothing; the real run deletes the slot's topic branch on its remote, which placement and CI would otherwise keep matching by name. |
 | upgrade-013 | edge | `edge_013_promotion_leaves_a_slot_whose_change_no_tag_holds` | A topic slot whose change no release holds is left on the topic: its branch, with commits nobody else has, survives `upgrade`, and no pin moves. Promotion deletes the branch of what it promotes, so saying "promoted" here would lose those commits. |
 | upgrade-014 | edge | `edge_014_promotion_holds_a_slot_with_uncommitted_work` | Uncommitted work holds a slot on the topic even once a release holds its committed change: the work stays, the branch stays, no pin moves. |
 | upgrade-015 | edge | `edge_015_promotion_leaves_another_majors_entry_alone` | **ignored: bug: promotion rewrites every root entry of the repository below the tag, across majors** Promotion stays in the major each pin is in: promoting a slot to v1.1.0 leaves the root's entry for the same repository at v0.9.0 alone — rewritten, the two entries would be one major and the workspace would no longer resolve. |
 | upgrade-016 | edge | `edge_016_a_raise_takes_a_dependency_by_its_link_path` | A dependency may be named by the link a repository has to it, as that repository calls it. |
-| upgrade-017 | edge | `edge_017_a_requester_on_a_branch_is_reported_and_left_alone` | A requester asking for a branch is reported and left alone, and with only the root to edit no topic is created. |
-| upgrade-018 | edge | `edge_018_root_overrides_hold_what_a_raise_would_change` | Overrides stop a raise where they stand: a dependency the root overrides is not raised at all, and a requester the root overrides cannot be joined, so its pin is reported and left — while the root's own entry is still raised, with no topic created. |
+| upgrade-017 | edge | `edge_017_a_requester_on_a_branch_is_reported_and_left_alone` | A requester asking for a branch is reported and left alone. |
+| upgrade-018 | edge | `edge_018_root_overrides_hold_what_a_raise_would_change` | Overrides stop a raise where they stand: a dependency the root overrides is not raised at all, and a requester the root overrides cannot be joined, so its pin is reported and left — while the root's own entry is still raised. |
 | upgrade-019 | edge | `edge_019_a_raise_with_nothing_to_raise_says_why_and_changes_nothing` | Nothing to raise is said, not done: a pin already at its newest release, and an entry pinned to a branch. |
-| upgrade-020 | error | `error_020_misused_options_are_refused_and_change_nothing` | Each misuse of `upgrade` is refused with what to do instead, and leaves the config and the root's branch as they were. |
-| upgrade-021a | error | `error_021a_a_raise_refuses_in_ci` | `upgrade` edits the configs of a developer machine's checkouts; in CI, which keeps none, it refuses. |
-| upgrade-021b | error | `error_021b_resolved_refuses_in_ci` | **ignored: bug: upgrade --resolved runs in CI; it returns before the CI refusal (upgrade.rs:68-82)** The docs say every form of `upgrade` refuses in CI; `--resolved` too. |
+| upgrade-020 | error | `error_020_misused_options_are_refused_and_change_nothing` | Each misuse of `upgrade` is refused with what to do instead, and leaves the config and the root's branch as they were. Off a topic both forms refuse: only `git topic start` begins one. |
+| upgrade-021 | error | `error_021_upgrade_refuses_in_ci` | `upgrade` edits the configs of a developer machine's checkouts; in CI, which keeps none, it refuses. |
+| upgrade-022 | normal | `normal_022_a_calendar_raise_stays_in_its_major_and_major_crosses_it` | A calendar raise stays in its major; `--major` crosses to the next. |
+| upgrade-023 | error | `error_023_promotion_fails_while_the_remote_branch_holds_unreleased_work` | A promotion that would delete a remote branch holding work its release lacks fails before anything changes: the branch, the config and the checkout's place on the topic all stay. |
+| upgrade-024 | error | `error_024_a_refused_deletion_changes_no_config_and_a_second_run_completes` | A remote that refuses the deletion fails the promotion with no config edited; once the deletion can go through, running it again completes. |
+| upgrade-025 | normal | `normal_025_promoting_an_implicit_checkout_edits_the_requesters_on_the_topic` | Promoting a checkout only its dependants ask for: the release goes into the config of each requester on the topic, a requester left at its pin keeps its older request, and the higher one wins once both are read. |
+| upgrade-026 | normal | `normal_026_a_raise_skips_a_line_split_off_before_the_pin_unless_crossing_a_major` | A raise only takes a release whose history holds the pin: a newer tag on a line split off before the pin would lose what the pin had. `--major` relaxes that, since a new major is often cut on a line of its own. |
+| upgrade-027 | normal | `normal_027_promotion_takes_the_newest_release_that_holds_the_change` | Promotion takes the newest release that holds the change: a newer hotfix cut from the pin, without the change, is walked past rather than reported as `no tag`. |
+| upgrade-028 | normal | `normal_028_pinned_branches_bind_the_tags_a_raise_takes` | A repository's releases are the tags its pinned branches hold — by default its default branch alone — as its default branch's config says, so a pin older than the policy follows it too. |
+| upgrade-029 | error | `error_029_pinned_branches_matching_no_branch_say_so` | Pinned branches that name no branch of the repository are an error that says which repository — not an empty list of candidates that would read as "no release". |
+| upgrade-030 | edge | `edge_030_a_pin_no_release_holds_says_so` | A pin no release holds — cut on a branch the repository does not pin — says so, rather than `no tag`. |
+| upgrade-031 | normal | `normal_031_promotion_waits_for_the_image_of_a_repository_that_publishes_one` | A repository that publishes artefacts is released when its tag's image is there too — whatever form this workspace takes it in. Until then the promotion waits, saying so. |
 
 ### workspace
 
@@ -817,7 +847,7 @@ In `#[cfg(test)]` modules beside the code, by source file.
 - `executable_bits_survive_a_round_trip`
 - `any_name_is_the_artefacts_own`
 - `hostile_archives_are_refused`
-- `state_reads_behind_missing_changed_and_mismatch`
+- `state_reads_missing_changed_and_mismatch`
 - `credentials_are_stripped_from_a_published_source_url`
 
 ### src/cache.rs
@@ -874,10 +904,7 @@ In `#[cfg(test)]` modules beside the code, by source file.
 - `a_single_group_can_skip_the_layer_tables`
 - `layer_groups_keep_their_order`
 - `broken_artefact_tables_are_refused`
-- `artefact_and_registries_survive_a_rewrite`
-- `entries_are_written_sorted_by_directory`
-- `artefact_use_is_replace_or_overlay`
-- `develop_pinned_and_keep_recent_survive_a_rewrite`
+- `pinned_branches_and_keep_recent_are_read`
 - `a_dependency_config_says_which_branches_it_pins`
 - `set_revisions_keeps_comments_and_adds_a_missing_revision`
 - `directories_must_stay_inside_the_workspace`
@@ -920,7 +947,7 @@ In `#[cfg(test)]` modules beside the code, by source file.
 ### src/oci_layout.rs
 
 - `gc_keeps_what_held_manifests_need_and_nothing_else`
-- `a_forced_republish_moves_the_commit_and_frees_the_old_image`
+- `a_forced_republish_moves_the_tag_and_frees_the_old_image`
 - `a_damaged_blob_is_dropped_rather_than_served`
 - `a_digest_never_becomes_a_path_outside_the_layout`
 
@@ -936,13 +963,18 @@ In `#[cfg(test)]` modules beside the code, by source file.
 - `arguments_are_relative_to_the_current_directory`
 - `a_path_is_shown_from_the_current_directory`
 
+### src/prefer.rs
+
+- `source_is_the_default_and_removes_a_preference`
+- `it_reads_back_what_it_writes`
+
 ### src/progress.rs
 
 - `prints_a_shared_hint_once_after_the_failures`
 
 ### src/promote.rs
 
-- `the_newest_release_of_the_pins_stream_and_major`
+- `the_newest_release_of_the_pins_kind_and_major`
 - `a_pre_release_only_for_a_pin_that_is_one`
 - `the_merge_order_follows_the_topic_requests`
 
@@ -1046,10 +1078,10 @@ In `#[cfg(test)]` modules beside the code, by source file.
 
 ### src/version.rs
 
-- `semver_with_or_without_v_is_one_stream`
+- `semver_with_or_without_v_is_the_same_version`
 - `semver_precedence`
-- `classes_follow_cargo`
-- `a_year_first_tag_is_a_calendar_version`
+- `classes_follow_cargo_and_the_calendar_major`
+- `a_calendar_version_needs_its_major`
 - `calendar_modifiers_order_around_the_bare_date`
-- `prefixes_name_streams`
+- `semver_and_calendar_versions_never_compare`
 - `other_tags_are_not_versions`

@@ -30,9 +30,11 @@ pub fn unique(name: &str) -> String {
     format!("{}{}", name, nanos % 1_000_000_000)
 }
 
+/// A root whose `meta/app` is `bare` at `main`, taken as an artefact.
 pub fn entry_config(env: &TestEnv, bare: &Path) -> String {
+    env.prefer(bare, gitscale::prefer::Form::Artefact);
     format!(
-        "{}[repos]\n\"meta/app\" = {{ url = \"{}\", revision = \"main\", artefact = \"replace\" }}\n",
+        "{}[repos]\n\"meta/app\" = {{ url = \"{}\", revision = \"main\" }}\n",
         env.registries(),
         bare.display()
     )

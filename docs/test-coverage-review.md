@@ -162,7 +162,6 @@ attempts; the test loops 100 times, so it fails almost every run.
 | `cache::edge_022_compact_keeps_the_images_resolution_just_read` | Config layers that resolution reads get no use marker, so `compact` evicts them at once. | artefact.rs:1053-1061 |
 | `cache::normal_027_status_names_an_overlay_image_after_its_entry` | `cache status` shows an overlay's image under its raw cache name, in a second row. | commands/cache.rs:140 |
 | `upgrade::edge_015_promotion_leaves_another_majors_entry_alone` | Promotion rewrites every root entry of the repository below the tag, across majors: v0.9.0 becomes v1.1.0. | commands/upgrade.rs:198 |
-| `upgrade::error_021b_resolved_refuses_in_ci` | `upgrade --resolved` runs in CI; the docs say every form refuses there. | commands/upgrade.rs:68-82 |
 | `resolution::edge_053_a_chain_seventy_deep_settles` | A dependency chain 64 or more deep fails with "did not settle after 64 rounds". | resolution.rs:578, 685 |
 | `develop::edge_022_develop_on_an_existing_topic_puts_the_checkout_on_its_branch` | After the root switches back to a topic, `develop` says "already on" while the checkout is still detached. | develop.rs:127-131 |
 | `develop::edge_023_develop_in_a_new_root_worktree_of_a_topic_makes_the_checkout` | The same check means a new root worktree gets no checkout at all. | develop.rs:127-131 |
@@ -233,10 +232,8 @@ intended. Each doc comment says that it pins.
   downgrades a copy a newer gitscale wrote.
 - **Whiteouts:** `artefact::edge_052` — whiteout files in foreign images are
   unpacked literally, and the deleted file stays.
-- **Semver and calver together:** `resolution::normal_032` — semver and
-  calendar versions of one repository get a checkout each.
-- **The `_any` suffix:** `resolution::edge_042` — an implicit checkout lands at
-  `…_any`, which nothing documents.
+- **Semver and calver together:** `resolution::normal_032` — a repository
+  that moves to calendar versions at its next major gets a checkout per major.
 - **Not tested, a rule is needed:**
   - The pre-release rule in promote.rs:43 allows `v1.0.0-rc.1` → `v1.3.0-beta`.
     npm and Cargo, which the docs cite, allow only pre-releases of the same

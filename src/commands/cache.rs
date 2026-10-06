@@ -23,7 +23,7 @@ fn open() -> Result<Cache> {
 
 /// `gitscale cache update` — bring entries up to date without touching any
 /// checkout: a snapshot pin for each git entry's revision, and the image each
-/// artefact entry's revision names — exactly what a CI job would take.
+/// artefact's revision names — exactly what a CI job would take.
 pub fn update(
     root: Option<&Path>,
     names: &[String],
@@ -65,14 +65,13 @@ pub fn update(
         interactive,
         |name| {
             let entry = &by_name[name];
-            if entry.is_artefact() {
+            let artefact = resolution
+                .slot(name)
+                .is_some_and(|s| s.form() == crate::prefer::Form::Artefact);
+            if artefact {
                 return match artefacts.warm(entry) {
-                    Ok(Some(commit)) => RepoStatus::Ok(format!(
-                        "{} (artefact {})",
-                        name,
-                        crate::git::short_sha(&commit)
-                    )),
-                    Ok(None) => RepoStatus::Skip(format!("{} (no image store)", name)),
+                    Ok(true) => RepoStatus::Ok(format!("{} (artefact {})", name, entry.revision)),
+                    Ok(false) => RepoStatus::Skip(format!("{} (no image store)", name)),
                     Err(e) => RepoStatus::Fail(format!("{}: {}", name, e)),
                 };
             }
@@ -132,18 +131,17 @@ pub fn status(root: Option<&Path>, out: &mut dyn Write) -> Result<()> {
     let config = optional_workspace_config(root)?;
     let cache = open()?;
 
-    // Entry directory name -> the directory this workspace declares it under.
+    // Entry directory name -> the directory this workspace declares it under:
+    // its snapshot and its images both.
     let declared: std::collections::HashMap<String, &str> = config
         .repos
         .iter()
-        .map(|e| {
+        .flat_map(|e| {
             let url = crate::git::remote_url(e);
-            let name = if e.is_artefact() {
-                crate::store::image_entry_name(&url)
-            } else {
-                crate::store::entry_name(&url)
-            };
-            (name, e.directory.as_str())
+            [
+                (crate::store::entry_name(&url), e.directory.as_str()),
+                (crate::store::image_entry_name(&url), e.directory.as_str()),
+            ]
         })
         .collect();
 

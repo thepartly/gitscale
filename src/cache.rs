@@ -5,7 +5,7 @@
 //! A developer machine keeps no cache: every dependency's store lives in the
 //! root's own git directory — see [`crate::store`]. CI checkouts are depth-1
 //! copies of exact commits, so what is worth keeping between jobs is exactly
-//! those commits and the images artefact entries were installed from, and
+//! those commits and the images artefacts were installed from, and
 //! nothing in a job ever borrows from an entry: deleting one, or all of
 //! them, costs a download and never breaks a checkout.
 //!
@@ -276,8 +276,8 @@ fn held_by(entry: &Entry) -> Vec<Revision> {
             .held()
             .into_iter()
             .map(|held| Revision {
-                last_used: ImageStore::used(&entry.path, &held.commit),
-                name: held.commit,
+                last_used: ImageStore::used(&entry.path, &held.tag),
+                name: held.tag,
             })
             .collect();
     }

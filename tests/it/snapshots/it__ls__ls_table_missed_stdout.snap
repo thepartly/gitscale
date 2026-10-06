@@ -1,7 +1,7 @@
 ---
-source: tests/it/status.rs
-assertion_line: 988
+source: tests/it/ls.rs
+assertion_line: 31
 expression: plain
 ---
-    REPO         PATH   ARTEFACT   REF   EXPECTED   STATUS
-✘   libs/mylib   -      -          —     main       missed
+    REPO         PATH   AS       REF   EXPECTED   STATUS
+✘   libs/mylib   -      source   —     main       missed

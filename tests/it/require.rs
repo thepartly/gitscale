@@ -33,29 +33,6 @@ fn normal_001_requires_an_entry_reports_it_and_checks_it_out() {
     assert!(env.playground.join("libs/core/lib.txt").is_file());
 }
 
-#[test]
-fn normal_002_requires_an_artefact_entry() {
-    let env = TestEnv::new("add_entry_artefact");
-    let svc = env.artefact_repo("svc", &[("svc.bin", "built")]);
-    env.write_config(&env.registries());
-
-    let out = env.run(&[
-        "require",
-        "--artefact",
-        "replace",
-        "meta/svc",
-        svc.to_str().unwrap(),
-        "main",
-    ]);
-    assert!(out.success, "stderr: {}", out.stderr);
-    assert!(out.stdout.contains("[artefact replace]"), "{}", out.stdout);
-    assert!(config_text(&env).contains("artefact = \"replace\""));
-    assert_eq!(
-        std::fs::read_to_string(env.playground.join("meta/svc/dist/svc.bin")).unwrap(),
-        "built"
-    );
-}
-
 /// Taken out: the entry goes, the rest of the file stays, and its checkout —
 /// holding nothing of anyone's — goes with it.
 #[test]
@@ -114,8 +91,9 @@ fn normal_010_without_a_revision_none_is_written() {
 // Edge cases
 // ---------------------------------------------------------------------------
 
-/// Edited in place: comments, key order and tables gitscale does not know
-/// about are all still there.
+/// Edited in place: comments, key order, keys of other entries and tables
+/// gitscale does not know about are all still there, after `require` and
+/// after `unrequire`.
 #[test]
 fn edge_003_keeps_comments_and_every_other_table() {
     let env = TestEnv::new("add_preserves_clean_rules");
@@ -124,21 +102,22 @@ fn edge_003_keeps_comments_and_every_other_table() {
     env.write_config(&format!(
         "# notes on the workspace\n[clean]\nexclude = [\".env\", \"envs/\"] # keep these\n\n\
          [team]\nowner = \"platform\"\n\n[repos]\n\
-         \"libs/a\" = {{ url = \"{}\", revision = \"main\" }}\n",
+         \"libs/a\" = {{ url = \"{}\", revision = \"main\", singleton = true }}\n",
         a.display()
     ));
-
-    let out = env.run(&["require", "libs/b", b.to_str().unwrap(), "main"]);
-    assert!(out.success, "stderr: {}", out.stderr);
-
-    let config = config_text(&env);
-    for kept in [
+    let kept = [
         "# notes on the workspace",
         "# keep these",
         "envs/",
         "[team]",
         "owner = \"platform\"",
-    ] {
+        "singleton = true",
+    ];
+
+    let out = env.run(&["require", "libs/b", b.to_str().unwrap(), "main"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    let config = config_text(&env);
+    for kept in kept {
         assert!(config.contains(kept), "{:?} is gone:\n{}", kept, config);
     }
     assert!(
@@ -146,6 +125,13 @@ fn edge_003_keeps_comments_and_every_other_table() {
         "{}",
         config
     );
+
+    let out = env.run(&["unrequire", "libs/b"]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    let config = config_text(&env);
+    for kept in kept {
+        assert!(config.contains(kept), "{:?} is gone:\n{}", kept, config);
+    }
 }
 
 /// With no config anywhere above, `require` starts one at the top of the

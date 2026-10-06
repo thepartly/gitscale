@@ -69,7 +69,8 @@ fn normal_002_fails_a_merge_request_into_a_pinned_branch() {
          here and push."
             .to_string(),
         format!(
-            "- already merged and pinned: delete branch feat/x in {}, then rerun this pipeline.",
+            "- already merged and pinned: delete branch feat/x in {}, then rerun the whole \
+             pipeline, not this job alone: its other jobs built from the branch.",
             core.display()
         ),
     ] {
@@ -83,7 +84,7 @@ fn normal_002_fails_a_merge_request_into_a_pinned_branch() {
     assert!(!out.stdout.contains("ok:"), "{}", out.stdout);
 }
 
-/// `[develop] pinned` decides which merge targets are gated, globs included:
+/// `[branches] pinned` decides which merge targets are gated, globs included:
 /// a merge into `release/1.0` is checked, and with that list set, `main` —
 /// which it does not name — is not.
 #[test]
@@ -93,7 +94,7 @@ fn normal_003_pinned_globs_decide_which_targets_are_gated() {
     let job = job_checkout(
         &env,
         &format!(
-            "[develop]\npinned = [\"release/*\"]\n\n\
+            "[branches]\npinned = [\"release/*\"]\n\n\
              [repos]\n\"imports/core\" = {{ url = \"{}\", revision = \"v1.0.0\" }}\n",
             core.display()
         ),
@@ -360,7 +361,7 @@ fn edge_009_a_checkout_a_repository_holds_at_its_pin_does_not_block() {
     run_git_pub(&d, &["branch", "staging", "main"]);
     env.push_commit(&d, "staging", "d.txt", "d staging");
     let b_config = format!(
-        "[develop]\npinned = [\"staging\"]\n\n[repos]\n\"libs/d\" = {{ url = \"{}\", revision = \"v1.0.0\" }}\n",
+        "[branches]\npinned = [\"staging\"]\n\n[repos]\n\"libs/d\" = {{ url = \"{}\", revision = \"v1.0.0\" }}\n",
         d.display()
     );
     let b = env.create_bare_repo("b", "main", &[(".gitscale.toml", &b_config)]);
@@ -420,11 +421,11 @@ fn error_010_in_ci_a_failed_fetch_fails_rather_than_answer_from_old_refs() {
     assert_eq!(out.code, Some(1), "{}", out.said());
 }
 
-/// A `replace` artefact taken from the topic — the image of its branch tip —
+/// An artefact taken from the topic — the image of its branch tip —
 /// blocks like a source checkout: a merge would ship the pinned image, not
 /// the one tested.
 #[test]
-fn edge_013_a_replace_artefact_from_the_topic_blocks() {
+fn edge_013_an_artefact_from_the_topic_blocks() {
     let env = TestEnv::new("check_topic_artefact");
     let app = env.artefact_repo("app", &[("app.bin", "main build")]);
     run_git_pub(&app, &["branch", "feat/x", "main"]);
@@ -433,11 +434,12 @@ fn edge_013_a_replace_artefact_from_the_topic_blocks() {
     let job = job_checkout(
         &env,
         &format!(
-            "{}[repos]\n\"meta/app\" = {{ url = \"{}\", revision = \"main\", artefact = \"replace\" }}\n",
+            "{}[repos]\n\"meta/app\" = {{ url = \"{}\", revision = \"main\" }}\n",
             env.registries(),
             app.display()
         ),
     );
+    crate::support::prefer(&job, &app, gitscale::prefer::Form::Artefact);
 
     let out = check_job(&env, &job, &gitlab_branch(&job, "feat/x"));
     assert_eq!(out.code, Some(1), "{}", out.said());

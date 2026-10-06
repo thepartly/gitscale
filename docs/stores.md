@@ -20,7 +20,7 @@ worktree, and the artefact images its checkouts were installed from. Nothing
 lives outside the root, and deleting the root deletes all of it.
 
 In CI, every checkout is a copy of one exact commit, and **the per-user cache
-keeps those commits** — and the images artefact entries were installed from —
+keeps those commits** — and the images artefacts were installed from —
 so the next job on the runner downloads nothing. Nothing in a job borrows from
 the cache: deleting it costs a download, never a checkout.
 
@@ -39,7 +39,7 @@ the root shares — `root/.git` for a plain clone, the bare repository for a
 one set per root worktree, in that worktree's own git directory:
   gitscale/artefacts/                 what was installed into each artefact checkout
   gitscale/checkouts.json             every checkout gitscale made here
-  gitscale/resolve/                   refs of repositories with no store (artefacts only)
+  gitscale/resolve/                   refs of repositories with no store: in CI, and ones taken as artefacts
 ```
 
 The main worktree's own git directory is `.git` itself; a linked worktree's is
@@ -121,8 +121,8 @@ first — `git worktree repair` — as git requires of any worktree.
 
 ## Images
 
-An artefact entry's images are kept in `<common>/gitscale/images/`: shared by
-every worktree of the root, one layer stored once however many commits share
+Artefact images are kept in `<common>/gitscale/images/`: shared by
+every worktree of the root, one layer stored once however many releases share
 it. Checkouts get copies of what they unpack, so nothing borrows from the store
 and removing an image never breaks a checkout.
 

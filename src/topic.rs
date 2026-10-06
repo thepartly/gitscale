@@ -1,7 +1,7 @@
 //! Topics: one branch name shared by every repository a change touches.
 //!
 //! The root's current branch is the topic, unless the root's config pins it —
-//! by default only the remote's default branch is pinned, and `[develop]
+//! by default only the remote's default branch is pinned, and `[branches]
 //! pinned` names the rest. Nothing about a topic is stored apart from the
 //! branches themselves: a child is on the topic when its store has a branch of
 //! that name, or its remote does — the rule a CI pipeline on the branch
@@ -58,7 +58,7 @@ pub fn root(config: &GitScaleConfig, config_root: &Path, online: bool) -> Root {
     let default = default.or_else(|| default_branch(config_root, online));
     if is_pinned(
         &branch,
-        config.develop.pinned.as_deref(),
+        config.branches.pinned.as_deref(),
         default.as_deref(),
     ) {
         Root::Pinned(branch)
@@ -78,7 +78,7 @@ pub fn is_pinned(branch: &str, pinned: Option<&[String]>, default: Option<&str>)
     }
 }
 
-/// Whether `patterns`, as `[develop] pinned` writes them, name `branch`.
+/// Whether `patterns`, as `[branches] pinned` writes them, name `branch`.
 pub fn pins(patterns: &[String], branch: &str) -> bool {
     patterns
         .iter()

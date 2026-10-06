@@ -96,10 +96,8 @@ Beyond whatever you exclude, clean never removes:
   unguarded `git clean -xdf` at the root would delete the whole workspace — and
   one declared inside another repository (`core` and `core/vendor`) would go the
   same way when that repository is cleaned. Clean excludes them wherever they
-  sit. This matters most for `replace` [artefact](artefacts.md) entries,
+  sit. This matters most for checkouts taken as an [artefact](artefacts.md),
   which have no `.git` directory for git to recognise them by.
-- **An overlay's files.** The build output an `overlay` artefact laid over its
-  checkout is ignored by that checkout, and exactly what the overlay is for.
 - **Managed symlinks.** The links GitScale plants for
   [recursive dependencies](recursive-dependencies.md) are untracked files to
   git. Orphaned GitScale symlinks are *not* protected — those are removed, as

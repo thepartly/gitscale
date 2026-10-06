@@ -22,7 +22,7 @@ pub fn run(root: Option<&Path>, verbose: bool, no_cache: bool, out: &mut dyn Wri
             .or_else(|| crate::topic::default_branch(&config_root, true));
         let pinned = crate::topic::is_pinned(
             &target,
-            config.develop.pinned.as_deref(),
+            config.branches.pinned.as_deref(),
             default.as_deref(),
         );
         if !pinned {
@@ -78,12 +78,32 @@ pub fn run(root: Option<&Path>, verbose: bool, no_cache: bool, out: &mut dyn Wri
             what = what,
             sha = crate::git::short_sha(&topic.commit),
             url = slot.url,
+            // A deletion makes no new commit, so no new pipeline: every job
+            // ran against the branch, not only this one.
             rerun = if crate::git::is_ci() {
-                "this pipeline"
+                "the whole pipeline, not this job alone: its other jobs built from the branch"
             } else {
                 "git scale check"
             },
         ));
+    }
+    // A build pin is for trying one out: it never ships.
+    for slot in &resolution.slots {
+        for request in &slot.requests {
+            if request.revision_kind != Some(crate::resolution::RevKind::Build) {
+                continue;
+            }
+            let file = if request.from == "root" {
+                CONFIG_FILENAME.to_string()
+            } else {
+                format!("{}/{}", request.from, CONFIG_FILENAME)
+            };
+            blocks.push(format!(
+                "{} is pinned to a build ({}) in {}, not to a release: pin a release before \
+                 merging.",
+                slot.directory, request.revision, file
+            ));
+        }
     }
     if blocks.is_empty() {
         writeln!(out, "ok: every checkout resolves from a pinned revision")?;

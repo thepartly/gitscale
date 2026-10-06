@@ -36,7 +36,7 @@ fn normal_001_a_ci_job_logs_in_with_its_job_token() {
         password: "job-token-value".into(),
         realm_host: "127.0.0.1".into(),
     });
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
 
     let vars = gitlab_job(&env);
     let vars: Vec<(&str, &str)> = vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
@@ -59,7 +59,7 @@ fn normal_002_a_docker_login_is_used_outside_ci() {
         password: "personal-token".into(),
         realm_host: "127.0.0.1".into(),
     });
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let docker = env.repos_remote.join("docker-config");
     std::fs::create_dir_all(&docker).unwrap();
     let auth = base64::Engine::encode(
@@ -271,7 +271,7 @@ fn normal_009_a_basic_challenge_is_answered_with_the_stored_login() {
     let bare = env.artefact_repo("app", &[("app.bin", "basic")]);
     env.registry().require_auth(auth("dev", "personal-token"));
     env.registry().use_basic_auth();
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let docker = docker_login(&env, &env.registry().addr, "dev", "personal-token");
 
     let out = env.run_with_env(&[("DOCKER_CONFIG", s(&docker))], &["sync"]);
@@ -294,7 +294,7 @@ fn normal_010_a_stored_identity_token_is_exchanged_for_a_bearer_token() {
     let bare = env.artefact_repo("app", &[("app.bin", "refreshed")]);
     env.registry().require_auth(auth("unused", "unused"));
     env.registry().accept_refresh_token("refresh-me");
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let docker = docker_config(
         &env,
         "docker-config",
@@ -322,7 +322,7 @@ fn normal_011_a_credential_helper_is_asked_for_the_registry() {
     let env = TestEnv::new("registry_credential_helper");
     let bare = env.artefact_repo("app", &[("app.bin", "from a helper")]);
     env.registry().require_auth(auth("dev", "helper-secret"));
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let docker = docker_config(&env, "docker-config", r#"{"credsStore": "gitscaletest"}"#);
     let bin = env.repos_remote.join("helper-bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -355,7 +355,7 @@ fn normal_012_a_podman_auth_file_is_read_when_docker_has_no_login() {
     let env = TestEnv::new("registry_podman_auth");
     let bare = env.artefact_repo("app", &[("app.bin", "podman")]);
     env.registry().require_auth(auth("dev", "podman-token"));
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let file = env.repos_remote.join("auth.json");
     std::fs::write(
         &file,
@@ -380,7 +380,7 @@ fn normal_013_a_token_named_access_token_is_used() {
     let bare = env.artefact_repo("app", &[("app.bin", "oauth")]);
     env.registry().require_auth(auth("dev", "pw"));
     env.registry().token_field("access_token");
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let docker = docker_login(&env, &env.registry().addr, "dev", "pw");
 
     let out = env.run_with_env(&[("DOCKER_CONFIG", s(&docker))], &["sync"]);
@@ -406,10 +406,7 @@ fn normal_014_publish_logs_in_for_push_access() {
         &["artefact", "publish"],
     );
     assert!(out.success, "{}{}", out.stdout, out.stderr);
-    assert_eq!(
-        env.registry().tags("app/gitscale"),
-        vec![tip(&bare, "main")]
-    );
+    assert_eq!(hash_tags(env.registry().tags("app/gitscale")).len(), 1);
     let push_scope = url::form_urlencoded::byte_serialize(b"repository:app/gitscale:pull,push")
         .collect::<String>();
     assert!(
@@ -436,7 +433,7 @@ fn edge_006_the_job_token_never_goes_to_a_token_service_elsewhere() {
         password: "job-token-value".into(),
         realm_host: "localhost".into(),
     });
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
 
     let vars = gitlab_job(&env);
     let vars: Vec<(&str, &str)> = vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
@@ -472,7 +469,7 @@ fn edge_015_a_plain_http_registry_off_this_machine_gets_no_bearer_token() {
     remote.require_auth(auth("dev", "pw"));
     remote.set_realm(&format!("http://{}/token", env.registry().addr));
     env.use_registry(&format!("http://{}", remote.addr));
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let docker = docker_login(&env, &remote.addr, "dev", "pw");
 
     let mut vars = vec![("DOCKER_CONFIG", s(&docker))];
@@ -502,7 +499,7 @@ fn edge_016_a_plain_http_registry_off_this_machine_gets_no_basic_login() {
     remote.require_auth(auth("dev", "pw"));
     remote.use_basic_auth();
     env.use_registry(&format!("http://{}", remote.addr));
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let docker = docker_login(&env, &remote.addr, "dev", "pw");
 
     let mut vars = vec![("DOCKER_CONFIG", s(&docker))];
@@ -526,7 +523,7 @@ fn edge_017_the_job_token_never_goes_to_a_registry_the_ci_server_does_not_own() 
     let bare = env.artefact_repo("app", &[("app.bin", "x")]);
     env.registry()
         .require_auth(auth("gitlab-ci-token", "job-token-value"));
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let port = env.registry().addr.rsplit(':').next().unwrap().to_string();
     let vars = gitlab_vars(&format!("127.0.0.1:{}", port), "registry.ci.example:5050");
 
@@ -594,7 +591,6 @@ fn edge_018b_an_upload_location_on_another_host_never_gets_the_job_token() {
     let port = env.registry().addr.rsplit(':').next().unwrap().to_string();
     let mut vars = gitlab_vars(&format!("127.0.0.1:{}", port), &env.registry().addr);
     vars.push(("GITLAB_CI", "true".to_string()));
-    vars.push(("CI_COMMIT_SHA", tip(&bare, "main")));
     let mut vars = borrowed(&vars);
     vars.extend(NO_PROXY);
 
@@ -633,7 +629,7 @@ fn edge_019_a_tag_list_page_on_another_host_gets_no_token() {
     other.mirror_from(env.registry());
     env.registry()
         .tags_next_page_on(&format!("http://{}", other.addr));
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let docker = docker_login(&env, &env.registry().addr, "dev", "pw");
 
     let mut vars = vec![("DOCKER_CONFIG", s(&docker))];
@@ -659,7 +655,7 @@ fn edge_020_a_blob_redirect_to_another_host_carries_no_authorization() {
     cdn.mirror_from(env.registry());
     env.registry()
         .redirect_blobs_to(&format!("http://{}", cdn.addr));
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let docker = docker_login(&env, &env.registry().addr, "dev", "pw");
 
     let mut vars = vec![("DOCKER_CONFIG", s(&docker))];
@@ -681,16 +677,13 @@ fn edge_020_a_blob_redirect_to_another_host_carries_no_authorization() {
 fn edge_021_a_manifest_without_a_content_digest_header_is_digested_locally() {
     let env = TestEnv::new("registry_no_digest_header");
     let bare = env.artefact_repo("app", &[("app.bin", "digested")]);
-    let commit = tip(&bare, "main");
     env.registry().omit_manifest_digest();
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(read(&env, "meta/app/dist/app.bin"), "digested");
     assert!(
-        env.registry()
-            .count("GET", &format!("/manifests/{}", commit))
-            > 0,
+        env.registry().count("GET", "/manifests/v1.0.0") > 0,
         "{:?}",
         env.registry().log()
     );
@@ -705,7 +698,7 @@ fn error_007_a_refusal_says_how_to_get_access() {
     let env = TestEnv::new("art_forbidden");
     let bare = env.artefact_repo("app", &[("app.bin", "x")]);
     env.registry().refuse_with(403);
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let out = env.run(&["sync"]);
     assert!(!out.success);
     assert!(out.stderr.contains("refused"), "{}", out.stderr);
@@ -737,7 +730,7 @@ fn error_022_registry_errors_are_reported_with_their_status() {
             .fail("HEAD", "/manifests/", status, "try again later");
         env.registry()
             .fail("GET", "/manifests/", status, "try again later");
-        env.write_config(&entry_config(&env, &bare, "main"));
+        env.write_config(&entry_config(&env, &bare, "v1.0.0"));
         let out = env.run(&["sync"]);
         assert!(!out.success, "{}: {}", status, out.stdout);
         assert!(
@@ -758,7 +751,7 @@ fn error_023_a_refused_login_says_how_to_log_in_and_hides_the_password() {
     let env = TestEnv::new("registry_refused_login");
     let bare = env.artefact_repo("app", &[("app.bin", "x")]);
     env.registry().require_auth(auth("dev", "right-password"));
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let docker = docker_login(&env, &env.registry().addr, "dev", "wrong-password");
 
     let out = env.run_with_env(&[("DOCKER_CONFIG", s(&docker))], &["sync"]);
@@ -792,7 +785,7 @@ fn error_024_registry_errors_never_print_credentials() {
     // A blob download: a response with a body (a HEAD has none).
     env.registry()
         .fail_authorized_echoing_headers("GET", "/blobs/", 500);
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let port = env.registry().addr.rsplit(':').next().unwrap().to_string();
     let vars = gitlab_vars(&format!("127.0.0.1:{}", port), &env.registry().addr);
 
@@ -822,7 +815,6 @@ fn error_025_a_refused_publish_in_ci_says_what_the_job_token_may_do() {
     let port = env.registry().addr.rsplit(':').next().unwrap().to_string();
     let mut vars = gitlab_vars(&format!("127.0.0.1:{}", port), &env.registry().addr);
     vars.push(("GITLAB_CI", "true".to_string()));
-    vars.push(("CI_COMMIT_SHA", tip(&bare, "main")));
 
     let out = run_bin_in(&env, &producer, &borrowed(&vars), &["artefact", "publish"]);
     assert!(!out.success, "{}", out.stdout);
@@ -847,11 +839,10 @@ fn error_025_a_refused_publish_in_ci_says_what_the_job_token_may_do() {
 fn error_026_a_manifest_not_matching_its_digest_is_refused() {
     let env = TestEnv::new("registry_manifest_digest_lie");
     let bare = env.artefact_repo("app", &[("app.bin", "x")]);
-    let commit = tip(&bare, "main");
     let claimed = format!("sha256:{}", "c".repeat(64));
     env.registry()
-        .lie_about_manifest(&env.image(&bare), &commit, &claimed);
-    env.write_config(&entry_config(&env, &bare, "main"));
+        .lie_about_manifest(&env.image(&bare), "v1.0.0", &claimed);
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let out = env.run(&["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(
@@ -872,18 +863,24 @@ fn error_026_a_manifest_not_matching_its_digest_is_refused() {
 fn error_027_a_cut_off_download_leaves_no_partial_file_and_the_old_install() {
     let env = TestEnv::new("registry_truncated_blob");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-    let first = layered(&env, &bare, "app v1");
-    env.write_config(&entry_config(&env, &bare, "main"));
+    layered(&env, &bare, "v1.0.0", "app v1");
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     assert!(env.run(&["sync"]).success);
 
     env.push_commit(&bare, "main", "README.md", "v2");
-    let second = layered(&env, &bare, "app v2 with a longer body to cut in half");
-    let app_layer = layer_digests(&env, &bare, &second)[2].clone();
+    layered(
+        &env,
+        &bare,
+        "v1.1.0",
+        "app v2 with a longer body to cut in half",
+    );
+    let app_layer = layer_digests(&env, &bare, "v1.1.0")[2].clone();
     env.registry().truncate_blob(&app_layer);
+    env.write_config(&entry_config(&env, &bare, "v1.1.0"));
     let out = env.run(&["sync"]);
     assert!(!out.success, "{}", out.stdout);
     assert_eq!(read(&env, "meta/app/dist/app.js"), "app v1");
-    assert_eq!(installed_commit(&env), first);
+    assert_eq!(installed_tag(&env), "v1.0.0");
     let leftovers: Vec<String> = all_names(&image_store(&env))
         .into_iter()
         .filter(|n| n.contains("partial"))
@@ -902,9 +899,9 @@ fn error_027_a_cut_off_download_leaves_no_partial_file_and_the_old_install() {
 fn perf_028_one_token_exchange_per_scope_per_command() {
     let env = TestEnv::new("registry_token_reuse");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-    layered(&env, &bare, "app v1");
+    layered(&env, &bare, "v1.0.0", "app v1");
     env.registry().require_auth(auth("dev", "pw"));
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     let docker = docker_login(&env, &env.registry().addr, "dev", "pw");
 
     env.registry().clear_log();
@@ -944,7 +941,7 @@ fn perf_029_a_tag_list_that_never_ends_is_cut_off() {
     let env = TestEnv::new("registry_endless_tags");
     let bare = env.artefact_repo("app", &[("app.bin", "x")]);
     env.registry().endless_tags();
-    env.write_config(&entry_config(&env, &bare, "main"));
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     env.registry().clear_log();
     let out = env.run(&["artefact", "list"]);
     assert!(!out.success, "{}", out.stdout);

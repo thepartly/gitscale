@@ -102,13 +102,14 @@ git scale check    # fails while core comes from the topic
 #   or via native git:
 #       not available
 
-# Promote core, once it is merged and tagged v2026.10.04
-git upgrade --commit    # root's pin → v2026.10.04, core's topic branch deleted, core detached at the tag; ends with: to push: <repos>
+# Promote core, once it is merged and tagged v1-2026.10.04
+git upgrade --commit    # root's pin → v1-2026.10.04, core's topic branch deleted here and on its remote, core detached at the tag; ends with: to push: <repos>
 #   or via native git:
-#       edit the revision in every .gitscale.toml that asks for core, commit each
-#       git -C imports/core switch --detach v2026.10.04
+#       edit the revision in every .gitscale.toml on the topic that asks for core, commit each
+#       git -C imports/core push origin --delete PROJ-12-price-cache
+#       git -C imports/core switch --detach v1-2026.10.04
 #       git -C imports/core branch -D PROJ-12-price-cache
-#       lacks: finding the tag, checking it holds the change, finding every config that asks for core
+#       lacks: finding the tag, checking it holds the change and the remote branch's, finding every config that asks for core
 
 # Push the pin bump
 git push    # when only the root is left on the topic; otherwise git scale push
@@ -197,10 +198,17 @@ git topic leave imports/core    # back at the pin, topic branch deleted; inside 
 #       note: needs the pin from resolution, and lacks the refusal when the branch holds unpushed work
 
 # Raise a dependency to its newest release, everywhere it is asked for
+git topic start upgrade-d
+git topic join --dependants imports/d    # every requester asking for less
 git upgrade imports/d    # inside it: git upgrade .
 #   or via native git:
 #       edit every .gitscale.toml that asks for d
-#       lacks: finding the release and every requester, putting each on a topic
+#       lacks: finding the release and every requester
+
+# Carry the topic's change one level up
+git topic join --dependants    # the checkouts asking for what changed on the topic
+#   or via native git:
+#       not available
 
 # Promote the topic's released slots
 git upgrade    # from anywhere
@@ -240,7 +248,7 @@ git scale --parallel pull    # output kept per repo
 #       not available
 
 # Clean
-git scale clean -fdx    # checkouts, links and overlays always kept
+git scale clean -fdx    # checkouts and links always kept
 #   or via native git:
 #       DON'T: git clean -fdx in the root deletes every checkout and artefact
 
@@ -293,8 +301,7 @@ first. In order:
 | Missing directory, or an empty one | A worktree of its store, detached at its commit, read-only |
 | Off the topic | Detached at the commit its revision resolves to, read-only. A [branch](dependencies.md#branch) revision moves to the new tip |
 | On the topic | On the topic branch, writable, fast-forwarded to its upstream — see [where each checkout goes](topics.md#where-each-checkout-goes) |
-| `replace` artefact | Nothing to do, and nothing asked of the registry, when the revision still names the installed commit. Otherwise the new image is downloaded — only the layers the store does not hold — then the files are replaced. A commit with no image fails and leaves the installed files alone |
-| `overlay` artefact | Placed as a git checkout, then the image of its commit laid over it |
+| Taken as an [artefact](artefacts.md#choosing-how-a-checkout-arrives) | Nothing to do, and nothing asked of the registry, when the release wanted is the one installed. Otherwise the release's image is downloaded — only the layers the store does not hold — then the files are replaced. A revision that is no release, or a release with no image, fails and leaves the installed files alone. A source checkout there is replaced, unless it holds work |
 | Directory holding files but no repository | `FAIL … exists but holds no git repository`. Left as it is — [`git scale clean -fd`](clean.md#a-directory-holding-no-repository) removes it, or move it aside, and run again |
 | A checkout that is not a worktree of its store | `FAIL … not a gitscale worktree`, left alone — see [checkouts GitScale did not make](stores.md#checkouts-gitscale-did-not-make) |
 | The child the [hook fired in](hooks.md#the-hook-in-a-child) | `skip (left where git put it)` |
@@ -329,8 +336,8 @@ checkouts it manages — `gitscale/checkouts.json` in the root worktree's git
 directory — and only those are ever removed: a directory GitScale did not make
 is never touched.
 
-An entry that fails — a remote that cannot be reached, a move refused, an
-artefact whose pipeline has not published yet — does not stop the others:
+An entry that fails — a remote that cannot be reached, a move refused, a
+release with no image — does not stop the others:
 every other checkout is still placed and linked, and then the command exits
 non-zero naming how many failed.
 

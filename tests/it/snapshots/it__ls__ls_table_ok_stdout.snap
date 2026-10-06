@@ -1,7 +1,7 @@
 ---
-source: tests/it/status.rs
-assertion_line: 1008
+source: tests/it/ls.rs
+assertion_line: 55
 expression: plain
 ---
-    REPO         PATH   ARTEFACT   REF       EXPECTED   STATUS
-✔   libs/mylib   -      -          [sha]   main       ok
+    REPO         PATH   AS       REF       EXPECTED   STATUS
+✔   libs/mylib   -      source   [sha]   main       ok

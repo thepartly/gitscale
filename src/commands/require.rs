@@ -8,7 +8,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::commands::sync::{place, Placement};
-use crate::config::{check_entry, load_config, ArtefactUse, RepoEntry, CONFIG_FILENAME};
+use crate::config::{check_entry, load_config, RepoEntry, CONFIG_FILENAME};
 use crate::resolve::Network;
 
 /// The root the entry goes in, and its directory relative to it. With no
@@ -41,14 +41,12 @@ pub fn require(
     dir: &str,
     url: &str,
     revision: &str,
-    artefact: Option<&str>,
     verbose: bool,
     no_cache: bool,
     interactive: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
-    let artefact = artefact.map(ArtefactUse::from_str_checked).transpose()?;
     let (root, directory) = locate(start, dir)?;
     let path = root.join(CONFIG_FILENAME);
     // Held to the rules a loaded config is, so that `require` cannot write a
@@ -67,7 +65,6 @@ pub fn require(
         directory: directory.clone(),
         repo_url: url.to_string(),
         revision: revision.to_string(),
-        artefact,
         ..Default::default()
     };
     crate::config::add_entry(&path, &entry)?;
@@ -83,14 +80,7 @@ pub fn require(
     } else {
         format!(" @ {}", revision)
     };
-    match artefact {
-        Some(artefact) => writeln!(
-            out,
-            "Required {} → {}{} [artefact {}]",
-            directory, url, at, artefact
-        )?,
-        None => writeln!(out, "Required {} → {}{}", directory, url, at)?,
-    }
+    writeln!(out, "Required {} → {}{}", directory, url, at)?;
     place(
         &config,
         &root,

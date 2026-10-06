@@ -21,19 +21,22 @@
 //! offline and fetches only the stores that lacked something: see
 //! [`OnMiss`].
 
-use anyhow::{Context, Result};
-use std::collections::{BTreeMap, HashMap};
+use anyhow::{bail, Context, Result};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::artefact::Artefacts;
 use crate::config::CONFIG_FILENAME;
-use crate::resolution::{unavailable, Checkouts, Kind, Refs, Repos, Unavailable};
+use crate::resolution::{unavailable, Checkouts, Refs, Repos, Unavailable};
 use crate::store::Sources;
 
 /// The refs a light store last saw, beside it.
 const REFS_FILE: &str = "gitscale-refs.json";
+/// The releases a registry has of a repository whose sources cannot be read,
+/// kept for the next offline read.
+const RELEASED_FILE: &str = "gitscale-released.json";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Store {
@@ -74,6 +77,11 @@ pub struct GitStores<'a> {
     verbose: bool,
     /// The refs of each store, read or fetched once per command, by path.
     refs: Mutex<HashMap<PathBuf, std::result::Result<Refs, String>>>,
+    /// Repositories whose sources cannot be read, by normalized URL: read
+    /// from their registry instead.
+    sourceless: Mutex<BTreeSet<String>>,
+    /// Repositories this workspace takes as artefacts, by normalized URL.
+    artefact: BTreeSet<String>,
 }
 
 impl<'a> GitStores<'a> {
@@ -92,6 +100,16 @@ impl<'a> GitStores<'a> {
             artefacts,
             verbose,
             refs: Mutex::new(HashMap::new()),
+            sourceless: Mutex::new(BTreeSet::new()),
+            artefact: crate::prefer::Prefs::load(config_root)
+                .map(|prefs| {
+                    prefs
+                        .iter()
+                        .filter(|(_, form)| *form == crate::prefer::Form::Artefact)
+                        .map(|(url, _)| url.to_string())
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 
@@ -118,13 +136,26 @@ impl<'a> GitStores<'a> {
         }
     }
 
-    /// Which store `url` is read from: a source repository from the root's
-    /// own store for it, anything else — and everything in CI — light.
-    fn store(&self, _url: &str, kind: Kind) -> Store {
-        match (&self.sources.stores, kind) {
-            (Some(_), Kind::Source) => Store::Repo,
+    /// Which store a repository is read from: the root's own store for it,
+    /// or a light one — in CI, which keeps none, and for a repository taken
+    /// as an artefact, which needs its refs listed and nothing downloaded,
+    /// unless it has a store from being developed here.
+    fn store(&self, url: &str) -> Store {
+        match &self.sources.stores {
+            Some(stores)
+                if !self.artefact.contains(&crate::urls::normalize(url))
+                    || is_store(&stores.repo_path(&crate::ci::remote_url(url))) =>
+            {
+                Store::Repo
+            }
             _ => Store::Light,
         }
+    }
+
+    /// Whether this workspace takes `url` as an artefact: its configs are
+    /// then read from the images of its releases.
+    fn is_artefact(&self, url: &str) -> bool {
+        self.sourceless(url) || self.artefact.contains(&crate::urls::normalize(url))
     }
 
     fn repo_path(&self, url: &str) -> PathBuf {
@@ -138,42 +169,60 @@ impl<'a> GitStores<'a> {
         self.local.join(crate::store::entry_name(url))
     }
 
-    fn path(&self, url: &str, kind: Kind) -> PathBuf {
-        match self.store(url, kind) {
+    fn path(&self, url: &str) -> PathBuf {
+        match self.store(url) {
             Store::Repo => self.repo_path(url),
             Store::Light => self.light_path(url),
         }
     }
 
     /// Fetch, or read, the refs of `url`'s store.
-    fn load_refs(&self, url: &str, kind: Kind, path: &Path) -> Result<Refs> {
+    fn load_refs(&self, url: &str, path: &Path) -> Result<Refs> {
         let remote = crate::ci::remote_url(url);
-        let store = self.store(url, kind);
+        let store = self.store(url);
         // Fetched once however many rounds ask: a light store has no record
         // of its own of being fetched by this command.
         let done = self
             .on_miss
             .is_some_and(|m| m.fetched.lock().unwrap().contains(path));
+        let released = self.light_path(url).join(RELEASED_FILE);
         if self.online_for(path) && !done {
             if self.verbose {
                 eprintln!("  resolve  {}", url);
             }
+            // Before the fetch, which makes a store it may then fail to fill.
+            let had = match store {
+                Store::Repo => is_store(path),
+                Store::Light => path.join(REFS_FILE).is_file(),
+            };
             let fetched = match (store, &self.sources.stores) {
                 (Store::Repo, Some(stores)) => stores.update(&remote).map(|_| ()),
-                _ => refresh_light(&remote, path),
+                _ => refresh_light(&remote, path).with_context(|| format!("cannot fetch {}", url)),
             };
             if let Some(on_miss) = self.on_miss {
                 on_miss.fetched.lock().unwrap().insert(path.to_path_buf());
             }
+            if fetched.is_ok() {
+                // Readable again: what its registry said is no longer the
+                // answer.
+                let _ = fs::remove_file(&released);
+            }
             if let Err(e) = fetched {
-                let had = match store {
-                    Store::Repo => is_store(path),
-                    Store::Light => path.join(REFS_FILE).is_file(),
-                };
+                // Refused rather than unreachable: the registry may have what
+                // the sources would have said.
+                if crate::git::is_access_error(&format!("{:#}", e)) {
+                    match self.registry_refs(url) {
+                        Ok(Some(refs)) => return Ok(refs),
+                        Ok(None) => {}
+                        Err(registry) => {
+                            bail!("{:#}, nor read its registry: {:#}", e, registry)
+                        }
+                    }
+                }
                 // In CI a runner keeps the build directory between jobs: the
                 // refs an earlier job fetched would build a stale commit.
                 if !had || crate::git::is_ci() {
-                    return Err(e).with_context(|| format!("cannot fetch {}", url));
+                    return Err(e);
                 }
                 // What the last fetch saw still resolves, if not to the latest.
                 eprintln!(
@@ -181,6 +230,15 @@ impl<'a> GitStores<'a> {
                     url, e
                 );
             }
+        }
+        if released.is_file() {
+            self.sourceless
+                .lock()
+                .unwrap()
+                .insert(crate::urls::normalize(url));
+            let text = fs::read_to_string(&released)?;
+            return serde_json::from_str(&text)
+                .with_context(|| format!("{}: unreadable", released.display()));
         }
         match store {
             Store::Repo if is_store(path) => repo_refs(path),
@@ -197,6 +255,34 @@ impl<'a> GitStores<'a> {
                 )))
             }
         }
+    }
+
+    /// The releases `url`'s registry has, as refs: its version tags, each at
+    /// the commit its image was built from, and no branches. `None` when the
+    /// registry has none to offer.
+    fn registry_refs(&self, url: &str) -> Result<Option<Refs>> {
+        let Some(artefacts) = self.artefacts else {
+            return Ok(None);
+        };
+        let tags = artefacts.released(url)?;
+        if tags.is_empty() {
+            return Ok(None);
+        }
+        let refs = Refs {
+            tags,
+            ..Refs::default()
+        };
+        let dir = self.light_path(url);
+        fs::create_dir_all(&dir)?;
+        let file = dir.join(RELEASED_FILE);
+        let partial = file.with_extension("partial");
+        fs::write(&partial, serde_json::to_string_pretty(&refs)?)?;
+        fs::rename(&partial, &file)?;
+        self.sourceless
+            .lock()
+            .unwrap()
+            .insert(crate::urls::normalize(url));
+        Ok(Some(refs))
     }
 
     /// Run git in a store. Offline, any fetch git would make for a missing
@@ -250,13 +336,36 @@ impl<'a> GitStores<'a> {
     }
 }
 
+impl GitStores<'_> {
+    /// The `.gitscale.toml` the image of the release `tag` carries, for a
+    /// repository taken as an artefact.
+    fn image_config(&self, url: &str, tag: &str) -> Result<Option<String>> {
+        let Some(artefacts) = self.artefacts else {
+            return Err(unavailable(format!(
+                "the image config of {} was not looked up",
+                url
+            )));
+        };
+        // Keyed apart from the git stores: the registry is asked, not git.
+        let key = PathBuf::from(format!("artefact:{}", crate::urls::normalize(url)));
+        let online = self.online_for(&key);
+        artefacts.config_layer(url, tag, online).map_err(|e| {
+            if e.downcast_ref::<Unavailable>().is_some() && !online {
+                self.missed(&key);
+                return e;
+            }
+            unavailable(format!("{:#}", e))
+        })
+    }
+}
+
 impl Repos for GitStores<'_> {
-    fn refs(&self, url: &str, kind: Kind) -> Result<Refs> {
-        let path = self.path(url, kind);
+    fn refs(&self, url: &str) -> Result<Refs> {
+        let path = self.path(url);
         if let Some(known) = self.refs.lock().unwrap().get(&path) {
             return known.clone().map_err(|e| anyhow::anyhow!(e));
         }
-        let loaded = self.load_refs(url, kind, &path);
+        let loaded = self.load_refs(url, &path);
         match &loaded {
             Err(e) if e.downcast_ref::<Unavailable>().is_some() => {}
             Ok(refs) => {
@@ -273,13 +382,14 @@ impl Repos for GitStores<'_> {
     }
 
     fn config_at(&self, url: &str, commit: &str, revision: &str) -> Result<Option<String>> {
+        if let (true, Some(tag)) = (self.is_artefact(url), crate::artefact::image_tag(revision)) {
+            return self.image_config(url, tag);
+        }
         let remote = crate::ci::remote_url(url);
-        match self.store(url, Kind::Source) {
+        match self.store(url) {
             Store::Repo => {
                 let path = self.repo_path(url);
                 let online = self.online_for(&path);
-                // An artefact on the topic is read as the source it then is,
-                // from a store nothing may have made yet.
                 if online && !is_store(&path) {
                     if let Some(stores) = &self.sources.stores {
                         stores.update(&remote)?;
@@ -335,42 +445,36 @@ impl Repos for GitStores<'_> {
         }
     }
 
-    fn artefact_config(&self, url: &str, commit: &str) -> Result<Option<String>> {
+    fn build(&self, url: &str, hash: &str) -> Result<String> {
         let Some(artefacts) = self.artefacts else {
-            return Err(unavailable(format!(
-                "the artefact config of {} was not looked up",
-                url
-            )));
+            bail!("the builds of {} are not looked up here", url);
         };
-        // Keyed apart from the git stores: the registry is asked, not git.
         let key = PathBuf::from(format!("artefact:{}", crate::urls::normalize(url)));
         let online = self.online_for(&key);
-        // A commit whose pipeline has not published yet, a registry that is
-        // down: the entry's own install reports that, in its own words. For
-        // resolution it is a checkout whose dependencies cannot be read.
-        artefacts.config_layer(url, commit, online).map_err(|e| {
-            match e.downcast_ref::<Unavailable>() {
-                Some(_) => {
-                    if !online {
-                        self.missed(&key);
-                    }
-                    e
-                }
-                None => unavailable(format!("{:#}", e)),
+        artefacts.built_from(url, hash, online).inspect_err(|e| {
+            if e.downcast_ref::<Unavailable>().is_some() && !online {
+                self.missed(&key);
             }
         })
     }
 
-    fn default_branch(&self, url: &str, kind: Kind) -> Result<Option<String>> {
-        Ok(self.refs(url, kind)?.default_branch)
+    fn sourceless(&self, url: &str) -> bool {
+        self.sourceless
+            .lock()
+            .unwrap()
+            .contains(&crate::urls::normalize(url))
     }
 
-    fn is_ancestor(&self, url: &str, kind: Kind, ancestor: &str, descendant: &str) -> Result<bool> {
+    fn default_branch(&self, url: &str) -> Result<Option<String>> {
+        Ok(self.refs(url)?.default_branch)
+    }
+
+    fn is_ancestor(&self, url: &str, ancestor: &str, descendant: &str) -> Result<bool> {
         // Only a store has history; nothing else fetches it for a warning.
-        if self.store(url, kind) != Store::Repo {
+        if self.store(url) != Store::Repo {
             return Err(unavailable("no history on this machine"));
         }
-        let path = self.path(url, kind);
+        let path = self.path(url);
         let checked = self.git(
             &path,
             &["merge-base", "--is-ancestor", ancestor, descendant],
@@ -382,15 +486,15 @@ impl Repos for GitStores<'_> {
         }
     }
 
-    fn unknown(&self, url: &str, kind: Kind) {
-        let path = self.path(url, kind);
+    fn unknown(&self, url: &str) {
+        let path = self.path(url);
         if !self.online_for(&path) {
             self.missed(&path);
         }
     }
 
     fn local_branch(&self, url: &str, branch: &str) -> Option<String> {
-        if self.store(url, Kind::Source) != Store::Repo {
+        if self.store(url) != Store::Repo {
             return None;
         }
         let path = self.repo_path(url);
@@ -400,16 +504,16 @@ impl Repos for GitStores<'_> {
         crate::git::resolve_ref(&path, &format!("refs/heads/{}^{{commit}}", branch))
     }
 
-    fn prepare(&self, wanted: &[(String, Kind)]) {
+    fn prepare(&self, wanted: &[String]) {
         // Refs of every repository, fetched side by side: the network wait
         // is what resolution costs, and it is per repository.
-        let mut todo: BTreeMap<PathBuf, (String, Kind)> = BTreeMap::new();
+        let mut todo: BTreeMap<PathBuf, String> = BTreeMap::new();
         {
             let known = self.refs.lock().unwrap();
-            for (url, kind) in wanted {
-                let path = self.path(url, *kind);
+            for url in wanted {
+                let path = self.path(url);
                 if !known.contains_key(&path) {
-                    todo.insert(path, (url.clone(), *kind));
+                    todo.insert(path, url.clone());
                 }
             }
         }
@@ -417,9 +521,9 @@ impl Repos for GitStores<'_> {
             return;
         }
         std::thread::scope(|scope| {
-            for (url, kind) in todo.values() {
+            for url in todo.values() {
                 scope.spawn(move || {
-                    let _ = self.refs(url, *kind);
+                    let _ = self.refs(url);
                 });
             }
         });
@@ -575,16 +679,12 @@ impl WorkspaceCheckouts {
 }
 
 impl Checkouts for WorkspaceCheckouts {
-    fn config_if_at(&self, directory: &str, kind: Kind, commit: &str) -> Option<Option<String>> {
+    fn config_if_at(&self, directory: &str, commit: &str) -> Option<Option<String>> {
         let dest = self.root.join(directory);
-        let at = match kind {
-            Kind::Source => {
-                crate::git::is_checkout(&dest)
-                    && crate::git::resolve_ref(&dest, "HEAD").as_deref() == Some(commit)
-            }
-            Kind::Artefact => {
-                crate::artefact::installed_commit(&self.root, directory).as_deref() == Some(commit)
-            }
+        let at = if crate::git::is_checkout(&dest) {
+            crate::git::resolve_ref(&dest, "HEAD").as_deref() == Some(commit)
+        } else {
+            crate::artefact::installed(&self.root, directory).is_some_and(|m| m.commit == commit)
         };
         if !at {
             return None;

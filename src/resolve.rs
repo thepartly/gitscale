@@ -47,9 +47,20 @@ pub fn workspace(
     let stores = GitStores::new(config_root, sources, online, artefacts, verbose);
     let checkouts = WorkspaceCheckouts::new(config_root);
     let topic = crate::topic::root(config, config_root, online);
-    Engine::new(config, root_url.as_deref(), &stores, &checkouts)
+    let resolved = Engine::new(config, root_url.as_deref(), &stores, &checkouts)
         .with_topic(topic.topic().map(str::to_string))
-        .resolve()
+        .resolve()?;
+    with_preferences(resolved, config_root)
+}
+
+/// Each slot with the form this workspace prefers it in: resolution decides
+/// what is checked out, the workspace how it arrives.
+pub fn with_preferences(mut resolution: Resolution, config_root: &Path) -> Result<Resolution> {
+    let prefs = crate::prefer::Prefs::load(config_root)?;
+    for slot in &mut resolution.slots {
+        slot.preferred = prefs.get(&slot.url);
+    }
+    Ok(resolution)
 }
 
 /// How resolution reaches the remotes.
@@ -104,7 +115,7 @@ pub fn workspace_with(
                 // with that store fetched, may resolve. What is still
                 // missing then is the error.
                 if on_miss.next_round() == 0 {
-                    return resolved;
+                    return with_preferences(resolved?, config_root);
                 }
             }
         }

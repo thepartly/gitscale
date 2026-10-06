@@ -1,9 +1,9 @@
 ---
-source: tests/it/pull.rs
-assertion_line: 1414
+source: tests/it/placement.rs
+assertion_line: 137
 expression: redact_shas(&out.stdout)
 ---
 Pulling latest changes...
   ok    libs/ro-lib
   ok    libs/rw-lib
-  ok    meta/art (artefact [sha])
+  ok    meta/art (artefact v1.0.0)

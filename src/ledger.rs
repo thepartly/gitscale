@@ -67,16 +67,15 @@ fn save(config_root: &Path, ledger: &Ledger) -> Result<()> {
 /// What is at `directory` now, if it is a checkout gitscale could have made:
 /// a git checkout of its own, or an installed artefact. A symlink is somebody
 /// else's checkout, and never recorded.
-fn found(config_root: &Path, entry_dir: &str, artefact: bool) -> Option<Recorded> {
+fn found(config_root: &Path, entry_dir: &str) -> Option<Recorded> {
     let dest = config_root.join(entry_dir);
     if dest.is_symlink() {
         return None;
     }
-    if artefact {
-        crate::artefact::installed_commit(config_root, entry_dir).map(|_| Recorded::Artefact)
-    } else {
-        crate::git::is_checkout(&dest).then_some(Recorded::Git)
+    if crate::git::is_checkout(&dest) {
+        return Some(Recorded::Git);
     }
+    crate::artefact::installed(config_root, entry_dir).map(|_| Recorded::Artefact)
 }
 
 /// Record every checkout of `entries` that is on disk now.
@@ -85,7 +84,7 @@ pub fn record(config_root: &Path, entries: &[RepoEntry]) -> Result<()> {
     let before = ledger.checkouts.len();
     let mut changed = false;
     for entry in entries {
-        if let Some(kind) = found(config_root, &entry.directory, entry.is_artefact()) {
+        if let Some(kind) = found(config_root, &entry.directory) {
             if ledger.checkouts.insert(entry.directory.clone(), kind) != Some(kind) {
                 changed = true;
             }
@@ -109,7 +108,7 @@ pub fn left_behind(config_root: &Path, entries: &[RepoEntry]) -> Vec<(String, Re
             !entries
                 .iter()
                 .any(|e| e.directory == *dir || Path::new(&e.directory).starts_with(Path::new(dir)))
-                && found(config_root, dir, *kind == Recorded::Artefact) == Some(*kind)
+                && found(config_root, dir) == Some(*kind)
         })
         .collect()
 }
@@ -140,7 +139,7 @@ pub fn prune(config_root: &Path) -> Result<()> {
     let before = ledger.checkouts.len();
     ledger
         .checkouts
-        .retain(|dir, kind| found(config_root, dir, *kind == Recorded::Artefact) == Some(*kind));
+        .retain(|dir, kind| found(config_root, dir) == Some(*kind));
     if ledger.checkouts.len() != before {
         save(config_root, &ledger)?;
     }

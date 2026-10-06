@@ -181,9 +181,10 @@ fn normal_006_names_select_repos_and_dot_the_root() {
 fn normal_007_skips_artefact_checkouts() {
     let env = TestEnv::new("clean_skips_artefact_repos");
     let bare = env.artefact_repo("svc", &[("a.txt", "x")]);
+    env.prefer(&bare, gitscale::prefer::Form::Artefact);
     env.write_config(&format!(
         "{}[repos]\n\
-         \"meta/svc\" = {{ url = \"{}\", revision = \"main\", artefact = \"replace\" }}\n",
+         \"meta/svc\" = {{ url = \"{}\", revision = \"v1.0.0\" }}\n",
         env.registries(),
         bare.display()
     ));
@@ -209,11 +210,14 @@ fn normal_007_skips_artefact_checkouts() {
 fn normal_008_gc_drops_cold_images_and_their_blobs() {
     let env = TestEnv::new("art_clean_gc");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-    let old = layered(&env, &bare, "app v1");
-    env.write_config(&entry_config(&env, &bare, "main"));
+    layered(&env, &bare, "v1.0.0", "app v1");
+    let old = "v1.0.0".to_string();
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     assert!(env.run(&["sync"]).success);
     env.push_commit(&bare, "main", "README.md", "v2");
-    let new = layered(&env, &bare, "app v2");
+    layered(&env, &bare, "v1.1.0", "app v2");
+    let new = "v1.1.0".to_string();
+    env.write_config(&entry_config(&env, &bare, "v1.1.0"));
     assert!(env.run(&["sync"]).success);
 
     let entry = image_store(&env);
@@ -243,9 +247,10 @@ fn normal_019_a_dry_run_names_why_it_skips_what_it_skips() {
     let svc = env.artefact_repo("svc", &[("a.txt", "x")]);
     let later = env.create_bare_repo("later", "main", &[("l.txt", "l")]);
     let linked = env.create_bare_repo("linked", "main", &[("k.txt", "k")]);
+    env.prefer(&svc, gitscale::prefer::Form::Artefact);
     env.write_config(&format!(
         "{}[repos]\n\
-         \"meta/svc\" = {{ url = \"{}\", revision = \"main\", artefact = \"replace\" }}\n\
+         \"meta/svc\" = {{ url = \"{}\", revision = \"v1.0.0\" }}\n\
          \"libs/later\" = {{ url = \"{}\", revision = \"main\" }}\n\
          \"libs/linked\" = {{ url = \"{}\", revision = \"main\" }}\n",
         env.registries(),
@@ -308,19 +313,20 @@ fn normal_021_gc_takes_its_period_from_the_config_unless_the_flag_overrides_it()
     let env = TestEnv::new("clean_gc_config_period");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
     let lib = env.create_bare_repo("mylib", "main", &[("a.txt", "a")]);
-    let old = layered(&env, &bare, "app v1");
-    let config = |keep: &str| {
+    layered(&env, &bare, "v1.0.0", "app v1");
+    let old = "v1.0.0".to_string();
+    let config = |release: &str| {
         format!(
-            "[clean]\nkeep_recent = \"{}\"\n\n{}\"libs/mylib\" = {{ url = \"{}\", revision = \"main\" }}\n",
-            keep,
-            entry_config(&env, &bare, "main"),
+            "[clean]\nkeep_recent = \"100years\"\n\n{}\"libs/mylib\" = {{ url = \"{}\", revision = \"main\" }}\n",
+            entry_config(&env, &bare, release),
             lib.display()
         )
     };
-    env.write_config(&config("100years"));
+    env.write_config(&config("v1.0.0"));
     assert!(env.run(&["sync"]).success);
     env.push_commit(&bare, "main", "README.md", "v2");
-    layered(&env, &bare, "app v2");
+    layered(&env, &bare, "v1.1.0", "app v2");
+    env.write_config(&config("v1.1.0"));
     assert!(env.run(&["sync"]).success);
     let entry = image_store(&env);
     age(&entry, &old);
@@ -459,10 +465,11 @@ fn edge_013_keeps_a_checkout_nested_inside_another() {
     // An artefact checkout has no `.git`, so git's own refusal to delete a
     // nested repository would not save it.
     let vendor = env.artefact_repo("vendor", &[("v.txt", "x")]);
+    env.prefer(&vendor, gitscale::prefer::Form::Artefact);
     env.write_config(&format!(
         "{}[repos]\n\
          \"core\" = {{ url = \"{}\", revision = \"main\" }}\n\
-         \"core/vendor\" = {{ url = \"{}\", revision = \"main\", artefact = \"replace\" }}\n",
+         \"core/vendor\" = {{ url = \"{}\", revision = \"v1.0.0\" }}\n",
         env.registries(),
         core.to_str().unwrap(),
         vendor.display()
@@ -568,48 +575,6 @@ fn edge_017_keeps_implicit_checkouts_and_their_links() {
     assert!(env.playground.join("imports/b/libs/d").is_symlink());
 }
 
-/// An overlay's files are kept by name, and a name is not a pattern: build
-/// output such as a Next.js `pages/[slug].js` must survive a clean like any
-/// other overlay file.
-#[test]
-#[ignore = "bug: overlay file names reach git clean -e unescaped, so [slug].js is read as a glob and deleted"]
-fn edge_022_overlay_files_named_with_glob_characters_survive() {
-    let env = TestEnv::new("clean_overlay_glob_names");
-    let app = env.create_bare_repo(
-        "app",
-        "main",
-        &[("README.md", "app"), (".gitignore", "/dist/\n")],
-    );
-    env.publish(
-        &app,
-        "main",
-        &[
-            ("pages/[slug].js", "route"),
-            ("pages/s.js", "plain"),
-            ("star*.txt", "star"),
-        ],
-    );
-    env.write_config(&format!(
-        "{}[repos]\n\"meta/app\" = {{ url = \"{}\", revision = \"main\", artefact = \"overlay\" }}\n",
-        env.registries(),
-        app.display()
-    ));
-    let pull = env.run(&["sync"]);
-    assert!(pull.success, "{}{}", pull.stdout, pull.stderr);
-    let dist = env.playground.join("meta/app/dist");
-    assert!(dist.join("pages/[slug].js").is_file());
-
-    let out = env.run(&["clean", "-fdx"]);
-    assert!(out.success, "{}", out.stderr);
-    for file in ["pages/[slug].js", "pages/s.js", "star*.txt"] {
-        assert!(
-            dist.join(file).is_file(),
-            "the overlay's {} was deleted",
-            file
-        );
-    }
-}
-
 /// A declared checkout is kept by its directory's name, whatever characters
 /// that name holds: an artefact checkout, which has no `.git` for git to
 /// recognise, named `meta/app[1]` must survive the workspace's clean.
@@ -618,8 +583,9 @@ fn edge_022_overlay_files_named_with_glob_characters_survive() {
 fn edge_023_a_checkout_named_with_glob_characters_survives_the_root_clean() {
     let env = TestEnv::new("clean_checkout_glob_name");
     let app = env.artefact_repo("app", &[("app.bin", "x")]);
+    env.prefer(&app, gitscale::prefer::Form::Artefact);
     env.write_config(&format!(
-        "{}[repos]\n\"meta/app[1]\" = {{ url = \"{}\", revision = \"main\", artefact = \"replace\" }}\n",
+        "{}[repos]\n\"meta/app[1]\" = {{ url = \"{}\", revision = \"main\" }}\n",
         env.registries(),
         app.display()
     ));
@@ -1002,11 +968,13 @@ fn error_038_gc_is_refused_in_ci() {
 fn error_039_gc_refuses_a_period_it_cannot_read_before_dropping_anything() {
     let env = TestEnv::new("clean_gc_bad_period");
     let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
-    let old = layered(&env, &bare, "app v1");
-    env.write_config(&entry_config(&env, &bare, "main"));
+    layered(&env, &bare, "v1.0.0", "app v1");
+    let old = "v1.0.0".to_string();
+    env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     assert!(env.run(&["sync"]).success);
     env.push_commit(&bare, "main", "README.md", "v2");
-    layered(&env, &bare, "app v2");
+    layered(&env, &bare, "v1.1.0", "app v2");
+    env.write_config(&entry_config(&env, &bare, "v1.1.0"));
     assert!(env.run(&["sync"]).success);
     let entry = image_store(&env);
     age(&entry, &old);
@@ -1021,7 +989,7 @@ fn error_039_gc_refuses_a_period_it_cannot_read_before_dropping_anything() {
 
     env.write_config(&format!(
         "[clean]\nkeep_recent = \"6m\"\n\n{}",
-        entry_config(&env, &bare, "main")
+        entry_config(&env, &bare, "v1.1.0")
     ));
     let out = env.run(&["gc"]);
     assert!(!out.success);
@@ -1123,9 +1091,10 @@ fn normal_043_capital_x_removes_only_ignored_files_and_never_a_checkout() {
     let env = TestEnv::new("clean_flags_only_ignored");
     let bare = env.artefact_repo("svc", &[("a.txt", "x")]);
     let core = env.create_bare_repo("core", "main", &[("README.md", "core")]);
+    env.prefer(&bare, gitscale::prefer::Form::Artefact);
     env.write_config(&format!(
         "{}[repos]\n\
-         \"meta/svc\" = {{ url = \"{}\", revision = \"main\", artefact = \"replace\" }}\n\
+         \"meta/svc\" = {{ url = \"{}\", revision = \"v1.0.0\" }}\n\
          \"meta/core\" = {{ url = \"{}\", revision = \"main\" }}\n",
         env.registries(),
         bare.display(),

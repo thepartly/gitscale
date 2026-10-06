@@ -1,20 +1,18 @@
 //! Artefacts: prebuilt files published to an OCI registry by the source
-//! repository's pipeline, one image per commit, and unpacked read-only into
-//! the workspace instead of a git checkout.
+//! repository's pipeline, and unpacked read-only into the workspace instead
+//! of a git checkout.
 //!
 //! Two halves. The producer runs `gitscale artefact publish`: the globs in its
 //! own `[artefact]` table pick the files, each group becomes one reproducible
-//! gzip tar layer, and the image is tagged with the full commit it was built
-//! from. Every file keeps its repository path, and every one is either
+//! gzip tar layer, and the image is tagged with the source hash of what it
+//! was built from (see [`crate::hash`]) and with every version tag on the
+//! commit. Every file keeps its repository path, and every one is either
 //! tracked at that commit with the same content or ignored: the artefact
-//! policy, which `publish` enforces. The consumer declares an entry with
-//! `artefact = "replace"` — the image instead of a checkout — or `"overlay"`
-//! — a source checkout with the image's untracked files laid over it. Its
-//! revision is resolved to a commit exactly as a git entry's would be, and
-//! that commit's image is what gets installed. Git decides which commit a
-//! revision means; the registry only stores one image per commit.
+//! policy, which `publish` enforces. A consumer takes a checkout as its
+//! artefact — each workspace's choice, see [`crate::prefer`] — only at a
+//! release: the image its version tag names is what gets installed.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -25,7 +23,7 @@ use std::path::{Component, Path, PathBuf};
 use crate::config::{
     find_config, load_config, ArtefactSpec, GitScaleConfig, RepoEntry, CONFIG_FILENAME,
 };
-use crate::git::{is_full_sha, short_sha};
+use crate::git::short_sha;
 use crate::registry::{
     image_for, Access, Client, HashingWriter, Image, CONFIG_MEDIA_TYPE, LAYER_MEDIA_TYPE,
     MANIFEST_MEDIA_TYPE,
@@ -41,6 +39,12 @@ const TITLE: &str = "org.opencontainers.image.title";
 pub const CONFIG_LAYER: &str = "gitscale";
 const REVISION: &str = "org.opencontainers.image.revision";
 const SOURCE: &str = "org.opencontainers.image.source";
+/// The tree id of the commit an image was built from: its sources, for a
+/// consumer that cannot read them.
+pub const TREE: &str = "dev.gitscale.tree";
+/// The source hash an image was built from: what its hash tag is, kept on
+/// the image so a release tag on it says which sources it holds.
+const HASH: &str = "dev.gitscale.hash";
 
 // ---------------------------------------------------------------------------
 // Patterns
@@ -347,6 +351,8 @@ pub fn manifest(
     config_size: u64,
     layers: &[PackedLayer],
     commit: &str,
+    tree: &str,
+    hash: &str,
     source: &str,
 ) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
@@ -366,6 +372,8 @@ pub fn manifest(
         "annotations": {
             REVISION: commit,
             SOURCE: source,
+            TREE: tree,
+            HASH: hash,
         },
     }))
     .expect("a JSON value always serializes")
@@ -430,17 +438,13 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest> {
 /// What a marker file records about one image.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Marker {
-    /// The entry's revision when this was written: a config that now says
-    /// something else makes the checkout a ref mismatch.
-    pub revision: String,
+    /// The release the image was looked up by.
+    pub tag: String,
+    /// The commit resolution says that release is.
     pub commit: String,
-    /// `None` in a fetch's marker when the commit has no image yet.
+    /// `None` in a fetch's marker when the release has no image.
     pub digest: Option<String>,
     pub image: String,
-    /// For an overlay: the paths it wrote into the source checkout, which
-    /// the next overlay removes before laying its own.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub files: Vec<String>,
 }
 
 fn read_marker(path: &Path) -> Option<Marker> {
@@ -498,12 +502,10 @@ impl Markers {
     }
 }
 
-/// The commit installed into the artefact checkout at `directory`, if any.
-pub fn installed_commit(config_root: &Path, directory: &str) -> Option<String> {
+/// What is installed into the artefact checkout at `directory`, if anything.
+pub fn installed(config_root: &Path, directory: &str) -> Option<Marker> {
     let dest = config_root.join(directory);
-    read_marker(&Markers::new(config_root, directory).installed)
-        .filter(|_| !is_empty_dir(&dest))
-        .map(|m| m.commit)
+    read_marker(&Markers::new(config_root, directory).installed).filter(|_| !is_empty_dir(&dest))
 }
 
 /// Drop what gitscale recorded about the artefact checkout at `directory`,
@@ -524,18 +526,17 @@ pub fn is_empty_dir(dest: &Path) -> bool {
 pub struct State {
     pub installed: Option<Marker>,
     pub remote: Option<Marker>,
-    /// `behind`, `missing`, `changed`, `ref-mismatch` — see [`state`].
+    /// `missing`, `changed`, `ref-mismatch` — see [`state`].
     pub flags: Vec<String>,
 }
 
 /// What `dest` holds for `entry`, compared with what the last fetch saw.
 ///
-/// * `ref-mismatch` — installed for another revision than the config names
-///   now, or not at the commit a SHA revision pins;
-/// * `behind` — the revision has moved to another commit since;
-/// * `missing` — that commit has no image (yet);
-/// * `changed` — the installed commit's image was re-published with
-///   different content.
+/// * `ref-mismatch` — installed for another release than the one `entry`
+///   is at;
+/// * `missing` — the last fetch found no image of the release wanted;
+/// * `changed` — that release's image was re-published with different
+///   content since it was installed.
 pub fn state(entry: &RepoEntry, config_root: &Path) -> State {
     state_at(
         entry,
@@ -546,7 +547,7 @@ pub fn state(entry: &RepoEntry, config_root: &Path) -> State {
 
 fn state_at(entry: &RepoEntry, dest: &Path, markers: &Markers) -> State {
     let installed = read_marker(&markers.installed).filter(|_| !is_empty_dir(dest));
-    let remote = read_marker(&markers.remote).filter(|r| r.revision == entry.revision);
+    let remote = read_marker(&markers.remote).filter(|r| r.tag == entry.revision);
     let flags = flags(entry, installed.as_ref(), remote.as_ref());
     State {
         installed,
@@ -562,20 +563,14 @@ fn flags(entry: &RepoEntry, installed: Option<&Marker>, remote: Option<&Marker>)
     let Some(installed) = installed else {
         return flags;
     };
-    let pinned =
-        is_full_sha(&entry.revision) && !installed.commit.eq_ignore_ascii_case(&entry.revision);
-    if installed.revision != entry.revision || pinned {
+    let same = installed.tag == entry.revision;
+    if !same {
         flags.push("ref-mismatch".to_string());
     }
-    if let Some(remote) = remote {
-        if remote.commit != installed.commit {
-            flags.push("behind".to_string());
-            if remote.digest.is_none() {
-                flags.push("missing".to_string());
-            }
-        } else if remote.digest.is_some() && remote.digest != installed.digest {
-            flags.push("changed".to_string());
-        }
+    match remote.map(|r| &r.digest) {
+        Some(None) => flags.push("missing".to_string()),
+        Some(digest) if same && *digest != installed.digest => flags.push("changed".to_string()),
+        _ => {}
     }
     flags
 }
@@ -677,14 +672,6 @@ fn set_write_bits_file(path: &Path, writable: bool) -> Result<()> {
     Ok(())
 }
 
-/// Best effort: a file about to be replaced may be one an earlier overlay
-/// made read-only.
-fn make_writable(path: &Path) {
-    if !path.is_symlink() {
-        let _ = set_write_bits_file(path, true);
-    }
-}
-
 /// Empty the artefact checkout at `dest` and drop its install record: what
 /// becomes of an image whose directory is about to hold a source checkout.
 pub fn uninstall(config_root: &Path, directory: &str) -> Result<()> {
@@ -696,13 +683,6 @@ pub fn uninstall(config_root: &Path, directory: &str) -> Result<()> {
     }
     forget_install(config_root, directory);
     Ok(())
-}
-
-/// The files the overlay of the checkout at `directory` wrote, relative to it.
-pub fn overlay_files(config_root: &Path, directory: &str) -> Vec<String> {
-    read_marker(&Markers::new(config_root, directory).installed)
-        .map(|m| m.files)
-        .unwrap_or_default()
 }
 
 fn restore_writable(dest: &Path) -> Result<()> {
@@ -728,6 +708,21 @@ fn clean_files(dest: &Path) -> Result<()> {
 // Consumer operations
 // ---------------------------------------------------------------------------
 
+/// The registry tag a revision names an image by: a release's own name, or
+/// a build's source hash (`hash:<hex>`). `None` for any other revision.
+pub fn image_tag(revision: &str) -> Option<&str> {
+    match revision.strip_prefix("hash:") {
+        Some(hash) => Some(hash),
+        None => crate::version::parse(revision).map(|_| revision),
+    }
+}
+
+/// The registry tag `entry`'s revision names its image by.
+fn tag_of(entry: &RepoEntry) -> Result<&str> {
+    image_tag(&entry.revision)
+        .ok_or_else(|| anyhow!("{} is neither a release nor a build", entry.revision))
+}
+
 /// What one command needs to work with artefacts: where checkouts live, a
 /// registry client, and the image store, when there is one to keep images in.
 pub struct Artefacts {
@@ -740,13 +735,15 @@ pub struct Artefacts {
 /// What [`Artefacts::describe`] found.
 pub struct Description {
     pub image: Image,
-    /// The commit the entry's revision names on the remote now.
-    pub commit: String,
-    /// The image digest of that commit, `None` when it is not published.
+    /// The release looked up.
+    pub tag: String,
+    /// The image digest of that release, `None` when it is not published.
     pub digest: Option<String>,
+    /// The source hash the image records.
+    pub hash: Option<String>,
     pub layers: Vec<Layer>,
     pub installed: Option<Marker>,
-    /// `behind`, `missing`, `changed`, `ref-mismatch`, against the remote now.
+    /// `missing`, `changed`, `ref-mismatch`, against the registry now.
     pub flags: Vec<String>,
 }
 
@@ -758,7 +755,10 @@ pub struct Layer {
     pub digest: String,
 }
 
-/// What `pull` did.
+/// A release, and the source hash its image records.
+pub type Release = (String, Option<String>);
+
+/// What `pull` did, and the release it is at.
 pub enum Pulled {
     Updated(String),
     Current(String),
@@ -791,230 +791,230 @@ impl Artefacts {
         }
     }
 
-    /// The image `entry` is published as, and the commit its revision names
-    /// right now.
-    fn locate(&self, entry: &RepoEntry) -> Result<(Image, String)> {
-        let image = image_for(&entry.repo_url, &self.registries)?;
-        let commit =
-            crate::git::resolve_remote_commit(&crate::git::remote_url(entry), &entry.revision)?;
-        Ok((image, commit))
-    }
-
     fn markers(&self, entry: &RepoEntry) -> Markers {
         Markers::new(&self.config_root, &entry.directory)
     }
 
-    /// The digest of `commit`'s image, or the error that says it has none.
-    fn require(&self, entry: &RepoEntry, image: &Image, commit: &str) -> Result<String> {
-        self.client
-            .manifest_digest(image, commit)?
-            .ok_or_else(|| missing(entry, image, commit))
+    /// The image of `entry`'s release, and its digest — or the error that
+    /// says it has none.
+    fn require(&self, entry: &RepoEntry) -> Result<(Image, String)> {
+        let image = image_for(&entry.repo_url, &self.registries)?;
+        let digest = self
+            .client
+            .manifest_digest(&image, tag_of(entry)?)?
+            .ok_or_else(|| missing(entry, &image))?;
+        Ok((image, digest))
     }
 
-    /// Bring `dest` to the image of `commit`, which resolution chose for
-    /// `entry`. Nothing to do, and nothing asked of the registry, when it is
-    /// already there — unless a fetch saw that commit's image re-published
-    /// since.
+    /// Bring `dest` to the image of `entry`'s release, `commit` by
+    /// resolution. Nothing to do, and nothing asked of the registry, when it
+    /// is already there — unless a fetch saw it re-published since.
     pub fn pull(&self, entry: &RepoEntry, dest: &Path, commit: &str) -> Result<Pulled> {
-        let image = image_for(&entry.repo_url, &self.registries)?;
         let state = state_at(entry, dest, &self.markers(entry));
-        if let Some(installed) = &state.installed {
-            let republished = state.flags.iter().any(|f| f == "changed");
-            if installed.commit == commit && installed.revision == entry.revision && !republished {
-                return Ok(Pulled::Current(commit.to_string()));
-            }
+        if state.installed.is_some() && state.flags.is_empty() {
+            return Ok(Pulled::Current(entry.revision.clone()));
         }
-        let digest = self.require(entry, &image, commit)?;
+        let (image, digest) = self.require(entry)?;
         self.install(entry, dest, &image, commit, &digest)?;
-        Ok(Pulled::Updated(commit.to_string()))
+        Ok(Pulled::Updated(entry.revision.clone()))
     }
 
-    /// Lay the image of `commit` over the source checkout at `dest`: every
-    /// file it ships that the checkout does not track. Under the artefact
-    /// policy those are the ignored files a build of that commit would have
-    /// left there; a tracked file is the commit's own, and a modified one the
-    /// user's. The previous overlay's files go first, so nothing a later
-    /// build no longer makes is left behind. `writable` leaves the files
-    /// writable, for a checkout somebody develops in.
-    pub fn overlay(
-        &self,
-        entry: &RepoEntry,
-        dest: &Path,
-        commit: &str,
-        writable: bool,
-    ) -> Result<Pulled> {
-        let markers = self.markers(entry);
-        let previous = read_marker(&markers.installed);
-        if previous.as_ref().is_some_and(|m| m.commit == commit) {
-            return Ok(Pulled::Current(commit.to_string()));
-        }
-        let image = image_for(&entry.repo_url, &self.registries)?;
-        let digest = self.require(entry, &image, commit)?;
-        let obtained = self.obtain(entry, &image, commit, &digest)?;
-        let temp = WorkDir(unique_temp("overlay"));
-        fs::create_dir_all(&temp.0)?;
-        for (blob, gzip) in &obtained.layers {
-            extract_layer(blob, &temp.0, *gzip)?;
-        }
-        let listed = crate::git::run_git(&["ls-files", "-z"], Some(dest), true)?;
-        let tracked: std::collections::HashSet<String> = String::from_utf8_lossy(&listed.stdout)
-            .split('\0')
-            .filter(|p| !p.is_empty())
-            .map(str::to_string)
-            .collect();
-        // Gone until the new files are all in, so a failure part way is not
-        // taken for an overlay installed.
-        let _ = fs::remove_file(&markers.installed);
-        for rel in previous.iter().flat_map(|m| &m.files) {
-            let path = dest.join(rel);
-            if !tracked.contains(rel) && (path.is_file() || path.is_symlink()) {
-                make_writable(&path);
-                let _ = fs::remove_file(&path);
-            }
-        }
-        let mut written = Vec::new();
-        for rel in collect_files(&temp.0)? {
-            // The config layer's `.gitscale.toml` is for consumers to read;
-            // a source checkout has its own.
-            if tracked.contains(&rel) || rel == CONFIG_FILENAME {
-                continue;
-            }
-            let from = temp.0.join(&rel);
-            let to = dest.join(&rel);
-            if to.is_dir() && !to.is_symlink() {
-                continue;
-            }
-            if let Some(parent) = to.parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("cannot create {}", parent.display()))?;
-            }
-            if to.is_symlink() || to.is_file() {
-                make_writable(&to);
-                fs::remove_file(&to).with_context(|| format!("cannot replace {}", to.display()))?;
-            }
-            if from.is_symlink() {
-                std::os::unix::fs::symlink(fs::read_link(&from)?, &to)?;
-            } else {
-                fs::copy(&from, &to).with_context(|| format!("cannot write {}", to.display()))?;
-                if !writable {
-                    set_write_bits_file(&to, false)?;
-                }
-            }
-            written.push(rel);
-        }
-        let marker = Marker {
-            revision: entry.revision.clone(),
-            commit: commit.to_string(),
-            digest: Some(digest),
-            image: image.reference(),
-            files: written,
+    /// Nothing when `entry`'s release has an image, else the error that says
+    /// it has none.
+    pub fn check_image(&self, entry: &RepoEntry) -> Result<()> {
+        self.require(entry).map(|_| ())
+    }
+
+    /// The releases of the repository at `url` as its registry has them: each
+    /// version tag, and the commit its image was built from — for a
+    /// repository whose sources cannot be read. None, with no registry known
+    /// for it.
+    pub fn released(&self, url: &str) -> Result<BTreeMap<String, String>> {
+        let Ok(image) = image_for(url, &self.registries) else {
+            return Ok(BTreeMap::new());
         };
-        write_marker(&markers.installed, &marker)?;
-        Ok(Pulled::Updated(commit.to_string()))
+        let mut released = BTreeMap::new();
+        for tag in self.client.tags(&image)? {
+            if crate::version::parse(&tag).is_none() {
+                continue;
+            }
+            if let Some(commit) = self.annotation(&image, &tag, REVISION)? {
+                released.insert(tag, commit);
+            }
+        }
+        Ok(released)
     }
 
-    /// Whether the repository at `url` has an image published for `commit`.
-    pub fn has_image(&self, url: &str, commit: &str) -> Result<bool> {
+    /// The tree id the image of the release `tag` records: its sources, for
+    /// a checkout that is not read from git. From the image store when it
+    /// holds the image, else — when `online` — the registry.
+    pub fn tree(&self, url: &str, tag: &str, online: bool) -> Result<Option<String>> {
+        self.recorded(url, tag, TREE, online)
+    }
+
+    /// The commit the build of the source hash `hash` was made from, read
+    /// as [`Artefacts::tree`] is.
+    pub fn built_from(&self, url: &str, hash: &str, online: bool) -> Result<String> {
+        self.recorded(url, hash, REVISION, online)?.ok_or_else(|| {
+            let image = image_for(url, &self.registries)
+                .map(|i| i.reference())
+                .unwrap_or_else(|_| url.to_string());
+            anyhow!(
+                "no build of these sources ({}) in {}",
+                &hash[..12.min(hash.len())],
+                image
+            )
+        })
+    }
+
+    /// The annotation `key` of the image tagged `tag`: from the image store
+    /// when it holds the image, else — when `online` — the registry.
+    fn recorded(&self, url: &str, tag: &str, key: &str, online: bool) -> Result<Option<String>> {
+        if let Some(bytes) = self.held_manifest(url, tag) {
+            let manifest: serde_json::Value = serde_json::from_slice(&bytes)?;
+            return Ok(manifest["annotations"][key].as_str().map(str::to_string));
+        }
+        if !online {
+            return Err(crate::resolution::unavailable(format!(
+                "the artefact of {} at {} is not on this machine",
+                url, tag
+            )));
+        }
         let image = image_for(url, &self.registries)?;
-        Ok(self.client.manifest_digest(&image, commit)?.is_some())
+        self.annotation(&image, tag, key)
     }
 
-    /// Record what the remote has for `entry` now, without downloading it:
-    /// the commit its revision names, and whether that commit has an image.
-    pub fn fetch(&self, entry: &RepoEntry) -> Result<String> {
-        let (image, commit) = self.locate(entry)?;
-        let digest = self.client.manifest_digest(&image, &commit)?;
+    /// The manifest of the release `tag` of `url`, when the image store
+    /// holds it.
+    fn held_manifest(&self, url: &str, tag: &str) -> Option<Vec<u8>> {
+        let images = self.images.as_ref()?;
+        let layout = crate::oci_layout::Layout::new(images.path(&crate::ci::remote_url(url)));
+        let found = layout.held().into_iter().find(|h| h.tag == tag)?;
+        fs::read(layout.verified_blob(&found.digest)?).ok()
+    }
+
+    /// The annotation `key` of the image tagged `tag`, if both are there.
+    fn annotation(&self, image: &Image, tag: &str, key: &str) -> Result<Option<String>> {
+        let Some(digest) = self.client.manifest_digest(image, tag)? else {
+            return Ok(None);
+        };
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&self.client.manifest(image, &digest)?).with_context(|| {
+                format!("{}:{} has an unreadable manifest", image.reference(), tag)
+            })?;
+        Ok(manifest["annotations"][key].as_str().map(str::to_string))
+    }
+
+    /// Whether the repository at `url` has an image of the release `tag`.
+    pub fn has_image(&self, url: &str, tag: &str) -> Result<bool> {
+        let image = image_for(url, &self.registries)?;
+        Ok(self.client.manifest_digest(&image, tag)?.is_some())
+    }
+
+    /// Record what the registry has for `entry`'s release now, without
+    /// downloading it.
+    pub fn fetch(&self, entry: &RepoEntry, commit: &str) -> Result<()> {
+        let image = image_for(&entry.repo_url, &self.registries)?;
+        let digest = self.client.manifest_digest(&image, tag_of(entry)?)?;
         write_marker(
             &self.markers(entry).remote,
             &Marker {
-                revision: entry.revision.clone(),
-                commit: commit.clone(),
+                tag: entry.revision.clone(),
+                commit: commit.to_string(),
                 digest: digest.clone(),
                 image: image.reference(),
-                files: Vec::new(),
             },
         )?;
-        if digest.is_none() {
-            return Err(missing(entry, &image, &commit));
+        match digest {
+            Some(_) => Ok(()),
+            None => Err(missing(entry, &image)),
         }
-        Ok(commit)
     }
 
     /// Everything there is to know about `entry` right now, asked of the
-    /// remote and the registry, changing nothing: the image, the commit the
-    /// revision names, whether that commit is published and with what layers,
-    /// what is installed, and how the two compare.
+    /// registry, changing nothing: the image, whether its release is
+    /// published and with what layers, what is installed, and how the two
+    /// compare.
     pub fn describe(&self, entry: &RepoEntry) -> Result<Description> {
-        let (image, commit) = self.locate(entry)?;
-        let digest = self.client.manifest_digest(&image, &commit)?;
-        let layers = match &digest {
-            Some(digest) => parse_manifest(&self.client.manifest(&image, digest)?)?
-                .layers
-                .into_iter()
-                .map(|l| Layer {
-                    title: l.annotations.get(TITLE).cloned().unwrap_or_default(),
-                    size: l.size,
-                    digest: l.digest,
-                })
-                .collect(),
-            None => Vec::new(),
+        let image = image_for(&entry.repo_url, &self.registries)?;
+        let digest = self.client.manifest_digest(&image, tag_of(entry)?)?;
+        let (layers, hash) = match &digest {
+            Some(digest) => {
+                let bytes = self.client.manifest(&image, digest)?;
+                let raw: serde_json::Value = serde_json::from_slice(&bytes)?;
+                let layers = parse_manifest(&bytes)?
+                    .layers
+                    .into_iter()
+                    .map(|l| Layer {
+                        title: l.annotations.get(TITLE).cloned().unwrap_or_default(),
+                        size: l.size,
+                        digest: l.digest,
+                    })
+                    .collect();
+                (
+                    layers,
+                    raw["annotations"][HASH].as_str().map(str::to_string),
+                )
+            }
+            None => (Vec::new(), None),
         };
-        let markers = self.markers(entry);
-        let dest = self.config_root.join(&entry.directory);
-        let installed = read_marker(&markers.installed).filter(|_| !is_empty_dir(&dest));
+        let installed = installed(&self.config_root, &entry.directory);
         let now = Marker {
-            revision: entry.revision.clone(),
-            commit: commit.clone(),
+            tag: entry.revision.clone(),
+            commit: String::new(),
             digest: digest.clone(),
             image: image.reference(),
-            files: Vec::new(),
         };
         let flags = flags(entry, installed.as_ref(), Some(&now));
         Ok(Description {
             image,
-            commit,
+            tag: entry.revision.clone(),
             digest,
+            hash,
             layers,
             installed,
             flags,
         })
     }
 
-    /// The image `entry` is published as, and every tag the registry holds
-    /// for it — one per published commit.
-    pub fn published(&self, entry: &RepoEntry) -> Result<(Image, Vec<String>)> {
+    /// The image `entry` is published as, and each release the registry has
+    /// an image of, newest first, with the source hash that image records.
+    pub fn releases(&self, entry: &RepoEntry) -> Result<(Image, Vec<Release>)> {
         let image = image_for(&entry.repo_url, &self.registries)?;
-        let tags = self.client.tags(&image)?;
-        Ok((image, tags))
-    }
-
-    /// What is installed for `entry`, if anything.
-    pub fn installed(&self, entry: &RepoEntry) -> Option<Marker> {
-        let dest = self.config_root.join(&entry.directory);
-        read_marker(&self.markers(entry).installed).filter(|_| !is_empty_dir(&dest))
-    }
-
-    /// Download the image `entry`'s revision names into the image store,
-    /// touching no checkout. `Ok(None)` when there is no store.
-    pub fn warm(&self, entry: &RepoEntry) -> Result<Option<String>> {
-        if self.images.is_none() {
-            return Ok(None);
+        let mut tags: Vec<(String, crate::version::Version)> = self
+            .client
+            .tags(&image)?
+            .into_iter()
+            .filter_map(|tag| Some((tag.clone(), crate::version::parse(&tag)?)))
+            .collect();
+        tags.sort_by(|(a_tag, a), (b_tag, b)| b.compare(a).unwrap_or_else(|| b_tag.cmp(a_tag)));
+        let mut found = Vec::new();
+        for (tag, _) in tags {
+            let hash = self.annotation(&image, &tag, HASH)?;
+            found.push((tag, hash));
         }
-        let (image, commit) = self.locate(entry)?;
-        let digest = self.require(entry, &image, &commit)?;
-        self.obtain(entry, &image, &commit, &digest)?;
-        Ok(Some(commit))
+        Ok((image, found))
     }
 
-    /// The `.gitscale.toml` the image of `commit` carries in its config
-    /// layer, for resolution: from the cache when it holds it, else — when
-    /// `online` — downloaded into it. `None` for an image without one.
-    pub fn config_layer(&self, url: &str, commit: &str, online: bool) -> Result<Option<String>> {
+    /// Download the image of `entry`'s release into the image store,
+    /// touching no checkout. `Ok(false)` when there is no store.
+    pub fn warm(&self, entry: &RepoEntry) -> Result<bool> {
+        if self.images.is_none() {
+            return Ok(false);
+        }
+        let (image, digest) = self.require(entry)?;
+        self.obtain(entry, &image, &digest)?;
+        Ok(true)
+    }
+
+    /// The `.gitscale.toml` the image of the release `tag` carries in its
+    /// config layer, for resolution: from the cache when it holds it, else —
+    /// when `online` — downloaded into it. `None` for an image without one.
+    pub fn config_layer(&self, url: &str, tag: &str, online: bool) -> Result<Option<String>> {
         let not_here = || {
             crate::resolution::unavailable(format!(
                 "the artefact of {} at {} is not on this machine",
-                url,
-                short_sha(commit)
+                url, tag
             ))
         };
         let image = image_for(url, &self.registries)?;
@@ -1030,25 +1030,13 @@ impl Artefacts {
             .as_ref()
             .map(|(_, path)| crate::oci_layout::Layout::new(path.clone()));
 
-        let held = layout.as_ref().and_then(|layout| {
-            let found = layout.held().into_iter().find(|h| h.commit == commit)?;
-            let blob = layout.verified_blob(&found.digest)?;
-            fs::read(blob).ok()
-        });
-        let manifest_bytes = match held {
+        let manifest_bytes = match self.held_manifest(url, tag) {
             Some(bytes) => bytes,
             None if !online => return Err(not_here()),
             None => {
-                let digest = self
-                    .client
-                    .manifest_digest(&image, commit)?
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "no artefact for {}:{}; its pipeline may not have published yet",
-                            image.reference(),
-                            short_sha(commit)
-                        )
-                    })?;
+                let digest = self.client.manifest_digest(&image, tag)?.ok_or_else(|| {
+                    anyhow::anyhow!("no artefact for {} ({})", tag, image.reference())
+                })?;
                 let bytes = self.client.manifest(&image, &digest)?;
                 if let Some(layout) = &layout {
                     layout.ensure()?;
@@ -1056,7 +1044,7 @@ impl Artefacts {
                     let partial = target.with_extension("partial");
                     fs::write(&partial, &bytes)?;
                     fs::rename(&partial, &target)?;
-                    layout.record(commit, &digest, bytes.len() as u64)?;
+                    layout.record(tag, &digest, bytes.len() as u64)?;
                 }
                 bytes
             }
@@ -1101,7 +1089,7 @@ impl Artefacts {
     ) -> Result<()> {
         // Everything is downloaded and checked before the old files go, so a
         // registry that fails part way leaves the installed version alone.
-        let obtained = self.obtain(entry, image, commit, digest)?;
+        let obtained = self.obtain(entry, image, digest)?;
         fs::create_dir_all(dest).with_context(|| format!("cannot create {}", dest.display()))?;
         let markers = self.markers(entry);
         // Gone until the new files are all in, so a failure part way is not
@@ -1120,11 +1108,10 @@ impl Artefacts {
         }
         apply_readonly(dest)?;
         let marker = Marker {
-            revision: entry.revision.clone(),
+            tag: entry.revision.clone(),
             commit: commit.to_string(),
             digest: Some(digest.to_string()),
             image: image.reference(),
-            files: Vec::new(),
         };
         write_marker(&markers.remote, &marker)?;
         // Last: it is what says the artefact is here.
@@ -1134,13 +1121,7 @@ impl Artefacts {
     /// The layers of the image `digest`, on local disk and checked: from the
     /// image store, downloading into it whatever it does not hold, or — with
     /// no store — downloaded to a temporary directory.
-    fn obtain(
-        &self,
-        entry: &RepoEntry,
-        image: &Image,
-        commit: &str,
-        digest: &str,
-    ) -> Result<Obtained> {
+    fn obtain(&self, entry: &RepoEntry, image: &Image, digest: &str) -> Result<Obtained> {
         let Some(images) = &self.images else {
             let temp = unique_temp("download");
             fs::create_dir_all(&temp)
@@ -1193,8 +1174,8 @@ impl Artefacts {
             };
             layers.push((blob, gzip));
         }
-        layout.record(commit, digest, bytes.len() as u64)?;
-        images.touch(&path, commit);
+        layout.record(tag_of(entry)?, digest, bytes.len() as u64)?;
+        images.touch(&path, tag_of(entry)?);
         Ok(Obtained {
             layers,
             _lock: Some(lock),
@@ -1239,19 +1220,9 @@ fn unique_temp(purpose: &str) -> PathBuf {
     ))
 }
 
-/// The error for a commit with no image.
-fn missing(entry: &RepoEntry, image: &Image, commit: &str) -> anyhow::Error {
-    let revision = if entry.revision.is_empty() {
-        "default branch".to_string()
-    } else {
-        entry.revision.clone()
-    };
-    anyhow::anyhow!(
-        "no artefact for {}:{} ({}); its pipeline may not have published yet",
-        image.reference(),
-        short_sha(commit),
-        revision
-    )
+/// The error for a release or build with no image.
+fn missing(entry: &RepoEntry, image: &Image) -> anyhow::Error {
+    anyhow::anyhow!("no artefact for {} ({})", entry.revision, image.reference())
 }
 
 // ---------------------------------------------------------------------------
@@ -1268,12 +1239,17 @@ impl Drop for WorkDir {
 }
 
 /// `gitscale artefact publish`: pack what the `[artefact]` table of the
-/// repository at `root` selects and push it as the image for one commit.
+/// repository at `root` selects and push it as the image of the sources
+/// checked out, tagged with their source hash — and, given a `release`,
+/// tagged with it too. Tagging the commit in git is the pipeline's, after
+/// this. With `reuse`, nothing is packed: the release goes on the image
+/// already published for these sources.
 pub fn publish(
     root: Option<&Path>,
-    commit: Option<&str>,
+    release: Option<&str>,
     force: bool,
     dry_run: bool,
+    reuse: bool,
     out: &mut dyn Write,
 ) -> Result<()> {
     let config_path = find_config(root)?;
@@ -1287,20 +1263,52 @@ pub fn publish(
             config_path.display()
         );
     };
+    if let Some(release) = release {
+        if crate::version::parse(release).is_none() {
+            bail!(
+                "{} is not a version: a release is named like v1.4.0 or v1-2026.10.06-153012",
+                release
+            );
+        }
+    }
     // Worked out before packing, but a dry run only needs the files: it
     // reports what it could not work out, rather than failing on it.
-    let commit = source_commit(commit, base);
+    let commit = head_commit(base);
     let target = source_url(base).and_then(|source| {
         let image = image_for(&source, &config.registries)?;
         Ok((source, image))
     });
-    if !dry_run {
-        if let Err(e) = &commit {
-            bail!("{}", e);
+    let tags = match &commit {
+        Ok(commit) => Tags::of(&config, base, commit, release),
+        Err(e) => Err(anyhow!("{:#}", e)),
+    };
+    // Before anything is packed: a release made of another commit is never
+    // taken over.
+    if let (Some(release), Ok(commit)) = (release, &commit) {
+        if let Some(other) = released_elsewhere(base, release, commit)? {
+            bail!(
+                "{} is already the release of {}, not of {}",
+                release,
+                short_sha(&other),
+                short_sha(commit)
+            );
         }
-        if let Err(e) = &target {
-            bail!("{}", e);
+    }
+    if !dry_run || reuse {
+        let errors = [
+            commit.as_ref().err(),
+            target.as_ref().err(),
+            tags.as_ref().err(),
+        ];
+        if let Some(e) = errors.into_iter().flatten().next() {
+            bail!("{:#}", e);
         }
+    }
+    if reuse {
+        let (Ok((_, image)), Ok(tags)) = (&target, &tags) else {
+            unreachable!("checked above");
+        };
+        return reuse_image(image, tags, dry_run, out);
     }
 
     let work = WorkDir(unique_temp("publish"));
@@ -1308,8 +1316,7 @@ pub fn publish(
     layers.extend(pack(spec, base, &work.0)?);
 
     // Every file the image ships must be what a checkout of the commit, plus
-    // its build, holds at that path — or an overlay of it, and a consumer
-    // that develops it, end up with files that are neither.
+    // its build, holds at that path: the image stands for those sources.
     match &commit {
         Ok(commit) => {
             // The config layer is the repository's own `.gitscale.toml`,
@@ -1329,8 +1336,8 @@ pub fn publish(
     let config_blob = image_config(&layers);
     let config_digest = crate::registry::sha256_digest(&config_blob);
 
-    match (&target, &commit) {
-        (Ok((_, image)), Ok(commit)) => writeln!(
+    match (&target, &tags) {
+        (Ok((_, image)), Ok(tags)) => writeln!(
             out,
             "{} {}:{}",
             if dry_run {
@@ -1339,17 +1346,20 @@ pub fn publish(
                 "Publishing"
             },
             image.reference(),
-            commit
+            tags.hash
         )?,
         _ => {
             writeln!(out, "Would publish:")?;
             if let Err(e) = &target {
                 writeln!(out, "  image: unknown ({})", e)?;
             }
-            if let Err(e) = &commit {
-                writeln!(out, "  commit: unknown ({})", e)?;
+            if let Err(e) = &tags {
+                writeln!(out, "  tags: unknown ({:#})", e)?;
             }
         }
+    }
+    if let Ok(tags) = &tags {
+        writeln!(out, "  tags: {}", tags.names().join(", "))?;
     }
     for layer in &layers {
         writeln!(
@@ -1369,18 +1379,23 @@ pub fn publish(
     if dry_run {
         return Ok(());
     }
-    let (commit, (source, image)) = (commit?, target?);
+    let (Ok(commit), Ok((source, image)), Ok(tags)) = (commit, target, tags) else {
+        unreachable!("checked above");
+    };
     let manifest = manifest(
         &config_digest,
         config_blob.len() as u64,
         &layers,
         &commit,
+        &tags.tree,
+        &tags.hash,
         &source,
     );
 
     let client = Client::new();
-    if let Some(existing) = client.manifest_digest(&image, &commit)? {
-        let theirs = parse_manifest(&client.manifest(&image, &existing)?)?;
+    if let Some(existing) = client.manifest_digest(&image, &tags.hash)? {
+        let bytes = client.manifest(&image, &existing)?;
+        let theirs = parse_manifest(&bytes)?;
         let same = theirs.layers.len() == layers.len()
             && theirs
                 .layers
@@ -1388,15 +1403,17 @@ pub fn publish(
                 .zip(&layers)
                 .all(|(a, b)| a.digest == b.digest);
         if same {
+            // Released since: the image gets the release it lacks.
+            put_tags(&client, &image, &bytes, tags.release.as_slice(), force, out)?;
             writeln!(out, "Already published: {}@{}", image.reference(), existing)?;
             return Ok(());
         }
         if !force {
             bail!(
-                "{}:{} is already published with different files ({}). Two builds of one \
-                 commit should produce the same files; pass --force to replace it",
+                "{}:{} is already published with different files ({}). Two builds of the same \
+                 sources should produce the same files; pass --force to replace it",
                 image.reference(),
-                commit,
+                tags.hash,
                 existing
             );
         }
@@ -1421,8 +1438,156 @@ pub fn publish(
         client.upload_blob(&image, digest, path)?;
         writeln!(out, "  pushed {}", name)?;
     }
-    let digest = client.put_manifest(&image, &commit, &manifest)?;
+    let digest = client.put_manifest(&image, &tags.hash, &manifest)?;
+    put_tags(
+        &client,
+        &image,
+        &manifest,
+        tags.release.as_slice(),
+        force,
+        out,
+    )?;
     writeln!(out, "Published {}@{}", image.reference(), digest)?;
+    Ok(())
+}
+
+/// What the image of the sources checked out is tagged with.
+struct Tags {
+    tree: String,
+    /// The source hash of those sources: the tag the image is published
+    /// under.
+    hash: String,
+    /// The release the commit is, when one is being made.
+    release: Option<String>,
+}
+
+impl Tags {
+    fn of(
+        config: &crate::config::GitScaleConfig,
+        base: &Path,
+        commit: &str,
+        release: Option<&str>,
+    ) -> Result<Tags> {
+        let tree = crate::git::resolve_ref(base, &format!("{}^{{tree}}", commit))
+            .ok_or_else(|| anyhow!("{} is not in {}", short_sha(commit), base.display()))?;
+        let hash = source_hash(config, base).context("cannot hash the sources")?;
+        Ok(Tags {
+            tree,
+            hash,
+            release: release.map(str::to_string),
+        })
+    }
+
+    /// As the output lists them.
+    fn names(&self) -> Vec<String> {
+        let mut names = vec![format!("source hash {}", &self.hash[..12])];
+        names.extend(self.release.iter().cloned());
+        names
+    }
+}
+
+/// The commit the tag `release` names here or on `origin`, when that is
+/// another than `commit`.
+fn released_elsewhere(base: &Path, release: &str, commit: &str) -> Result<Option<String>> {
+    let local = crate::git::resolve_ref(base, &format!("refs/tags/{}^{{commit}}", release));
+    let remote = remote_tag(base, release)?;
+    Ok(local.into_iter().chain(remote).find(|c| c != commit))
+}
+
+/// The commit the tag `release` names on `origin`, if it has one.
+fn remote_tag(base: &Path, release: &str) -> Result<Option<String>> {
+    let tag = format!("refs/tags/{}", release);
+    let peeled = format!("{}^{{}}", tag);
+    let listed = crate::git::run_git(&["ls-remote", "origin", &tag, &peeled], Some(base), true)?;
+    let mut found = None;
+    for line in String::from_utf8_lossy(&listed.stdout).lines() {
+        match line.split_once('\t') {
+            // An annotated tag's own line names the tag object; the peeled
+            // one, the commit.
+            Some((commit, name)) if name == peeled => return Ok(Some(commit.to_string())),
+            Some((commit, name)) if name == tag => found = Some(commit.to_string()),
+            _ => {}
+        }
+    }
+    Ok(found)
+}
+
+/// Tag `manifest` with each of `tags` that does not name it already. A
+/// version tag naming another image is a release already published: moved
+/// only with `force`.
+fn put_tags(
+    client: &Client,
+    image: &Image,
+    manifest: &[u8],
+    tags: &[String],
+    force: bool,
+    out: &mut dyn Write,
+) -> Result<()> {
+    let digest = crate::registry::sha256_digest(manifest);
+    for tag in tags {
+        match client.manifest_digest(image, tag)? {
+            Some(named) if named == digest => continue,
+            Some(named) if !force => bail!(
+                "{}:{} already names another image ({}); pass --force to move it",
+                image.reference(),
+                tag,
+                named
+            ),
+            _ => {}
+        }
+        client.put_manifest(image, tag, manifest)?;
+        writeln!(out, "  tagged {}", tag)?;
+    }
+    Ok(())
+}
+
+/// The source hash of the repository at `base`, at its commit: what its
+/// image is built from. Resolved against the remotes, as a pipeline does.
+fn source_hash(config: &crate::config::GitScaleConfig, base: &Path) -> Result<String> {
+    let sources = crate::store::Sources::new(base, false)?;
+    let artefacts = Artefacts::new(config, base, sources.images());
+    let resolution =
+        crate::resolve::workspace(config, base, true, &sources, Some(&artefacts), false)?;
+    let ws = crate::hash::Workspace {
+        root: base,
+        sources: &sources,
+        artefacts: Some(&artefacts),
+        resolution: &resolution,
+        online: true,
+    };
+    Ok(crate::hash::of(&ws, None, true)?.hash)
+}
+
+/// `publish --reuse`: the release added to the image already published for
+/// these sources — nothing packed or uploaded.
+fn reuse_image(image: &Image, tags: &Tags, dry_run: bool, out: &mut dyn Write) -> Result<()> {
+    let client = Client::new();
+    let Some(digest) = client.manifest_digest(image, &tags.hash)? else {
+        bail!(
+            "no image of these sources ({}) in {}",
+            &tags.hash[..12],
+            image.reference()
+        );
+    };
+    let release = tags.release.as_deref().expect("--reuse is given a release");
+    if dry_run {
+        writeln!(
+            out,
+            "Would release the image of these sources ({}) as {}",
+            &tags.hash[..12],
+            release
+        )?;
+        return Ok(());
+    }
+    let bytes = client.manifest(image, &digest)?;
+    put_tags(&client, image, &bytes, tags.release.as_slice(), false, out)?;
+    writeln!(
+        out,
+        "Released {}@{}, the image of these sources ({})",
+        image.reference(),
+        digest,
+        &tags.hash[..12]
+    )?;
     Ok(())
 }
 
@@ -1548,28 +1713,10 @@ fn ci_var(marker: &str, value: &str) -> Option<String> {
     }
 }
 
-/// The commit being published: `--commit`, else the CI job's own, else
-/// `HEAD` of the repository at `dir`.
-fn source_commit(given: Option<&str>, dir: &Path) -> Result<String> {
-    let commit = match given {
-        Some(commit) => commit.to_string(),
-        None => ci_var("GITLAB_CI", "CI_COMMIT_SHA")
-            .or_else(|| ci_var("GITHUB_ACTIONS", "GITHUB_SHA"))
-            .or_else(|| crate::git::query(dir, &["rev-parse", "HEAD"]))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "{} is not in a git repository with a commit; pass --commit",
-                    dir.display()
-                )
-            })?,
-    };
-    if !is_full_sha(&commit) {
-        bail!(
-            "\"{}\" is not a full commit SHA (40 or 64 hex digits)",
-            commit
-        );
-    }
-    Ok(commit.to_lowercase())
+/// The commit checked out at `dir`: what is being published.
+fn head_commit(dir: &Path) -> Result<String> {
+    crate::git::resolve_ref(dir, "HEAD")
+        .ok_or_else(|| anyhow!("{} is not in a git repository with a commit", dir.display()))
 }
 
 /// The URL of the repository being published, the one consumers declare: the
@@ -1733,8 +1880,24 @@ mod tests {
         assert_eq!(first[0].digest, second[0].digest);
         assert_eq!(first[0].diff_id, second[0].diff_id);
         assert_eq!(first[0].files, vec!["b.txt", "src/a.txt"]);
-        let a = manifest("sha256:c", 1, &first, "abc", "https://example.com/a");
-        let b = manifest("sha256:c", 1, &second, "abc", "https://example.com/a");
+        let a = manifest(
+            "sha256:c",
+            1,
+            &first,
+            "abc",
+            "t",
+            "h",
+            "https://example.com/a",
+        );
+        let b = manifest(
+            "sha256:c",
+            1,
+            &second,
+            "abc",
+            "t",
+            "h",
+            "https://example.com/a",
+        );
         assert_eq!(a, b);
         for d in ["../repro-work-1", "../repro-work-2", ""] {
             let _ = fs::remove_dir_all(dir.join(d));
@@ -1850,24 +2013,22 @@ mod tests {
             directory: "meta/app".into(),
             repo_url: "https://github.com/org/app.git".into(),
             revision: revision.into(),
-            artefact: Some(crate::config::ArtefactUse::Replace),
             recursive: true,
             ..Default::default()
         }
     }
 
-    fn marker(revision: &str, commit: &str, digest: Option<&str>) -> Marker {
+    fn marker(tag: &str, digest: Option<&str>) -> Marker {
         Marker {
-            revision: revision.into(),
-            commit: commit.into(),
+            tag: tag.into(),
+            commit: "c1".into(),
             digest: digest.map(str::to_string),
             image: "ghcr.io/org/app/gitscale".into(),
-            files: Vec::new(),
         }
     }
 
     #[test]
-    fn state_reads_behind_missing_changed_and_mismatch() {
+    fn state_reads_missing_changed_and_mismatch() {
         let root = tempdir("state");
         let dest = root.join("meta/app");
         fs::create_dir_all(&dest).unwrap();
@@ -1884,32 +2045,24 @@ mod tests {
             }
             state_at(&entry(revision), &dest, &markers).flags
         };
-        let same = marker("main", "c1", Some("sha256:1"));
-        assert!(flags(Some(same.clone()), Some(same.clone()), "main").is_empty());
+        let same = marker("v1.0.0", Some("sha256:1"));
+        assert!(flags(Some(same.clone()), Some(same.clone()), "v1.0.0").is_empty());
         assert_eq!(
-            flags(
-                Some(same.clone()),
-                Some(marker("main", "c2", Some("sha256:2"))),
-                "main"
-            ),
-            vec!["behind"]
-        );
-        assert_eq!(
-            flags(Some(same.clone()), Some(marker("main", "c2", None)), "main"),
-            vec!["behind", "missing"]
+            flags(Some(same.clone()), Some(marker("v1.0.0", None)), "v1.0.0"),
+            vec!["missing"]
         );
         assert_eq!(
             flags(
                 Some(same.clone()),
-                Some(marker("main", "c1", Some("sha256:9"))),
-                "main"
+                Some(marker("v1.0.0", Some("sha256:9"))),
+                "v1.0.0"
             ),
             vec!["changed"]
         );
-        // The config now names another revision: what the fetch saw for the
-        // old one says nothing about the new one.
+        // Another release is wanted now: what the fetch saw for the old one
+        // says nothing about the new one.
         assert_eq!(
-            flags(Some(same.clone()), Some(same.clone()), "release"),
+            flags(Some(same.clone()), Some(same.clone()), "v1.1.0"),
             vec!["ref-mismatch"]
         );
         // The records live outside the checkout, which holds only its files.
@@ -1917,7 +2070,7 @@ mod tests {
         // A checkout somebody deleted is not installed, whatever the record says.
         fs::remove_dir_all(&dest).unwrap();
         write_marker(&markers.installed, &same).unwrap();
-        assert!(state_at(&entry("main"), &dest, &markers)
+        assert!(state_at(&entry("v1.0.0"), &dest, &markers)
             .installed
             .is_none());
         let _ = fs::remove_dir_all(&root);

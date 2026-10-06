@@ -1,6 +1,7 @@
 //! Helpers for the artefacts tests.
 
 use super::{strip_ansi, TestEnv};
+use gitscale::prefer::Form;
 use std::path::{Path, PathBuf};
 /// Two groups: a `vendor` layer that rarely changes and an `app` layer that
 /// changes with every build.
@@ -8,40 +9,53 @@ pub const LAYERED: &str =
     "[[artefact.layer]]\nname = \"vendor\"\ninclude = [\"dist/vendor/**\"]\n\n\
                        [[artefact.layer]]\nname = \"app\"\ninclude = [\"dist/**\"]\n";
 
+/// A root whose `meta/app` is `bare` at `revision`, taken as an artefact in
+/// the playground's workspace.
 pub fn entry_config(env: &TestEnv, bare: &Path, revision: &str) -> String {
+    env.prefer(bare, Form::Artefact);
     format!(
-        "{}[repos]\n\"meta/app\" = {{ url = \"{}\", revision = \"{}\", artefact = \"replace\" }}\n",
+        "{}[repos]\n\"meta/app\" = {{ url = \"{}\", revision = \"{}\" }}\n",
         env.registries(),
         bare.display(),
         revision
     )
 }
 
+/// The source hash tags among `tags`: one per image published.
+pub fn hash_tags(tags: Vec<String>) -> Vec<String> {
+    tags.into_iter().filter(|t| t.len() == 64).collect()
+}
+
 pub fn read(env: &TestEnv, rel: &str) -> String {
     std::fs::read_to_string(env.playground.join(rel)).unwrap()
 }
 
-pub fn layered(env: &TestEnv, bare: &Path, app: &str) -> String {
+/// Release the head of `main` as `tag`, published in two layers with `app`
+/// as the app layer's file. Returns the commit.
+pub fn layered(env: &TestEnv, bare: &Path, tag: &str, app: &str) -> String {
+    if super::git_stdout(bare, &["tag", "--list", tag]).is_empty() {
+        super::run_git_pub(bare, &["tag", tag, "main"]);
+    }
     let (out, commit) = env.publish_with(
         bare,
         "main",
         LAYERED,
         &[("vendor/lib.js", "vendor v1"), ("app.js", app)],
-        &[],
+        &[tag],
     );
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     commit
 }
 
-/// The commit `ls` says `meta/app` was installed from.
-pub fn installed_commit(env: &TestEnv) -> String {
+/// The release `ls` says `meta/app` was installed from.
+pub fn installed_tag(env: &TestEnv) -> String {
     let out = env.run(&["ls", "--format", "json"]);
     let rows: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
     rows.as_array()
         .unwrap()
         .iter()
         .find(|r| r["directory"] == "meta/app")
-        .and_then(|r| r["artefact"]["installed"]["commit"].as_str())
+        .and_then(|r| r["artefact"]["installed"]["tag"].as_str())
         .unwrap_or_default()
         .to_string()
 }
@@ -98,9 +112,9 @@ pub fn cached_images(env: &TestEnv) -> PathBuf {
     env.cache.join("images").join(&entries[0])
 }
 
-/// Make the image of `commit` look unused since 2000.
-pub fn age(entry: &Path, commit: &str) {
-    let marker = entry.join("gitscale-pins").join(commit);
+/// Make the image of the release `tag` look unused since 2000.
+pub fn age(entry: &Path, tag: &str) {
+    let marker = entry.join("gitscale-pins").join(tag);
     assert!(marker.is_file(), "{}", marker.display());
     let touched = std::process::Command::new("touch")
         .args(["-d", "2000-01-01", marker.to_str().unwrap()])
@@ -232,10 +246,10 @@ pub fn gzip_layer(title: &str, tar: Tar) -> Layer<'_> {
     }
 }
 
-/// Put an image made of `layers` straight into the registry as the
-/// artefact of `commit` in `bare` — no `artefact publish`, so nothing about
-/// it has to pass gitscale's own checks. Returns the manifest's digest.
-pub fn push_image(env: &TestEnv, bare: &Path, commit: &str, layers: &[Layer]) -> String {
+/// Put an image made of `layers` straight into the registry under `tag` in
+/// `bare` — no `artefact publish`, so nothing about it has to pass
+/// gitscale's own checks. Returns the manifest's digest.
+pub fn push_image(env: &TestEnv, bare: &Path, tag: &str, layers: &[Layer]) -> String {
     let registry = env.registry();
     let config = serde_json::to_vec(&serde_json::json!({
         "architecture": "unknown",
@@ -270,7 +284,7 @@ pub fn push_image(env: &TestEnv, bare: &Path, commit: &str, layers: &[Layer]) ->
     .unwrap();
     registry.put_manifest(
         &env.image(bare),
-        commit,
+        tag,
         &manifest,
         super::registry::MANIFEST_TYPE,
     )
@@ -281,59 +295,15 @@ pub fn tip(bare: &Path, branch: &str) -> String {
     super::git_stdout(bare, &["rev-parse", branch])
 }
 
-/// The layer digests of the image published for `commit`, in order.
-pub fn layer_digests(env: &TestEnv, bare: &Path, commit: &str) -> Vec<String> {
-    let manifest = env.registry().manifest(&env.image(bare), commit).unwrap();
+/// The layer digests of the image tagged `tag`, in order.
+pub fn layer_digests(env: &TestEnv, bare: &Path, tag: &str) -> Vec<String> {
+    let manifest = env.registry().manifest(&env.image(bare), tag).unwrap();
     manifest["layers"]
         .as_array()
         .unwrap()
         .iter()
         .map(|l| l["digest"].as_str().unwrap().to_string())
         .collect()
-}
-
-/// Commit a symlink `link` -> `target` to `branch` of `bare`.
-pub fn commit_symlink(
-    env: &TestEnv,
-    bare: &Path,
-    branch: &str,
-    link: &str,
-    target: &str,
-) -> String {
-    let work = env.repos_remote.join("symlink-tmp");
-    let _ = std::fs::remove_dir_all(&work);
-    super::run_git_pub(
-        &env.repos_remote,
-        &[
-            "clone",
-            "-q",
-            "--branch",
-            branch,
-            bare.to_str().unwrap(),
-            work.to_str().unwrap(),
-        ],
-    );
-    super::run_git_pub(&work, &["config", "user.email", "t@t"]);
-    super::run_git_pub(&work, &["config", "user.name", "T"]);
-    let path = work.join(link);
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::os::unix::fs::symlink(target, &path).unwrap();
-    super::run_git_pub(&work, &["add", "-A"]);
-    super::run_git_pub(&work, &["commit", "-q", "-m", "link"]);
-    super::run_git_pub(&work, &["push", "-q", "origin", branch]);
-    let commit = super::git_stdout(&work, &["rev-parse", "HEAD"]);
-    let _ = std::fs::remove_dir_all(&work);
-    commit
-}
-
-/// An overlay entry for `bare` at `revision`.
-pub fn overlay_config(env: &TestEnv, bare: &Path, revision: &str) -> String {
-    format!(
-        "{}[repos]\n\"meta/app\" = {{ url = \"{}\", revision = \"{}\", artefact = \"overlay\" }}\n",
-        env.registries(),
-        bare.display(),
-        revision
-    )
 }
 
 /// Make every file and directory under `dir` writable again, so a test can

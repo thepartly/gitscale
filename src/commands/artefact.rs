@@ -3,57 +3,73 @@
 
 use anyhow::{bail, Result};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::artefact::Artefacts;
 use crate::cache::{human_size, plural};
-use crate::config::{filter_entries, load_workspace, GitScaleConfig, RepoEntry};
+use crate::config::{load_workspace, RepoEntry};
+use crate::prefer::Form;
+use crate::resolve::Network;
+use crate::store::Sources;
 
 pub use crate::artefact::publish;
 
-/// The artefact entries `names` selects: all of them when none are given. A
-/// name that is declared but is not an artefact entry is an error, as an
-/// undeclared one is.
-fn selected(config: &GitScaleConfig, names: &[String]) -> Result<Vec<RepoEntry>> {
-    let chosen = filter_entries(&config.repos, names)?;
-    let not_artefacts: Vec<&str> = chosen
-        .iter()
-        .filter(|e| !e.is_artefact() && !names.is_empty())
-        .map(|e| e.directory.as_str())
-        .collect();
-    if !not_artefacts.is_empty() {
-        bail!("Not artefact entries: {}", not_artefacts.join(", "));
+/// The checkouts `dirs` names among those taken as an artefact — every one
+/// when none are given — with the workspace's root and artefacts. A name
+/// that is no such checkout is an error.
+fn selected(root: Option<&Path>, dirs: &[String]) -> Result<(PathBuf, Artefacts, Vec<RepoEntry>)> {
+    let (config, config_root) = load_workspace(root)?;
+    let here = crate::paths::Here::new(root, &config_root)?;
+    let sources = Sources::new(&config_root, false)?;
+    let artefacts = Artefacts::new(&config, &config_root, None);
+    let resolution = crate::resolve::workspace_with(
+        &config,
+        &config_root,
+        Network::OnMiss.in_ci(),
+        &sources,
+        Some(&artefacts),
+        false,
+    )?;
+    let mut entries = Vec::new();
+    if dirs.is_empty() {
+        entries.extend(
+            resolution
+                .slots
+                .iter()
+                .filter(|s| s.form() == Form::Artefact)
+                .map(|s| s.entry()),
+        );
     }
-    Ok(chosen.into_iter().filter(|e| e.is_artefact()).collect())
+    for dir in dirs {
+        let slot = here.slot(&resolution, dir)?;
+        if slot.form() != Form::Artefact {
+            bail!("{} is not taken as an artefact", slot.directory);
+        }
+        entries.push(slot.entry());
+    }
+    Ok((config_root, artefacts, entries))
 }
 
-/// `gitscale artefact show` — for each artefact entry, what the remote and
-/// the registry say right now and what is installed, changing nothing. The
-/// one place to answer "why does it say no artefact, missing or changed".
+/// `gitscale artefact show` — for each checkout taken as an artefact, what
+/// the registry says right now about the release it is at, and what is
+/// installed, changing nothing. The one place to answer "why does it say no
+/// artefact, missing or changed".
 pub fn show(root: Option<&Path>, dirs: &[String], out: &mut dyn Write) -> Result<()> {
-    let (config, config_root) = load_workspace(root)?;
-    let names = crate::paths::relative_names(root, &config_root, dirs)?;
-    let entries = selected(&config, &names)?;
+    let (_, artefacts, entries) = selected(root, dirs)?;
     if entries.is_empty() {
-        writeln!(out, "No artefact entries declared.")?;
+        writeln!(out, "No checkout is taken as an artefact.")?;
         return Ok(());
     }
-    let artefacts = Artefacts::new(&config, &config_root, None);
     let mut failed = 0;
     for (i, entry) in entries.iter().enumerate() {
         if i > 0 {
             writeln!(out)?;
         }
         writeln!(out, "{}", entry.directory)?;
-        let revision = if entry.revision.is_empty() {
-            "(default branch)"
-        } else {
-            entry.revision.as_str()
-        };
         let line = |out: &mut dyn Write, label: &str, value: &str| -> std::io::Result<()> {
             writeln!(out, "  {:<11}{}", label, value)
         };
-        line(out, "revision", revision)?;
+        line(out, "release", &entry.revision)?;
         let described = match artefacts.describe(entry) {
             Ok(described) => described,
             Err(e) => {
@@ -69,14 +85,12 @@ pub fn show(root: Option<&Path>, dirs: &[String], out: &mut dyn Write) -> Result
             }
         };
         line(out, "image", &described.image.reference())?;
-        line(out, "commit", &described.commit)?;
         match &described.digest {
             Some(digest) => line(out, "published", digest)?,
-            None => line(
-                out,
-                "published",
-                "no — its pipeline may not have published this commit yet",
-            )?,
+            None => line(out, "published", "no")?,
+        }
+        if let Some(hash) = &described.hash {
+            line(out, "sources", hash)?;
         }
         for (n, layer) in described.layers.iter().enumerate() {
             let title = if layer.title.is_empty() {
@@ -96,7 +110,7 @@ pub fn show(root: Option<&Path>, dirs: &[String], out: &mut dyn Write) -> Result
                 "installed",
                 &format!(
                     "{} ({})",
-                    installed.commit,
+                    installed.tag,
                     installed.digest.as_deref().unwrap_or("no digest")
                 ),
             )?,
@@ -112,62 +126,48 @@ pub fn show(root: Option<&Path>, dirs: &[String], out: &mut dyn Write) -> Result
     if failed > 0 {
         bail!(
             "{} could not be looked up",
-            plural(failed, "artefact entry", "artefact entries")
+            plural(failed, "image", "images")
         );
     }
     Ok(())
 }
 
-/// `gitscale artefact list` — the commits each artefact entry has images
-/// for in the registry, labelled with the branches and tags that point at
-/// them now, and which one is installed.
+/// `gitscale artefact list` — the releases each checkout taken as an
+/// artefact has images of, newest first, each with the source hash its
+/// image was built from, and which one is installed.
 pub fn list(root: Option<&Path>, dirs: &[String], out: &mut dyn Write) -> Result<()> {
-    let (config, config_root) = load_workspace(root)?;
-    let names = crate::paths::relative_names(root, &config_root, dirs)?;
-    let entries = selected(&config, &names)?;
+    let (config_root, artefacts, entries) = selected(root, dirs)?;
     if entries.is_empty() {
-        writeln!(out, "No artefact entries declared.")?;
+        writeln!(out, "No checkout is taken as an artefact.")?;
         return Ok(());
     }
-    let artefacts = Artefacts::new(&config, &config_root, None);
     for (i, entry) in entries.iter().enumerate() {
         if i > 0 {
             writeln!(out)?;
         }
-        let (image, tags) = artefacts.published(entry)?;
-        let refs = crate::git::ls_remote_refs(&crate::git::remote_url(entry))?;
-        let installed = artefacts.installed(entry).map(|m| m.commit);
+        let (image, releases) = artefacts.releases(entry)?;
+        let installed = crate::artefact::installed(&config_root, &entry.directory).map(|m| m.tag);
         writeln!(
             out,
             "{}  {}  ({})",
             entry.directory,
             image.reference(),
-            plural(tags.len(), "image", "images")
+            plural(releases.len(), "release", "releases")
         )?;
-        // Commits a branch or tag names now come first, in the remote's own
-        // order; then the rest, which only the registry still remembers.
-        let labels = |tag: &str| -> Vec<&str> {
-            refs.iter()
-                .filter(|(sha, _)| sha.eq_ignore_ascii_case(tag))
-                .map(|(_, name)| name.as_str())
-                .collect()
-        };
-        let mut rows: Vec<(String, Vec<&str>)> =
-            tags.iter().map(|tag| (tag.clone(), labels(tag))).collect();
-        rows.sort_by(|a, b| a.1.is_empty().cmp(&b.1.is_empty()).then(a.0.cmp(&b.0)));
-        for (tag, names) in rows {
-            let mut notes = names.join(", ");
-            if installed.as_deref() == Some(tag.as_str()) {
-                if !notes.is_empty() {
-                    notes.push_str("  ");
-                }
-                notes.push_str("(installed)");
-            }
-            if notes.is_empty() {
-                writeln!(out, "  {}", tag)?;
+        let width = releases.iter().map(|(tag, _)| tag.len()).max().unwrap_or(0);
+        for (tag, hash) in releases {
+            let mark = if installed.as_deref() == Some(tag.as_str()) {
+                "  (installed)"
             } else {
-                writeln!(out, "  {}  {}", tag, notes)?;
-            }
+                ""
+            };
+            writeln!(
+                out,
+                "  {:<width$}  {}{}",
+                tag,
+                hash.as_deref().unwrap_or("-"),
+                mark
+            )?;
         }
     }
     Ok(())
