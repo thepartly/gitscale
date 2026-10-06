@@ -25,6 +25,7 @@ use crate::checkout::Placer;
 use crate::config::{load_workspace, set_revisions, GitScaleConfig, RepoEntry, CONFIG_FILENAME};
 use crate::paths::Here;
 use crate::promote::{self, below, Containment, State};
+use crate::remote_branch::RemoteBranch;
 use crate::resolution::{Resolution, Slot};
 use crate::store::{Sources, Stores};
 
@@ -233,7 +234,16 @@ fn promote_topic(
     // Deleted before the pin bump is written, so the pipeline of the bump
     // never builds from a branch that still matches.
     for remote in &branches {
-        remote.delete(stores)?;
+        remote.delete().map_err(|e| {
+            // Git's own reason in the one message the command prints.
+            anyhow::anyhow!(
+                "{}: cannot delete origin/{} ({:#}); no config was changed. Run git upgrade \
+                 again once it can be",
+                remote.dir,
+                remote.branch,
+                e
+            )
+        })?;
         writeln!(out, "  {}: deleted origin/{}", remote.dir, remote.branch)?;
     }
     let placer = Placer {
@@ -252,46 +262,6 @@ fn promote_topic(
         writeln!(out, "next to merge: {}", next.join(", "))?;
     }
     to_push(config_root, &committed, out)
-}
-
-/// A promoted slot's topic branch on its remote, at the tip its release was
-/// checked to hold.
-struct RemoteBranch {
-    dir: String,
-    url: String,
-    branch: String,
-    tip: String,
-}
-
-impl RemoteBranch {
-    /// Delete it on its remote — only while it is still at the tip checked,
-    /// so a push made since fails the deletion instead of being lost. As
-    /// the user's own `git push` would: with their credential helpers.
-    fn delete(&self, stores: &Stores) -> Result<()> {
-        let lease = format!("--force-with-lease=refs/heads/{}:{}", self.branch, self.tip);
-        crate::git::run_git_as_user(
-            &[
-                "push",
-                "--quiet",
-                &lease,
-                &self.url,
-                &format!(":refs/heads/{}", self.branch),
-            ],
-            Some(&stores.repo_path(&self.url)),
-            true,
-        )
-        .map_err(|e| {
-            // Git's own reason in the one message the command prints.
-            anyhow::anyhow!(
-                "{}: cannot delete origin/{} ({:#}); no config was changed. Run git upgrade \
-                 again once it can be",
-                self.dir,
-                self.branch,
-                e
-            )
-        })?;
-        Ok(())
-    }
 }
 
 /// The promoted slots' topic branches still on their remotes. Each must hold
@@ -334,6 +304,7 @@ fn remote_branches(stores: &Stores, leaving: &[(&Slot, String)]) -> Result<Vec<R
             url,
             branch: topic.branch.clone(),
             tip,
+            repo: store,
         });
     }
     Ok(found)

@@ -68,4 +68,5 @@ For a second change in parallel in a bare clone with worktrees, `git topic start
 - A placement failing on a missing image: `git scale artefact show` names the release with no image. Ask the user whether one is coming, or take its sources with `git scale prefer --source <dir>`.
 - A `hash:<source hash>` revision pins one build, to try it before it is released. `git scale check` refuses it; set it back to a release by hand before merging.
 - `no tag` from `git upgrade`: no release holds the change. Find out from the user whether one is coming; never pin a branch instead.
+- `git topic finish` deletes the topic's remote branches its default branches already hold, and keeps the rest; deleting a kept one is the user's to decide.
 - Ask the user before merging, deleting a remote branch by hand, `git topic finish --force`, `git scale sync --force` (it removes checkouts that hold work), `git scale clean -f`, or editing `.gitscale.toml` beyond what `git upgrade` and `git scale require` write.

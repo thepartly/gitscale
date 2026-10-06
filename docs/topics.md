@@ -125,19 +125,33 @@ Then a plain clone goes back to the default branch and fast-forwards it, and
 every checkout returns to its pin; a topic's own worktree is removed, with its
 checkouts, and a `cd` to the main worktree when the command ran inside it.
 The topic's local branches are deleted — the root's, and each store's `NAME`
-and `NAME@vN` — and remote branches are never touched. A branch dropped with
-commits no remote had is named with the commit it was at, as `git branch -D`
-does:
+and `NAME@vN`. A branch dropped with commits no remote had is named with the
+commit it was at, as `git branch -D` does.
+
+Then the topic's branches on the remotes: the root's, and those of the
+checkouts joined to it. Each one its default branch already holds — by the
+content test, so a squash, a rebase or a merge commit counts — is deleted,
+only while it is still at the tip checked, so a push made since survives. A
+store is fetched first, so a merge since its last fetch counts. Each one the
+default branch does not hold stays, named with the command that drops it. A
+branch already gone — deleted by `git upgrade`, or by the hosting service on
+merge — says nothing. A deletion that fails, by permissions or a protected
+branch, is a warning, and the finish still succeeds: what it would delete is
+held by the default branch. A refused finish touches no remote.
 
 ```
 switched to main
 deleted PROJ-12 in ., imports/b
 dropped PROJ-12 in imports/core (was 1a2b3c4): 2 commits no remote had
+deleted origin/PROJ-12 in ., imports/b: merged
+kept origin/PROJ-12 in imports/core: not merged; git push https://github.com/org/core.git --delete PROJ-12 to drop it
 ```
 
 To come back to a topic later, do not finish it: `switch` to another, and its
-branches stay. A finished topic comes back from its remote branches: `git
-topic switch PROJ-12` tracks the root's, and each checkout follows its own.
+branches stay. A topic finished with `--force`, unmerged, comes back from its
+remote branches, which stay: `git topic switch PROJ-12` tracks the root's, and
+each checkout follows its own. A merged one has nothing to come back to: its
+change is on the default branch.
 
 ### Branch prefix
 

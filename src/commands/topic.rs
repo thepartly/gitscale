@@ -24,6 +24,7 @@ use crate::checkout::Placer;
 use crate::config::{load_config, GitScaleConfig, CONFIG_FILENAME};
 use crate::paths::{relative_to, Here};
 use crate::promote::State;
+use crate::remote_branch::RemoteBranch;
 use crate::resolution::{Resolution, Slot};
 use crate::resolve::Network;
 use crate::store::Sources;
@@ -1678,6 +1679,53 @@ fn finish(
         bail!("{}", lines.join("\n"));
     }
 
+    // 5. The topic's branches on the remotes: each one its default branch
+    // already holds goes, once the local work below is done; the rest stay.
+    // A store is fetched first, so a merge since its last fetch counts; the
+    // root was fetched above.
+    let mut remote_go: Vec<RemoteBranch> = Vec::new();
+    let mut remote_kept: Vec<(String, String, String)> = Vec::new();
+    for (label, repo_dir, local) in &branches {
+        let into = if label == "." {
+            base.clone()
+        } else {
+            let fetched = crate::git::run_git(
+                &["fetch", "--quiet", "--prune", "origin"],
+                Some(repo_dir),
+                true,
+            );
+            if let Err(e) = fetched {
+                writeln!(
+                    err,
+                    "warning: cannot fetch {}: {:#}; its remote branch is left alone",
+                    label, e
+                )?;
+                continue;
+            }
+            "refs/remotes/origin/HEAD".to_string()
+        };
+        let Some(tip) =
+            crate::git::resolve_ref(repo_dir, &format!("refs/remotes/origin/{}", local))
+        else {
+            continue;
+        };
+        let Some(url) = crate::git::origin_url(repo_dir) else {
+            continue;
+        };
+        // Without its default branch, nothing says it is held: it stays.
+        if crate::git::ref_exists(repo_dir, &into) && merged(repo_dir, &into, &tip) {
+            remote_go.push(RemoteBranch {
+                dir: label.clone(),
+                url,
+                branch: local.clone(),
+                tip,
+                repo: repo_dir.clone(),
+            });
+        } else {
+            remote_kept.push((named(label, local, &branch), url, local.clone()));
+        }
+    }
+
     // Git runs from the common dir from here on: the worktree it was asked
     // from may be the one that goes.
     match (&worktree, remove) {
@@ -1707,8 +1755,8 @@ fn finish(
         (None, None) => {}
     }
 
-    // Remote branches are never touched. A dropped branch's tip is said, as
-    // `git branch -D` says it, for a slip to be undone.
+    // A dropped branch's tip is said, as `git branch -D` says it, for a slip
+    // to be undone.
     let mut deleted: Vec<String> = Vec::new();
     for (label, repo_dir, local) in &branches {
         let gone = crate::git::run_git(&["branch", "--quiet", "-D", local], Some(repo_dir), false)
@@ -1728,6 +1776,36 @@ fn finish(
             label,
             tip,
             crate::cache::plural(*unique, "commit", "commits")
+        )?;
+    }
+
+    // 5, after the local work: each remote branch the default branch holds
+    // goes, while still at the tip checked. One that cannot go is a warning:
+    // it holds nothing the default branch lacks.
+    let mut gone = Vec::new();
+    for remote in &remote_go {
+        match remote.delete() {
+            Ok(()) => gone.push(named(&remote.dir, &remote.branch, &branch)),
+            Err(e) => writeln!(
+                err,
+                "warning: cannot delete origin/{} in {}: {:#}; delete it on {}",
+                remote.branch, remote.dir, e, remote.url
+            )?,
+        }
+    }
+    if !gone.is_empty() {
+        writeln!(
+            out,
+            "deleted origin/{} in {}: merged",
+            branch,
+            gone.join(", ")
+        )?;
+    }
+    for (place, url, local) in &remote_kept {
+        writeln!(
+            out,
+            "kept origin/{} in {}: not merged; git push {} --delete {} to drop it",
+            local, place, url, local
         )?;
     }
 

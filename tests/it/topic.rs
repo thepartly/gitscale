@@ -1180,6 +1180,51 @@ fn normal_065_a_merge_commit_counts_as_merged() {
     );
 }
 
+/// `finish` deletes the topic's remote branches the default branches already
+/// hold, after its local work, and keeps the rest, naming how to drop them —
+/// `--force` too. A remote that refuses the deletion is a warning: what it
+/// keeps is held by its default branch, and the finish succeeds.
+#[test]
+fn normal_066_finish_deletes_merged_remote_branches_and_keeps_the_rest() {
+    let f = fixture("topic_finish_remote_branches", "");
+    let ws = f.clone_root("ws");
+    identity(&ws);
+    ok(&gs(&ws, &["topic", "start", "feat"]));
+    ok(&gs(&ws, &["topic", "join", "imports/core"]));
+    commit_in(&ws, "root.txt", "root change");
+    commit_in(&ws.join("imports/core"), "lib.txt", "core change");
+    ok(&gs(&ws, &["push", "--quiet"]));
+    assert!(bare_has(&f.root, "refs/heads/feat"));
+    assert!(bare_has(&f.core, "refs/heads/feat"));
+
+    // The root's change is merged; core's is not.
+    squash_merge(&f.env, &f.root, "feat");
+    crate::support::hooks::write_script(
+        &f.root.join("hooks/pre-receive"),
+        "echo protected >&2\nexit 1\n",
+    );
+
+    let out = gs(&ws, &["topic", "finish", "--force"]);
+    ok(&out);
+    assert!(
+        out.stderr
+            .contains("warning: cannot delete origin/feat in .: "),
+        "{}",
+        out.stderr
+    );
+    assert!(bare_has(&f.root, "refs/heads/feat"), "refused: it stays");
+    assert!(
+        out.stdout.contains(&format!(
+            "kept origin/feat in imports/core: not merged; git push {} --delete feat to drop it",
+            f.core.display()
+        )),
+        "{}",
+        out.stdout
+    );
+    assert!(bare_has(&f.core, "refs/heads/feat"), "unmerged: it stays");
+    assert_eq!(branch(&ws).as_deref(), Some("main"));
+}
+
 /// `join` and `leave` with nothing named fail, as `git add` does; inside a
 /// checkout the hint says how to name it.
 #[test]
@@ -1801,6 +1846,8 @@ fn normal_052_finish_ends_a_merged_topic_in_a_plain_clone() {
         "{}",
         out.stderr
     );
+    // A refused finish touches no remote.
+    assert!(bare_has(&f.root, "refs/heads/feat"));
     run_git_pub(&ws, &["checkout", "--", "README.md", ".gitscale.toml"]);
 
     let out = gs(&ws, &["topic", "finish"]);
@@ -1812,10 +1859,14 @@ fn normal_052_finish_ends_a_merged_topic_in_a_plain_clone() {
         &ws,
         &["rev-parse", "--verify", "-q", "refs/heads/feat"]
     ));
+    // The root's branch on its remote, merged, goes too; the child's was
+    // gone already, and says nothing.
     assert!(
-        bare_has(&f.root, "refs/heads/feat"),
-        "the remote branch stays"
+        out.stdout.contains("deleted origin/feat in .: merged\n"),
+        "{}",
+        out.stdout
     );
+    assert!(!bare_has(&f.root, "refs/heads/feat"));
     assert_eq!(branch(&ws.join("imports/core")), None);
     assert_eq!(
         head(&ws.join("imports/core")),
@@ -1872,12 +1923,17 @@ fn normal_054_finish_in_a_bare_clone_removes_the_worktree() {
     ok(&out);
     assert!(!wt.exists());
     assert!(out.stdout.ends_with("cd ../../main\n"), "{}", out.stdout);
+    assert!(
+        out.stdout.contains("deleted origin/PROJ-13 in .: merged\n"),
+        "{}",
+        out.stdout
+    );
     assert!(!git_ok(
         &app,
         &["rev-parse", "--verify", "-q", "refs/heads/PROJ-13"]
     ));
     assert!(app.join("main/imports/core/lib.txt").is_file());
-    assert!(bare_has(&f.root, "refs/heads/PROJ-13"));
+    assert!(!bare_has(&f.root, "refs/heads/PROJ-13"));
 }
 
 /// `finish --force` abandons a topic with a child still on it: the child goes

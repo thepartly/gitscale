@@ -1,8 +1,8 @@
 # Plan: the GitScale demo
 
-Status: in progress. The GitScale features it needs are implemented. The six
-repositories are written in `~/projects`, uncommitted; next is the
-[bootstrap](#bootstrap).
+Status: in progress. The six repositories are published and released, the
+root's render included. Left: the rulesets on `main`, and removing
+`demo/system` from the gitscale repository.
 
 - [What it shows](#what-it-shows)
 - [Repositories](#repositories)

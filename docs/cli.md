@@ -351,7 +351,7 @@ git topic finish [GLOBAL] [--force] [NAME]
 | `switch <NAME>` | Go to an existing branch of the root: a topic, a colleague's, or a pinned one |
 | `status` | The current topic: what each joined repository still needs, what to merge next — see [where a topic stands](topics.md#where-a-topic-stands-git-topic-status) |
 | `list` | Every topic of the root: worktree, joined checkouts, state |
-| `finish [NAME]` | End a merged topic: back to the default branch, or its worktree removed; its local branches deleted, refused while one has commits no remote has — see [finishing](topics.md#starting-switching-and-finishing-topics) |
+| `finish [NAME]` | End a merged topic: back to the default branch, or its worktree removed; its local branches deleted, refused while one has commits no remote has; and its remote branches deleted where the default branch holds them — see [finishing](topics.md#starting-switching-and-finishing-topics) |
 
 | Option | Command | Meaning |
 |---|---|---|

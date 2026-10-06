@@ -2,7 +2,7 @@
 
 Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Regenerate with `GITSCALE_UPDATE_CATALOG=1 cargo test --test it catalog::`. The naming rules are in [testing.md](testing.md).
 
-650 integration tests (283 normal, 205 edge, 144 error, 18 perf), 44 of them ignored; 170 unit tests.
+651 integration tests (284 normal, 205 edge, 144 error, 18 perf), 44 of them ignored; 170 unit tests.
 
 | Feature | normal | edge | error | perf | total |
 |---|---:|---:|---:|---:|---:|
@@ -33,7 +33,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | [skill](#skill) | 5 | 5 | 3 | 0 | 13 |
 | [stores](#stores) | 3 | 10 | 2 | 1 | 16 |
 | [sync](#sync) | 5 | 7 | 0 | 1 | 13 |
-| [topic](#topic) | 36 | 17 | 12 | 0 | 65 |
+| [topic](#topic) | 37 | 17 | 12 | 0 | 66 |
 | [upgrade](#upgrade) | 12 | 9 | 5 | 0 | 26 |
 | [workspace](#workspace) | 2 | 1 | 1 | 0 | 4 |
 
@@ -798,6 +798,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | topic-063 | normal | `normal_063_off_a_topic_a_terminal_is_told_where_it_is` | Off a topic, `git topic` prints nothing for a script to read, but tells a person at a terminal where they are, on stderr: on a pinned branch, on no branch, or in a checkout the topic holds at its pin. |
 | topic-064 | normal | `normal_064_status_fetches_first_and_offline_says_how_old_it_is` | `git topic status` asks the remotes first: a merge of the root's branch since the last fetch is in its answer. `--offline` reads this machine only, and at a terminal says how old that is, once it is an hour or more. |
 | topic-065 | normal | `normal_065_a_merge_commit_counts_as_merged` | A root merged with a merge commit, rather than a squash, has every one of its commits in the default branch's history: it is merged, as a topic just started — on the same commit as the default branch — is not. |
+| topic-066 | normal | `normal_066_finish_deletes_merged_remote_branches_and_keeps_the_rest` | `finish` deletes the topic's remote branches the default branches already hold, after its local work, and keeps the rest, naming how to drop them — `--force` too. A remote that refuses the deletion is a warning: what it keeps is held by its default branch, and the finish succeeds. |
 
 ### upgrade
 
