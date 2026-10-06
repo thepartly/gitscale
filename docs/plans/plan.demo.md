@@ -1,8 +1,7 @@
 # Plan: the GitScale demo
 
 Status: in progress. The six repositories are published and released, the
-root's render included. Left: the rulesets on `main`, and removing
-`demo/system` from the gitscale repository.
+root's render included. Left: the rulesets on `main`.
 
 - [What it shows](#what-it-shows)
 - [Repositories](#repositories)
