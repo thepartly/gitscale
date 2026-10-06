@@ -2,7 +2,7 @@
 
 Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Regenerate with `GITSCALE_UPDATE_CATALOG=1 cargo test --test it catalog::`. The naming rules are in [testing.md](testing.md).
 
-643 integration tests (276 normal, 205 edge, 144 error, 18 perf), 44 of them ignored; 168 unit tests.
+644 integration tests (277 normal, 205 edge, 144 error, 18 perf), 44 of them ignored; 168 unit tests.
 
 | Feature | normal | edge | error | perf | total |
 |---|---:|---:|---:|---:|---:|
@@ -17,7 +17,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | [config](#config) | 1 | 1 | 5 | 0 | 7 |
 | [exclude](#exclude) | 2 | 1 | 0 | 0 | 3 |
 | [forward](#forward) | 22 | 1 | 3 | 1 | 27 |
-| [hash](#hash) | 4 | 2 | 1 | 0 | 7 |
+| [hash](#hash) | 5 | 2 | 1 | 0 | 8 |
 | [hook](#hook) | 19 | 22 | 10 | 1 | 52 |
 | [links](#links) | 10 | 14 | 0 | 0 | 24 |
 | [ls](#ls) | 19 | 9 | 3 | 1 | 32 |
@@ -336,6 +336,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | hash-005 | edge | `edge_005_ls_json_carries_each_checkouts_source_hash` | `ls --format json` carries each checkout's source hash. |
 | hash-006 | error | `error_006_uncommitted_changes_fail_unless_committed` | Uncommitted changes in a source fail the hash, which would not be of anything built; `--committed` hashes the commit, changes left out. |
 | hash-007 | normal | `normal_007_a_checkout_hashes_the_same_as_source_and_as_artefact` | How the workspace takes a checkout changes nothing of what it was built from: the same hash as its sources and as its artefact. |
+| hash-008 | normal | `normal_008_a_ci_job_hashes_a_checkout_whose_dependency_was_raised` | A CI job keeps no stores of its own: the tree of a dependency at the version a checkout's own pipeline takes — below the one its workspace raised it to — comes from that commit, fetched depth 1 with no files, not from an image the dependency never published. With the cache on or off, the job hashes B as a developer machine does. |
 
 ### hook
 

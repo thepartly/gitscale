@@ -220,14 +220,10 @@ fn tree_of(ws: &Workspace, slot: &Slot, commit: &str, checkout: Option<&str>) ->
         })
 }
 
-/// The root's store for `url`, when it holds `commit`.
+/// A repository on this machine holding `commit` of `url`: see
+/// [`crate::stores::holding`].
 fn holding(ws: &Workspace, url: &str, commit: &str) -> Option<PathBuf> {
-    let store = ws
-        .sources
-        .stores
-        .as_ref()?
-        .repo_path(&crate::ci::remote_url(url));
-    crate::git::ref_exists(&store, &format!("{}^{{commit}}", commit)).then_some(store)
+    crate::stores::holding(ws.root, ws.sources, url, commit, ws.online)
 }
 
 fn uncommitted(dir: &str) -> String {

@@ -634,6 +634,44 @@ fn refresh_light(url: &str, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// A repository on this machine holding `commit` of `url`, so its tree can
+/// be read: the root's store for it, the light store resolution fetched its
+/// configs into, or — in CI with the cache on — its snapshot entry. Online,
+/// a commit none of them holds is fetched into the light store: depth 1 and
+/// no files, which is all its tree id needs.
+pub fn holding(
+    config_root: &Path,
+    sources: &Sources,
+    url: &str,
+    commit: &str,
+    online: bool,
+) -> Option<PathBuf> {
+    let remote = crate::ci::remote_url(url);
+    let light = local_dir(config_root).join(crate::store::entry_name(url));
+    let candidates = sources
+        .stores
+        .iter()
+        .map(|stores| stores.repo_path(&remote))
+        .chain(std::iter::once(light.clone()))
+        .chain(
+            sources
+                .cache
+                .iter()
+                .map(|cache| cache.snapshot_path(&remote)),
+        );
+    let has = |repo: &Path| {
+        is_store(repo) && crate::git::ref_exists(repo, &format!("{}^{{commit}}", commit))
+    };
+    if let Some(found) = candidates.into_iter().find(|repo| has(repo)) {
+        return Some(found);
+    }
+    if !online || ensure_light(&remote, &light).is_err() {
+        return None;
+    }
+    fetch_one(&light, commit, "");
+    has(&light).then_some(light)
+}
+
 /// Bring one commit into a light store: depth 1, no files until one is read.
 /// By its SHA, and by the ref that names it for a remote that will not serve
 /// a bare commit. Best effort: what is still missing afterwards is reported

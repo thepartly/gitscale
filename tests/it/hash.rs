@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::support::resolution::{allow, dependant, repos, root_workspace, tagged};
+use crate::support::status_clean::gitscale_at;
 use crate::support::worktrees::*;
 use crate::support::{run_git_pub, TestEnv};
 
@@ -193,4 +194,38 @@ fn normal_007_a_checkout_hashes_the_same_as_source_and_as_artefact() {
     ok(&env.run(&["sync"]));
     assert!(!env.playground.join("meta/app/.git").exists());
     assert_eq!(hash(&env.playground, "meta/app"), as_source);
+}
+
+/// A CI job keeps no stores of its own: the tree of a dependency at the
+/// version a checkout's own pipeline takes — below the one its workspace
+/// raised it to — comes from that commit, fetched depth 1 with no files, not
+/// from an image the dependency never published. With the cache on or off,
+/// the job hashes B as a developer machine does.
+#[test]
+fn normal_008_a_ci_job_hashes_a_checkout_whose_dependency_was_raised() {
+    let env = TestEnv::new("hash_ci_raised");
+    let (ws, b) = raised(&env);
+    let want = hash(&standalone(&env, &b, "b-alone"), ".");
+    let origin = git(&ws, &["remote", "get-url", "origin"]);
+    for (job, sync) in [
+        ("job-no-cache", vec!["sync", "--no-cache"]),
+        ("job-cache", vec!["sync"]),
+    ] {
+        let job = env.repos_remote.join(job);
+        run_git_pub(
+            &env.repos_remote,
+            &["clone", "-q", &origin, job.to_str().unwrap()],
+        );
+        let ci = [("CI", "true")];
+        let placed = gitscale_at(&job, &env.cache, &ci, &sync);
+        assert_eq!(placed.code, Some(0), "{}{}", placed.stdout, placed.stderr);
+        let hashed = gitscale_at(&job, &env.cache, &ci, &["hash", "imports/b"]);
+        assert_eq!(hashed.code, Some(0), "{}{}", hashed.stdout, hashed.stderr);
+        assert_eq!(
+            hashed.stdout.split_once("  ").map(|(h, _)| h),
+            Some(want.as_str()),
+            "{}",
+            hashed.stdout
+        );
+    }
 }
