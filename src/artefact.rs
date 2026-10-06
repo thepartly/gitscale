@@ -32,11 +32,10 @@ use crate::store::ImageStore;
 
 const TITLE: &str = "org.opencontainers.image.title";
 
-/// The layer `publish` adds to every image, first, carrying the repository's
-/// own `.gitscale.toml` — so a consumer can read an artefact's dependencies
-/// by downloading a few hundred bytes, before deciding anything else. A user
-/// group may not take the name.
-pub const CONFIG_LAYER: &str = "gitscale";
+/// The repository's own `.gitscale.toml`, as text, on every image `publish`
+/// pushes — so a consumer reads an artefact's dependencies from the manifest
+/// it fetches anyway, and an image is its groups' layers and nothing else.
+pub const CONFIG: &str = "dev.gitscale.config";
 const REVISION: &str = "org.opencontainers.image.revision";
 const SOURCE: &str = "org.opencontainers.image.source";
 /// The tree id of the commit an image was built from: its sources, for a
@@ -252,7 +251,7 @@ pub fn assign(spec: &ArtefactSpec, files: &[String]) -> Result<Vec<(String, Vec<
 /// file.
 pub fn pack(spec: &ArtefactSpec, base: &Path, work: &Path) -> Result<Vec<PackedLayer>> {
     // The top-level `.gitscale.toml` of every image is the repository's own,
-    // carried by the config layer, and is not shipped twice.
+    // carried by the manifest, and is not shipped in a layer too.
     let (files, escaping) = collect_candidates(base)?;
     let files: Vec<String> = files.into_iter().filter(|f| f != CONFIG_FILENAME).collect();
     let groups = assign(spec, &files)?;
@@ -283,24 +282,6 @@ pub fn pack(spec: &ArtefactSpec, base: &Path, work: &Path) -> Result<Vec<PackedL
             })
         })
         .collect()
-}
-
-/// The config layer: `base`'s `.gitscale.toml`, alone, at the top of the
-/// image.
-pub fn pack_config(base: &Path, work: &Path) -> Result<PackedLayer> {
-    fs::create_dir_all(work)?;
-    let files = vec![CONFIG_FILENAME.to_string()];
-    let path = work.join("layer-config.tar.gz");
-    let (digest, size, diff_id) = write_layer(base, &files, &path)
-        .with_context(|| format!("cannot pack layer \"{}\"", CONFIG_LAYER))?;
-    Ok(PackedLayer {
-        name: CONFIG_LAYER.to_string(),
-        files,
-        path,
-        digest,
-        size,
-        diff_id,
-    })
 }
 
 /// Write `files` as a reproducible gzip tar: entries in the order given,
@@ -345,7 +326,9 @@ pub fn image_config(layers: &[PackedLayer]) -> Vec<u8> {
     .expect("a JSON value always serializes")
 }
 
-/// The manifest. No creation time, so its digest is reproducible too.
+/// The manifest, carrying `config`, the repository's `.gitscale.toml`. No
+/// creation time, so its digest is reproducible too.
+#[allow(clippy::too_many_arguments)]
 pub fn manifest(
     config_digest: &str,
     config_size: u64,
@@ -354,6 +337,7 @@ pub fn manifest(
     tree: &str,
     hash: &str,
     source: &str,
+    config: &str,
 ) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "schemaVersion": 2,
@@ -374,6 +358,7 @@ pub fn manifest(
             SOURCE: source,
             TREE: tree,
             HASH: hash,
+            CONFIG: config,
         },
     }))
     .expect("a JSON value always serializes")
@@ -387,6 +372,16 @@ pub fn manifest(
 struct Manifest {
     #[serde(default)]
     layers: Vec<LayerDescriptor>,
+    #[serde(default)]
+    annotations: BTreeMap<String, String>,
+}
+
+impl Manifest {
+    /// The `.gitscale.toml` the image carries; `None` for one another tool
+    /// pushed, which declares no dependencies.
+    fn config(&self) -> Option<&str> {
+        self.annotations.get(CONFIG).map(String::as_str)
+    }
 }
 
 #[derive(Deserialize)]
@@ -741,6 +736,8 @@ pub struct Description {
     pub digest: Option<String>,
     /// The source hash the image records.
     pub hash: Option<String>,
+    /// The size of the `.gitscale.toml` the image carries, if it carries one.
+    pub config_size: Option<usize>,
     pub layers: Vec<Layer>,
     pub installed: Option<Marker>,
     /// `missing`, `changed`, `ref-mismatch`, against the registry now.
@@ -764,11 +761,12 @@ pub enum Pulled {
     Current(String),
 }
 
-/// The blobs an install unpacks, and whatever has to stay alive while it
-/// does: the image entry's lock, or the temporary directory the layers were
-/// downloaded to.
+/// The blobs an install unpacks, the `.gitscale.toml` it writes beside them,
+/// and whatever has to stay alive while it does: the image entry's lock, or
+/// the temporary directory the layers were downloaded to.
 struct Obtained {
     layers: Vec<(PathBuf, bool)>,
+    config: Option<String>,
     _lock: Option<crate::store::Lock>,
     temp: Option<PathBuf>,
 }
@@ -938,11 +936,12 @@ impl Artefacts {
     pub fn describe(&self, entry: &RepoEntry) -> Result<Description> {
         let image = image_for(&entry.repo_url, &self.registries)?;
         let digest = self.client.manifest_digest(&image, tag_of(entry)?)?;
-        let (layers, hash) = match &digest {
+        let (layers, hash, config_size) = match &digest {
             Some(digest) => {
-                let bytes = self.client.manifest(&image, digest)?;
-                let raw: serde_json::Value = serde_json::from_slice(&bytes)?;
-                let layers = parse_manifest(&bytes)?
+                let manifest = parse_manifest(&self.client.manifest(&image, digest)?)?;
+                let hash = manifest.annotations.get(HASH).cloned();
+                let config_size = manifest.config().map(str::len);
+                let layers = manifest
                     .layers
                     .into_iter()
                     .map(|l| Layer {
@@ -951,12 +950,9 @@ impl Artefacts {
                         digest: l.digest,
                     })
                     .collect();
-                (
-                    layers,
-                    raw["annotations"][HASH].as_str().map(str::to_string),
-                )
+                (layers, hash, config_size)
             }
-            None => (Vec::new(), None),
+            None => (Vec::new(), None, None),
         };
         let installed = installed(&self.config_root, &entry.directory);
         let now = Marker {
@@ -971,6 +967,7 @@ impl Artefacts {
             tag: entry.revision.clone(),
             digest,
             hash,
+            config_size,
             layers,
             installed,
             flags,
@@ -1008,9 +1005,10 @@ impl Artefacts {
     }
 
     /// The `.gitscale.toml` the image of the release `tag` carries in its
-    /// config layer, for resolution: from the cache when it holds it, else —
-    /// when `online` — downloaded into it. `None` for an image without one.
-    pub fn config_layer(&self, url: &str, tag: &str, online: bool) -> Result<Option<String>> {
+    /// manifest, for resolution: from the cache when it holds the manifest,
+    /// else — when `online` — fetched into it. `None` for an image without
+    /// one.
+    pub fn config(&self, url: &str, tag: &str, online: bool) -> Result<Option<String>> {
         let not_here = || {
             crate::resolution::unavailable(format!(
                 "the artefact of {} at {} is not on this machine",
@@ -1049,34 +1047,9 @@ impl Artefacts {
                 bytes
             }
         };
-        let manifest = parse_manifest(&manifest_bytes)?;
-        let Some(layer) = manifest
-            .layers
-            .iter()
-            .find(|l| l.annotations.get(TITLE).map(String::as_str) == Some(CONFIG_LAYER))
-        else {
-            return Ok(None);
-        };
-        let gzip = layer.gzip()?;
-        let (blob, _temp) = match layout.as_ref().and_then(|l| l.verified_blob(&layer.digest)) {
-            Some(found) => (found, None),
-            None if !online => return Err(not_here()),
-            None => match &layout {
-                Some(layout) => {
-                    let target = layout.blob_path(&layer.digest)?;
-                    self.client.download_blob(&image, &layer.digest, &target)?;
-                    (target, None)
-                }
-                None => {
-                    let temp = WorkDir(unique_temp("config-layer"));
-                    fs::create_dir_all(&temp.0)?;
-                    let target = temp.0.join("layer");
-                    self.client.download_blob(&image, &layer.digest, &target)?;
-                    (target, Some(temp))
-                }
-            },
-        };
-        read_from_layer(&blob, gzip, CONFIG_FILENAME)
+        Ok(parse_manifest(&manifest_bytes)?
+            .config()
+            .map(str::to_string))
     }
 
     fn install(
@@ -1097,10 +1070,20 @@ impl Artefacts {
         let _ = fs::remove_file(&markers.installed);
         restore_writable(dest)?;
         clean_files(dest)?;
+        // The repository's own config last, at the top: the checkout reads
+        // like one of its sources, and its dependencies are linked inside it.
         let unpacked = obtained
             .layers
             .iter()
-            .try_for_each(|(blob, gzip)| extract_layer(blob, dest, *gzip));
+            .try_for_each(|(blob, gzip)| extract_layer(blob, dest, *gzip))
+            .and_then(|()| match &obtained.config {
+                Some(config) => {
+                    let path = dest.join(CONFIG_FILENAME);
+                    fs::write(&path, config)
+                        .with_context(|| format!("cannot write {}", path.display()))
+                }
+                None => Ok(()),
+            });
         if let Err(e) = unpacked {
             // Take back what was unpacked, so the next attempt starts over.
             let _ = restore_writable(dest).and_then(|()| clean_files(dest));
@@ -1126,12 +1109,13 @@ impl Artefacts {
             let temp = unique_temp("download");
             fs::create_dir_all(&temp)
                 .with_context(|| format!("cannot create {}", temp.display()))?;
+            let manifest = parse_manifest(&self.client.manifest(image, digest)?)?;
             let mut obtained = Obtained {
                 layers: Vec::new(),
+                config: manifest.config().map(str::to_string),
                 _lock: None,
                 temp: Some(temp.clone()),
             };
-            let manifest = parse_manifest(&self.client.manifest(image, digest)?)?;
             for layer in &manifest.layers {
                 let gzip = layer.gzip()?;
                 let path = temp.join(layer.digest.trim_start_matches("sha256:"));
@@ -1178,33 +1162,11 @@ impl Artefacts {
         images.touch(&path, tag_of(entry)?);
         Ok(Obtained {
             layers,
+            config: manifest.config().map(str::to_string),
             _lock: Some(lock),
             temp: None,
         })
     }
-}
-
-/// The file at `name` in the tar layer `blob`, if the layer has one.
-fn read_from_layer(blob: &Path, gzip: bool, name: &str) -> Result<Option<String>> {
-    use std::io::Read;
-    let file = fs::File::open(blob).with_context(|| format!("cannot open {}", blob.display()))?;
-    let reader: Box<dyn Read> = if gzip {
-        Box::new(flate2::read::GzDecoder::new(file))
-    } else {
-        Box::new(file)
-    };
-    let mut archive = tar::Archive::new(reader);
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        let path = entry.path()?.into_owned();
-        let path = path.strip_prefix(".").unwrap_or(&path);
-        if path == Path::new(name) {
-            let mut text = String::new();
-            entry.read_to_string(&mut text)?;
-            return Ok(Some(text));
-        }
-    }
-    Ok(None)
 }
 
 /// A directory under the system temp dir that no other operation — in this
@@ -1311,21 +1273,18 @@ pub fn publish(
         return reuse_image(image, tags, dry_run, out);
     }
 
+    // The config travels in the manifest, as it is: what the consumer
+    // resolves with, whatever state it is in, so the policy leaves it alone.
+    let config_text = fs::read_to_string(&config_path)
+        .with_context(|| format!("cannot read {}", config_path.display()))?;
     let work = WorkDir(unique_temp("publish"));
-    let mut layers = vec![pack_config(base, &work.0)?];
-    layers.extend(pack(spec, base, &work.0)?);
+    let layers = pack(spec, base, &work.0)?;
 
     // Every file the image ships must be what a checkout of the commit, plus
     // its build, holds at that path: the image stands for those sources.
     match &commit {
         Ok(commit) => {
-            // The config layer is the repository's own `.gitscale.toml`,
-            // which a consumer reads rather than unpacks over anything.
-            let shipped: Vec<String> = layers
-                .iter()
-                .filter(|l| l.name != CONFIG_LAYER)
-                .flat_map(|l| l.files.clone())
-                .collect();
+            let shipped: Vec<String> = layers.iter().flat_map(|l| l.files.clone()).collect();
             let broken = policy_violations(base, commit, &shipped)?;
             if !broken.is_empty() {
                 bail!("{}", describe_violations(&broken, commit));
@@ -1361,6 +1320,12 @@ pub fn publish(
     if let Ok(tags) = &tags {
         writeln!(out, "  tags: {}", tags.names().join(", "))?;
     }
+    writeln!(
+        out,
+        "  config: {}, {}",
+        CONFIG_FILENAME,
+        crate::cache::human_size(config_text.len() as u64)
+    )?;
     for layer in &layers {
         writeln!(
             out,
@@ -1390,13 +1355,15 @@ pub fn publish(
         &tags.tree,
         &tags.hash,
         &source,
+        &config_text,
     );
 
     let client = Client::new();
     if let Some(existing) = client.manifest_digest(&image, &tags.hash)? {
         let bytes = client.manifest(&image, &existing)?;
         let theirs = parse_manifest(&bytes)?;
-        let same = theirs.layers.len() == layers.len()
+        let same = theirs.config() == Some(config_text.as_str())
+            && theirs.layers.len() == layers.len()
             && theirs
                 .layers
                 .iter()
@@ -1888,6 +1855,7 @@ mod tests {
             "t",
             "h",
             "https://example.com/a",
+            "[artefact]\n",
         );
         let b = manifest(
             "sha256:c",
@@ -1897,6 +1865,7 @@ mod tests {
             "t",
             "h",
             "https://example.com/a",
+            "[artefact]\n",
         );
         assert_eq!(a, b);
         for d in ["../repro-work-1", "../repro-work-2", ""] {

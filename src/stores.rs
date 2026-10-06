@@ -349,7 +349,7 @@ impl GitStores<'_> {
         // Keyed apart from the git stores: the registry is asked, not git.
         let key = PathBuf::from(format!("artefact:{}", crate::urls::normalize(url)));
         let online = self.online_for(&key);
-        artefacts.config_layer(url, tag, online).map_err(|e| {
+        artefacts.config(url, tag, online).map_err(|e| {
             if e.downcast_ref::<Unavailable>().is_some() && !online {
                 self.missed(&key);
                 return e;

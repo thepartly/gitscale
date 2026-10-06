@@ -60,9 +60,82 @@ fn normal_001_publish_tags_the_source_hash_and_annotates_the_image() {
                 .unwrap()
         })
         .collect();
-    // The repository's own .gitscale.toml first, for consumers resolving
-    // its dependencies; then the groups, in order.
-    assert_eq!(titles, vec!["gitscale", "vendor", "app"]);
+    // The groups, in order, and nothing else: the repository's own
+    // .gitscale.toml travels in the manifest, for consumers resolving its
+    // dependencies.
+    assert_eq!(titles, vec!["vendor", "app"]);
+    // The config the producer published with, as it was: the registries the
+    // publish job added, then its groups.
+    let config = manifest["annotations"]["dev.gitscale.config"]
+        .as_str()
+        .unwrap();
+    assert!(config.starts_with("[registries]\n"), "{}", config);
+    assert!(config.ends_with(LAYERED), "{}", config);
+}
+
+/// One group is one layer: the config travels in the manifest, so the image
+/// of a single group is a single layer — the form a deployer such as Argo CD
+/// takes as an OCI source.
+#[test]
+fn normal_084_one_group_publishes_a_single_layer_image() {
+    let env = TestEnv::new("art_single_layer");
+    let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
+    run_git_pub(&bare, &["tag", "v1.0.0", "main"]);
+    let producer = "[artefact]\ninclude = [\"dist/**\"]\n";
+    let (out, _) = env.publish_with(
+        &bare,
+        "main",
+        producer,
+        &[("app.bin", "built")],
+        &["v1.0.0"],
+    );
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    let manifest = env
+        .registry()
+        .manifest(&env.image(&bare), "v1.0.0")
+        .unwrap();
+    assert_eq!(
+        manifest["layers"].as_array().unwrap().len(),
+        1,
+        "{}",
+        manifest
+    );
+    assert!(
+        manifest["annotations"]["dev.gitscale.config"]
+            .as_str()
+            .unwrap()
+            .ends_with(producer),
+        "{}",
+        manifest
+    );
+}
+
+/// The repository's `.gitscale.toml` is never shipped in a layer, even by a
+/// group that matches it, and `gitscale` is a group name like any other.
+#[test]
+fn edge_085_no_group_ships_the_config_and_any_may_be_named_gitscale() {
+    let env = TestEnv::new("art_group_named_gitscale");
+    let bare = env.create_bare_repo("app", "main", &[("README.md", "app")]);
+    let (out, _) = env.publish_with(
+        &bare,
+        "main",
+        "[[artefact.layer]]\nname = \"gitscale\"\ninclude = [\"**\"]\n",
+        &[("app.bin", "built")],
+        &["--dry-run"],
+    );
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    assert!(out.stdout.contains("  layer gitscale: "), "{}", out.stdout);
+    assert!(
+        out.stdout.contains("  config: .gitscale.toml, "),
+        "{}",
+        out.stdout
+    );
+    assert!(out.stdout.contains("    dist/app.bin\n"), "{}", out.stdout);
+    assert!(
+        !out.stdout.lines().any(|l| l.trim() == ".gitscale.toml"),
+        "{}",
+        out.stdout
+    );
 }
 
 #[test]
@@ -342,10 +415,17 @@ fn normal_013_records_live_in_the_git_directory_not_the_checkout() {
         names.sort();
         names
     };
-    // The producer's .gitscale.toml arrives with its config layer.
+    // The producer's .gitscale.toml arrives from the manifest, read-only
+    // like every file of the artefact.
     assert_eq!(
         listed(env.playground.join("meta/app")),
         vec![".gitscale.toml", "dist"]
+    );
+    assert!(
+        std::fs::metadata(env.playground.join("meta/app/.gitscale.toml"))
+            .unwrap()
+            .permissions()
+            .readonly()
     );
     assert_eq!(
         listed(env.playground.join("meta/app/dist")),
@@ -382,7 +462,12 @@ fn normal_014_show_says_what_the_registry_and_the_checkout_hold() {
     );
     assert_eq!(shown(&out.stdout, "sources"), hash);
     assert!(
-        shown(&out.stdout, "layers").starts_with("gitscale "),
+        shown(&out.stdout, "config").starts_with(".gitscale.toml "),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        shown(&out.stdout, "layers").starts_with("vendor "),
         "{}",
         out.stdout
     );
@@ -709,7 +794,7 @@ fn edge_022_an_installed_image_is_readonly_at_every_depth() {
         names.sort();
         names
     };
-    // The producer's .gitscale.toml arrives with its config layer.
+    // The producer's .gitscale.toml arrives from the manifest.
     assert_eq!(listed(&root), vec![".gitscale.toml", "dist"]);
     assert_eq!(
         listed(&dest),
@@ -986,7 +1071,7 @@ fn edge_055_a_dry_run_outside_git_says_what_it_could_not_check() {
 /// declares. Files from one build and dependencies from another would be a
 /// checkout nobody published.
 #[test]
-#[ignore = "bug: resolution reads the config layer of the image held for the release, not the republished one"]
+#[ignore = "bug: resolution reads the config in the manifest held for the release, not the republished one"]
 fn edge_057_a_forced_republish_brings_the_dependencies_it_declares() {
     let env = TestEnv::new("artefact_republish_config");
     let dep = tagged(&env, "dep", &[("v1.0.0", "")]);
@@ -1222,9 +1307,7 @@ fn error_035_a_corrupt_artefact_is_not_taken_as_current() {
         again.stdout
     );
     assert!(!env.playground.join("meta/app/dist/app.bin").exists());
-    // Nothing is recorded as installed. (The failure here comes from the
-    // config layer resolution reads; artefact::error_058 has one in the
-    // install itself.)
+    // Nothing is recorded as installed.
     assert_eq!(installed_tag(&env), "");
 }
 
@@ -1286,9 +1369,9 @@ fn error_058_a_registry_failing_mid_update_keeps_the_installed_version() {
 
     env.push_commit(&bare, "main", "README.md", "v2");
     layered(&env, &bare, "v1.1.0", "app v2");
-    // The config and vendor layers are the same as before; the app layer is
-    // new, and the one the registry damages.
-    let app_layer = layer_digests(&env, &bare, "v1.1.0")[2].clone();
+    // The vendor layer is the same as before; the app layer is new, and the
+    // one the registry damages.
+    let app_layer = layer_digests(&env, &bare, "v1.1.0")[1].clone();
     env.registry().corrupt_blob(&app_layer);
     env.write_config(&entry_config(&env, &bare, "v1.1.0"));
     let out = env.run(&["sync"]);
@@ -1575,8 +1658,8 @@ fn perf_039_a_sync_downloads_only_the_layer_that_changed() {
     layered(&env, &bare, "v1.0.0", "app v1");
     env.write_config(&entry_config(&env, &bare, "v1.0.0"));
     assert!(env.run(&["sync"]).success);
-    // The config layer, read by resolution and kept, then vendor and app.
-    assert_eq!(blob_downloads(&env), 3);
+    // Vendor and app: resolution reads the config from the manifest.
+    assert_eq!(blob_downloads(&env), 2);
 
     env.push_commit(&bare, "main", "README.md", "v2");
     layered(&env, &bare, "v1.1.0", "app v2");
@@ -1645,8 +1728,8 @@ fn perf_041_a_second_root_worktree_downloads_nothing() {
     assert_eq!(env.registry().count("GET", "/manifests/"), 0);
 }
 
-/// A CI job without the cache keeps nothing: the config layer resolution
-/// reads is downloaded again by the install, four blobs a sync.
+/// A CI job without the cache keeps nothing: every layer is downloaded again,
+/// two blobs a sync.
 #[test]
 fn perf_042_in_ci_without_the_cache_every_layer_is_downloaded() {
     let env = TestEnv::new("art_ci_no_cache");
@@ -1658,9 +1741,8 @@ fn perf_042_in_ci_without_the_cache_every_layer_is_downloaded() {
         let out = env.run_with_env(&[("CI", "true")], &["sync", "--no-cache"]);
         assert!(out.success, "{}{}", out.stdout, out.stderr);
     }
-    // Each time the config layer resolution reads, then the three layers
-    // the install unpacks.
-    assert_eq!(blob_downloads(&env), 8);
+    // Each time, the two layers the install unpacks.
+    assert_eq!(blob_downloads(&env), 4);
     assert!(env.cache_entries("images").is_empty());
 }
 
@@ -1707,7 +1789,7 @@ fn perf_043_parallel_cold_ci_jobs_download_each_blob_once() {
             "app v1"
         );
     }
-    assert_eq!(blob_downloads(&env), 3, "{:?}", env.registry().log());
+    assert_eq!(blob_downloads(&env), 2, "{:?}", env.registry().log());
 }
 
 /// A release named for a commit already published goes on its image,
@@ -1802,7 +1884,7 @@ fn error_069_reuse_fails_without_an_image_of_these_sources() {
 
 /// A repository published as `app`, at a release, whose sources then become
 /// unreadable — moved where its URL no longer reaches. Its image declares a
-/// dependency in its config layer. Returns the URL the root asks for.
+/// dependency in its config. Returns the URL the root asks for.
 fn unreadable_release(env: &TestEnv) -> PathBuf {
     let dep = tagged(env, "dep", &[("v1.0.0", "")]);
     let app = env.create_bare_repo("app", "main", &[("README.md", "app")]);
@@ -1824,7 +1906,7 @@ fn unreadable_release(env: &TestEnv) -> PathBuf {
 
 /// A repository whose sources cannot be read is its artefact, with nothing to
 /// configure: its release found in its registry, its dependencies in its
-/// image's config layer, and its source hash from the tree its image records.
+/// image's manifest, and its source hash from the tree its image records.
 #[test]
 fn normal_070_without_access_to_its_sources_a_checkout_is_its_artefact() {
     let env = TestEnv::new("art_no_access");

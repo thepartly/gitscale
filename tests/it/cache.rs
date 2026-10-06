@@ -512,11 +512,11 @@ fn edge_018_compact_works_from_outside_any_workspace() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("Compacted"));
 }
 
-/// What resolution read into the cache seconds ago — an artefact's config
-/// layer, read by a CI `fetch` — is recently used: `compact` with a period
-/// of a month keeps it.
+/// What resolution read into the cache seconds ago — an artefact's manifest,
+/// read by a CI `fetch` for its config — is recently used: `compact` with a
+/// period of a month keeps it.
 #[test]
-#[ignore = "bug: config layers resolution reads are recorded without a use marker, so compact drops them at once"]
+#[ignore = "bug: manifests resolution reads are recorded without a use marker, so compact drops them at once"]
 fn edge_022_compact_keeps_the_images_resolution_just_read() {
     let env = TestEnv::new("cache_compact_config_layer");
     let bare = env.artefact_repo("app", &[("app.bin", "x")]);

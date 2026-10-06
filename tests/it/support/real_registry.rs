@@ -30,18 +30,26 @@ pub fn unique(name: &str) -> String {
     format!("{}{}", name, nanos % 1_000_000_000)
 }
 
-/// A root whose `meta/app` is `bare` at `main`, taken as an artefact.
-pub fn entry_config(env: &TestEnv, bare: &Path) -> String {
+/// A root whose `meta/app` is `bare` at the release `revision`, taken as an
+/// artefact.
+pub fn entry_config(env: &TestEnv, bare: &Path, revision: &str) -> String {
     env.prefer(bare, gitscale::prefer::Form::Artefact);
     format!(
-        "{}[repos]\n\"meta/app\" = {{ url = \"{}\", revision = \"main\" }}\n",
+        "{}[repos]\n\"meta/app\" = {{ url = \"{}\", revision = \"{}\" }}\n",
         env.registries(),
-        bare.display()
+        bare.display(),
+        revision
     )
 }
 
-/// Two groups of the build in `dist/`: `vendor`, then everything else.
-/// `publish` adds the config layer in front, so an image has three layers.
+/// Tag `main` of `bare` as the release `tag`, as a pipeline releasing it
+/// would have.
+pub fn release(bare: &Path, tag: &str) {
+    super::run_git_pub(bare, &["tag", tag, "main"]);
+}
+
+/// Two groups of the build in `dist/`: `vendor`, then everything else. The
+/// config travels in the manifest, so an image has two layers.
 pub const LAYERED: &str =
     "[[artefact.layer]]\nname = \"vendor\"\ninclude = [\"dist/vendor/**\"]\n\n\
                        [[artefact.layer]]\nname = \"app\"\ninclude = [\"dist/**\"]\n";

@@ -1,7 +1,7 @@
 # 2.1 Declaring dependencies
 
 - [The config file](#the-config-file)
-- [Ignoring the checkout directory](#ignoring-the-checkout-directory)
+- [Checkouts are kept out of git status](#checkouts-are-kept-out-of-git-status)
 - [Adding and removing entries](#adding-and-removing-entries)
 - [What a checkout is](#what-a-checkout-is)
 - [Artefacts: how a checkout arrives](#artefacts-how-a-checkout-arrives)
@@ -45,7 +45,7 @@ with `-` or use a `helper::` remote-helper prefix. The reasoning, and the full
 list of values GitScale refuses, is in
 [configuration → values refused](configuration.md#values-gitscale-refuses-to-pass-to-git).
 
-## Ignoring the checkout directory
+## Checkouts are kept out of git status
 
 The checkouts are not content of the workspace repository. What that repository
 tracks is the *selection*: `.gitscale.toml`, which names each repository and the

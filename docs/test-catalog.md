@@ -2,11 +2,11 @@
 
 Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Regenerate with `GITSCALE_UPDATE_CATALOG=1 cargo test --test it catalog::`. The naming rules are in [testing.md](testing.md).
 
-641 integration tests (275 normal, 204 edge, 144 error, 18 perf), 44 of them ignored; 168 unit tests.
+643 integration tests (276 normal, 205 edge, 144 error, 18 perf), 44 of them ignored; 168 unit tests.
 
 | Feature | normal | edge | error | perf | total |
 |---|---:|---:|---:|---:|---:|
-| [artefact](#artefact) | 25 | 13 | 25 | 7 | 70 |
+| [artefact](#artefact) | 26 | 14 | 25 | 7 | 72 |
 | [cache](#cache) | 14 | 7 | 4 | 0 | 25 |
 | [catalog](#catalog) | 2 | 0 | 0 | 0 | 2 |
 | [check](#check) | 9 | 2 | 2 | 0 | 13 |
@@ -80,7 +80,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | artefact-039 | perf | `perf_039_a_sync_downloads_only_the_layer_that_changed` |  |
 | artefact-040 | perf | `perf_040_an_up_to_date_sync_asks_the_registry_nothing` |  |
 | artefact-041 | perf | `perf_041_a_second_root_worktree_downloads_nothing` | The root's image store is shared by its worktrees: a second one of the root installs from it, downloading nothing. |
-| artefact-042 | perf | `perf_042_in_ci_without_the_cache_every_layer_is_downloaded` | A CI job without the cache keeps nothing: the config layer resolution reads is downloaded again by the install, four blobs a sync. |
+| artefact-042 | perf | `perf_042_in_ci_without_the_cache_every_layer_is_downloaded` | A CI job without the cache keeps nothing: every layer is downloaded again, two blobs a sync. |
 | artefact-043 | perf | `perf_043_parallel_cold_ci_jobs_download_each_blob_once` | N cold CI jobs on one runner, sharing its cache, download each blob once. |
 | artefact-044 | normal | `normal_044_foreign_layer_media_types_unpack_in_order` | Images other tools publish unpack too: a Docker-typed gzip layer and an uncompressed OCI tar layer, in order, so a later layer's file replaces an earlier one's. gitscale's own publisher writes neither, but an artefact is an ordinary image, and the docs say any registry and tool works. |
 | artefact-045 | normal | `normal_045_publish_in_a_gitlab_job_names_the_image_after_its_project` | In a GitLab job, `publish` names the image after the job's project (`CI_PROJECT_URL`), which is the URL consumers declare: under any other name no consumer would find it. |
@@ -89,7 +89,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | artefact-052 | edge | `edge_052_whiteout_files_are_unpacked_as_ordinary_files` | OCI whiteout files (`.wh.<name>`) are unpacked as ordinary files, and the file they delete stays. This pins current behaviour: gitscale's own images never hold whiteouts, and whether foreign multi-layer images should get OCI deletion semantics is the owner's call. |
 | artefact-054 | edge | `edge_054_publish_ships_no_link_out_of_the_repository_unless_selected` | A repository holds symlinks out of itself that no artefact ships — the links gitscale plants for its own dependencies. `publish` ignores them, unless a pattern selects one: then it refuses, since such a link would point at nothing on the consumer's machine, or at something else. |
 | artefact-055 | edge | `edge_055_a_dry_run_outside_git_says_what_it_could_not_check` | A dry run where there is no commit and no remote still lists every file, and says what it could not work out — the commit, the image, and so the policy — rather than failing or pretending it checked. |
-| artefact-057 | edge | `edge_057_a_forced_republish_brings_the_dependencies_it_declares` | **ignored: bug: resolution reads the config layer of the image held for the release, not the republished one** A forced re-publish that changes the image's `.gitscale.toml` changes what resolution reads: after a fetch says the image changed, the sync that installs the new files also brings the dependencies the new config declares. Files from one build and dependencies from another would be a checkout nobody published. |
+| artefact-057 | edge | `edge_057_a_forced_republish_brings_the_dependencies_it_declares` | **ignored: bug: resolution reads the config in the manifest held for the release, not the republished one** A forced re-publish that changes the image's `.gitscale.toml` changes what resolution reads: after a fetch says the image changed, the sync that installs the new files also brings the dependencies the new config declares. Files from one build and dependencies from another would be a checkout nobody published. |
 | artefact-058 | error | `error_058_a_registry_failing_mid_update_keeps_the_installed_version` | A registry that serves a damaged layer during an update leaves the installed version alone: everything is downloaded and checked before the old files go, as the docs promise. The installed files, the record of them and `ls` all still say the old release. |
 | artefact-059 | error | `error_059_an_image_index_is_refused_rather_than_installed_empty` | **ignored: bug: a manifest without layers (an OCI index) is installed as an empty artefact** A tag that names an image index — what `docker buildx` pushes with provenance, or a multi-platform image — is not an image with no layers. Taking it for one would wipe the installed files and record an empty checkout as the artefact, and every later sync would succeed doing it again. |
 | artefact-060 | error | `error_060_archive_entries_that_leave_the_checkout_are_refused` | Nothing in an archive may land outside the checkout or be anything but a file, a directory or a symlink inside it: a `..` path, an absolute path, a hard link, a FIFO, and symlinks out — relative or absolute — each fail the whole install, and leave no half-unpacked checkout behind. |
@@ -100,7 +100,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | artefact-067 | normal | `normal_067_publish_releases_an_image_already_there` | A release named for a commit already published goes on its image, uploading nothing. |
 | artefact-068 | normal | `normal_068_reuse_releases_the_image_of_the_same_sources` | A squash merge that changes no file gives `main` a new commit with the branch build's sources: `publish --reuse` releases that build's image, as it is, packing and uploading nothing. |
 | artefact-069 | error | `error_069_reuse_fails_without_an_image_of_these_sources` | With no image of these sources there is nothing to reuse: `--reuse` fails, a dry run as well, so a release pipeline stops before it tags. |
-| artefact-070 | normal | `normal_070_without_access_to_its_sources_a_checkout_is_its_artefact` | A repository whose sources cannot be read is its artefact, with nothing to configure: its release found in its registry, its dependencies in its image's config layer, and its source hash from the tree its image records. |
+| artefact-070 | normal | `normal_070_without_access_to_its_sources_a_checkout_is_its_artefact` | A repository whose sources cannot be read is its artefact, with nothing to configure: its release found in its registry, its dependencies in its image's manifest, and its source hash from the tree its image records. |
 | artefact-071 | error | `error_071_without_access_a_branch_revision_needs_the_sources` | Without its sources, a branch cannot be resolved: only released versions. |
 | artefact-072 | edge | `edge_072_an_unreachable_remote_is_not_taken_for_one_without_access` | A remote that cannot be reached is not one that refused: its registry is not asked instead, and the fetch error is what is said. |
 | artefact-073 | error | `error_073_reuse_leaves_a_release_already_published_alone` | A release tag already naming an image stays where it is: `--reuse` refuses to move it, as a release is published once. |
@@ -113,6 +113,8 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | artefact-081 | error | `error_081_check_refuses_a_build_pin` | A build pin is for trying a build out, never for shipping: the merge gate refuses it, naming the config that holds it. |
 | artefact-082 | error | `error_082_a_build_pin_needs_a_build` | A source hash that names no build fails, saying so; a malformed one too. |
 | artefact-083 | normal | `normal_083_with_access_a_build_pin_is_its_commit` | With access to the sources, a build pin is a checkout of the commit the build was made from. |
+| artefact-084 | normal | `normal_084_one_group_publishes_a_single_layer_image` | One group is one layer: the config travels in the manifest, so the image of a single group is a single layer — the form a deployer such as Argo CD takes as an OCI source. |
+| artefact-085 | edge | `edge_085_no_group_ships_the_config_and_any_may_be_named_gitscale` | The repository's `.gitscale.toml` is never shipped in a layer, even by a group that matches it, and `gitscale` is a group name like any other. |
 
 ### cache
 
@@ -138,7 +140,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | cache-018 | edge | `edge_018_compact_works_from_outside_any_workspace` |  |
 | cache-019 | error | `error_019_an_unknown_period_is_refused_before_anything_is_deleted` |  |
 | cache-021 | normal | `normal_021_compact_evicts_a_cold_image_entry_whole` | An image entry nothing has used within the period goes whole, blobs and all, and `compact` counts it as an evicted entry. |
-| cache-022 | edge | `edge_022_compact_keeps_the_images_resolution_just_read` | **ignored: bug: config layers resolution reads are recorded without a use marker, so compact drops them at once** What resolution read into the cache seconds ago — an artefact's config layer, read by a CI `fetch` — is recently used: `compact` with a period of a month keeps it. |
+| cache-022 | edge | `edge_022_compact_keeps_the_images_resolution_just_read` | **ignored: bug: manifests resolution reads are recorded without a use marker, so compact drops them at once** What resolution read into the cache seconds ago — an artefact's manifest, read by a CI `fetch` for its config — is recently used: `compact` with a period of a month keeps it. |
 | cache-023 | edge | `edge_023_compact_removes_half_written_downloads` | A download a killed job left half-written is garbage: `compact` removes it from an entry it keeps, and leaves every blob a held image needs. |
 | cache-024 | error | `error_024_update_fails_for_an_unpublished_artefact_and_says_why` | `cache update` for an artefact whose release has no image fails, and says so, rather than warming something else. |
 | cache-025 | error | `error_025_status_refuses_a_workspace_config_that_does_not_parse` | `cache status` does not need a workspace, but one whose config does not parse is an error, not a reason to guess at names. |

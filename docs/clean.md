@@ -21,10 +21,10 @@ git scale clean [-n] [-f] [-d] [-x | -X] [-e PATTERN]... [-q] [DIR...]
 
 `git scale clean` runs `git clean` with git's own flags in the root repository
 and in each checkout, each once, and never through a link. The declared
-checkouts and GitScale's own symlinks are [always kept](#what-is-always-kept):
-that makes [gitignoring `imports/`](dependencies.md#ignoring-the-checkout-directory)
-safe here, even though a plain `git clean -xdf` at the root would delete the
-whole workspace.
+checkouts and GitScale's own symlinks are [always kept](#what-is-always-kept),
+so `-x` and `-X` are safe here, even though the checkouts count as
+[ignored](dependencies.md#checkouts-are-kept-out-of-git-status) and a plain
+`git clean -xdf` at the root would delete the whole workspace.
 
 ```
 git scale clean -dx                  # dry run: list what would be removed

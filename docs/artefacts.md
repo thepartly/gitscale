@@ -85,7 +85,7 @@ Which form a checkout gets, the first that applies:
 Every request for a repository is one request, whatever form a workspace
 takes it in, and it is one checkout per major. A checkout taken as an artefact
 lists its repository's refs and nothing more: its dependencies are read from
-its image's `gitscale` layer.
+the `.gitscale.toml` its image's manifest carries.
 
 ## Which release a checkout gets
 
@@ -182,13 +182,14 @@ less than meant.
 Split along how often things change: a large dependency layer that changes
 once a month, and a small application layer that changes every commit.
 
-**The repository's own `.gitscale.toml` is always shipped**, as a first layer
-of its own named `gitscale`, at the top of the artefact. A consumer taking the
-artefact learns its [dependencies](recursive-dependencies.md) from it: resolution downloads just that layer, a few hundred bytes, and keeps
-it with the images, where every release that left the file alone shares it.
-A group never ships it a second time, and may not be named
-`gitscale`. The dependencies are linked inside the extracted artefact like any
-checkout's.
+**The repository's own `.gitscale.toml` travels in the manifest**, as it is,
+in the annotation `dev.gitscale.config`. No group ships it, so an image is its
+groups' layers and nothing else: one group is one layer, the form a deployer
+such as Argo CD takes as an OCI source. A consumer taking the artefact learns
+its [dependencies](recursive-dependencies.md) from the manifest it fetches
+anyway, and keeps it with the images. Placing the artefact writes the file at
+the top of the checkout, read-only like the rest, and the dependencies are
+linked inside it like any checkout's.
 
 ### The artefact policy
 
@@ -209,9 +210,8 @@ Error: 2 files break the artefact policy (each must be tracked and unmodified, o
 ```
 
 The check compares the files with the commit checked out, and applies the
-ignore rules git would. The `gitscale`
-layer is exempt: it is the config the consumer resolves with, whatever state it
-is in. A dry run with no commit to compare with says `policy: not checked` and
+ignore rules git would. The config is exempt: it is what the consumer
+resolves with, whatever state it is in. A dry run with no commit to compare with says `policy: not checked` and
 goes on.
 
 ### artefact publish
@@ -236,7 +236,7 @@ version, named by the caller — its image is released as it:
    the publish; `--dry-run` reports it.
 4. **Check the release**, before anything is packed: a `RELEASE` already
    tagging another commit in git, here or on `origin`, fails the publish.
-5. **Check the hash tag.** If it already holds the same layers, it says
+5. **Check the hash tag.** If it already holds the same layers and config, it says
    `Already published` and stops, after the release below: a retried job is a
    no-op, and a branch build already published is released as it is. If it
    holds different layers, it fails — two builds of the same sources should
@@ -246,8 +246,9 @@ version, named by the caller — its image is released as it:
    `org.opencontainers.image.revision` (the commit),
    `org.opencontainers.image.source` (the repository URL, which GHCR uses to
    link the package to the repository), `dev.gitscale.tree` (the commit's
-   tree) and `dev.gitscale.hash` (the source hash), and no creation time, so
-   its digest is reproducible too.
+   tree), `dev.gitscale.hash` (the source hash) and `dev.gitscale.config`
+   (the repository's `.gitscale.toml`), and no creation time, so its digest
+   is reproducible too.
 7. **Release it**: the image is tagged `RELEASE`; one already naming another
    image fails the publish, unless `--force` is given. Tagging the commit in
    git is the pipeline's, after this step: then no consumer ever finds a
@@ -256,10 +257,9 @@ version, named by the caller — its image is released as it:
 ```
 Publishing ghcr.io/org/app/gitscale:3c9f2a71…
   tags: source hash 3c9f2a7144e0, v1-2026.10.06-153012
-  layer gitscale: 1 file, 312 B, sha256:e91d…
+  config: .gitscale.toml, 312 B
   layer vendor: 412 files, 3.1 MiB, sha256:4c1f…
   layer app: 12 files, 84.0 KiB, sha256:a90e…
-  gitscale already in the registry
   vendor already in the registry
   pushed app
   pushed config
@@ -275,8 +275,7 @@ and says which of those it could not work out instead of failing.
 $ gitscale artefact publish --dry-run
 Would publish ghcr.io/org/app/gitscale:3c9f2a71…
   tags: source hash 3c9f2a7144e0
-  layer gitscale: 1 file, 312 B, sha256:e91d…
-    .gitscale.toml
+  config: .gitscale.toml, 312 B
   layer vendor: 2 files, 1.1 KiB, sha256:4c1f…
     vendor/lib.js
     vendor/lib.css
@@ -289,6 +288,7 @@ Would publish ghcr.io/org/app/gitscale:3c9f2a71…
 The image is a standard OCI image — one gzip tar layer per group and an image
 config — so `docker`, `skopeo`, `crane` and `oras` read it, and an image another
 tool pushed under the right name and tag installs like one gitscale published.
+Without `dev.gitscale.config`, it declares no dependencies.
 
 ### Releasing without rebuilding
 
@@ -332,8 +332,8 @@ git scale artefact show [DIR...]
 
 For each checkout taken as an artefact — or each one named — everything
 there is to know right now: the release it is at, the image, whether that
-release is published and from which sources, with what layers, what is
-installed, and how the two compare. The one place to answer *why does it say no
+release is published and from which sources, with what config and layers,
+what is installed, and how the two compare. The one place to answer *why does it say no
 artefact, missing or changed*.
 
 ```
@@ -563,8 +563,9 @@ the [release needs no build](#releasing-without-rebuilding):
 A checkout taken as an artefact holds the image and nothing else.
 
 - **[Placement](workflow.md#placement)** resolves the release, downloads
-  every layer, checks each against its digest, unpacks them in order, and
-  strips the write bits of every file at any depth. Once installed, it does
+  every layer, checks each against its digest, unpacks them in order, writes
+  the `.gitscale.toml` the manifest carries, and strips the write bits of
+  every file at any depth. Once installed, it does
   nothing — and asks the registry nothing — while the release wanted is the
   one installed. Otherwise it downloads the new image first and only then
   replaces the files, so a registry that fails part way leaves the installed
@@ -612,7 +613,7 @@ registry answers. The registry then stands in for git:
 |---|---|
 | The versions there are | The registry's tags that are [versions](dependencies.md#revision-kinds) |
 | Which commit a version names | The image tagged with it: its `org.opencontainers.image.revision` |
-| Its own dependencies | The image's `gitscale` layer |
+| Its own dependencies | The image's manifest: `dev.gitscale.config` |
 | Its tree, for [`git scale hash`](cli.md#git-scale-hash) | The image's `dev.gitscale.tree` |
 
 So only released versions resolve, as for any artefact: a branch revision fails, `main needs access

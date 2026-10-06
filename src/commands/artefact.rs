@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::artefact::Artefacts;
 use crate::cache::{human_size, plural};
-use crate::config::{load_workspace, RepoEntry};
+use crate::config::{load_workspace, RepoEntry, CONFIG_FILENAME};
 use crate::prefer::Form;
 use crate::resolve::Network;
 use crate::store::Sources;
@@ -91,6 +91,13 @@ pub fn show(root: Option<&Path>, dirs: &[String], out: &mut dyn Write) -> Result
         }
         if let Some(hash) = &described.hash {
             line(out, "sources", hash)?;
+        }
+        if let Some(size) = described.config_size {
+            line(
+                out,
+                "config",
+                &format!("{}  {}", CONFIG_FILENAME, human_size(size as u64)),
+            )?;
         }
         for (n, layer) in described.layers.iter().enumerate() {
             let title = if layer.title.is_empty() {

@@ -91,42 +91,70 @@ git topic finish               # back on main, every checkout at its pin
 
 See [everyday workflow](docs/workflow.md) and [topics](docs/topics.md).
 
-## What it gives you
+## Why
 
-- **One human-readable config** for every dependency, instead of `.gitmodules`
-  plus gitlink entries.
-- **Read-only checkouts at their pins**, writable only once joined to the
-  topic.
-- **Artefacts** — the build output of a release, published by the repository's
-  own pipeline with `gitscale artefact publish` to GitLab's registry, GHCR or
-  any other, and installed instead of a checkout — each workspace's choice, per
-  dependency, with `git scale prefer`.
-- **Transitive dependencies resolved as one graph**: every repository asks for
-  what it needs, the highest version wins, each major is checked out once and
-  linked into every dependant, and dependencies the root never names are
-  brought in under a configurable directory (`imports/` by default) from an
-  allowlist. `git explain` shows how each
-  revision was chosen.
-- **Every checkout a git worktree** of one bare store per dependency, inside the
-  root's own `.git`: a second worktree of the root costs nothing over the wire,
-  and deleting the root leaves nothing behind. In CI, a per-user cache means
-  the next job on the same runner downloads nothing.
-- **Git hooks** that make `git clone`, `git switch` and `git worktree add`
-  materialise the whole workspace, with an allowlist controlling what may run.
-- **CI credentials without pipeline setup** — inside a GitLab or GitHub job,
-  entries on that same server are fetched with the job token, which never
-  reaches `.git/config` or a command line.
-- **An agent skill** — `git scale skill install` teaches coding agents
-  (Claude Code, Codex, Cursor and others) to carry a change across the
-  workspace's repositories, and stays in step with the installed version.
-- **One status table** covering ahead/behind, ref mismatch, dirty, stale and
-  broken-link states, and where a topic stands, with JSON output.
+The problems GitScale is built for:
+
+- **One config, not a mechanism per dependency.** A single human-readable TOML
+  file instead of `.gitmodules` plus gitlink entries, an XML manifest, or a
+  Python `DEPS` file. See [declaring dependencies](docs/dependencies.md).
+- **Dependencies that cannot be edited by accident.** Every checkout sits at
+  the exact commit its pin names, with the write bit stripped off every file,
+  so an accidental edit fails loudly instead of drifting silently.
+- **One change across several repositories, with no config edits.** The root's
+  branch is the *topic*: `git topic join imports/core` puts that checkout on a
+  branch of the same name, writable, and a CI pipeline on the branch takes every
+  repository's branch of that name too. `git scale commit` and `git scale push`
+  run in every repository on the topic, dependencies first. Once the layers are
+  released, `git upgrade` writes the new tags in. See [topics](docs/topics.md).
+- **Large prebuilt payloads.** `git scale prefer --artefact` takes a
+  repository's build output instead of cloning it — datasets, generated
+  clients, compiled assets — published by its own pipeline with
+  `gitscale artefact publish` to an OCI registry (GitLab's, GHCR, or any other)
+  for each release, and fetched with the CI job token. Each workspace chooses,
+  per dependency; one that cannot read a repository's sources gets its
+  artefact by itself. No `docker`, `oras` or cloud CLI is needed. See
+  [artefacts](docs/artefacts.md).
+- **Shared transitive dependencies checked out once.** When two repositories in
+  the workspace both depend on a third, it is checked out once — at the highest
+  version either asks for, one checkout per major — and symlinked into each
+  dependant, rather than two silently divergent copies. A dependency the root
+  never declares is brought in on its own, under `imports/` by default and only
+  from an allowlist, and `git explain` shows how each revision was chosen. See
+  [recursive dependencies](docs/recursive-dependencies.md).
+- **A checkout that populates itself.** With GitScale installed as a git hook,
+  `git clone`, `git checkout` and `git worktree add` materialise the whole
+  workspace — no `--recursive` flag to remember, and an allowlist decides what
+  may run. See [hooks](docs/hooks.md).
+- **Downloads paid for once per workspace.** Every dependency is one bare
+  clone inside the root's own `.git`, and every checkout of it a worktree: a
+  second worktree of the root costs nothing over the wire, and deleting the root
+  leaves nothing behind. In CI, a per-user cache means the next job on the same
+  runner downloads nothing. See [stores](docs/stores.md).
+- **CI that works without pipeline surgery.** Inside a GitLab or GitHub job,
+  entries hosted on that same server are fetched over HTTPS with the job token,
+  and the token never reaches `.git/config` or a command line. See
+  [CI authentication](docs/ci-authentication.md).
+- **Coding agents that know the workflow.** `git scale skill install` teaches
+  Claude Code, Codex, Cursor and others to carry a change across the
+  workspace's repositories, and stays in step with the installed version. See
+  [the agent skill](docs/agents.md).
+- **One glance at the whole workspace.** `git scale ls` reports ahead/behind,
+  ref mismatch, dirty, stale and broken-link states, and where a topic stands,
+  for every repo in one table, with JSON for anything that wants to consume it.
+  See [status](docs/status.md).
+
+Deliberate limits: GitScale targets git only (plus its own artefact archives),
+it is a separate binary rather than something shipped with git, and a topic is
+nothing but branches of one name — no manifest of its own, no server. The
+[design choices](docs/related-tools.md#design-choices) section covers the
+reasoning.
 
 ## Documentation
 
 | | |
 |---|---|
-| [Overview](docs/overview.md) | What GitScale is, and why |
+| [Overview](docs/overview.md) | What GitScale is, and getting a workspace |
 | [Declaring dependencies](docs/dependencies.md) | Entries, artefacts, pinning |
 | [Status](docs/status.md) | Every flag `git scale ls` prints, and `git explain` |
 | [Recursive dependencies](docs/recursive-dependencies.md) | Hoisting, symlink dedup, version mismatches |

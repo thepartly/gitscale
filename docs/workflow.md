@@ -25,7 +25,7 @@ cargo install gitscale    # binaries: gitscale, git-scale, git-topic, git-upgrad
 git scale hook install --global --allow 'github.com/acme/*'
 #   or via native git:
 #       not available
-#       note: without the hook, run git scale sync after every clone, switch and pull
+#       note: without the hook, run git scale sync after every clone and switch, and git scale pull instead of git pull
 ```
 
 See [git hooks](hooks.md#git-hooks).
@@ -83,7 +83,7 @@ git scale push    # dependencies first, root last; upstream set on first push
 git scale pull    # every checkout current, detached ones included
 #   or via native git:
 #       git -C imports/core pull && git pull
-#       lacks: detached children; a moved branch revision, or a topic a colleague started in one, waits for git scale sync
+#       lacks: detached children; a moved branch revision, or a topic a colleague started in one, waits for the next git scale pull
 
 # Work on a colleague's topic
 git topic switch PROJ-9-colleague    # children with PROJ-9 branches join

@@ -157,9 +157,9 @@ attempts; the test loops 100 times, so it fails almost every run.
 | `artefact::error_059_an_image_index_is_refused_rather_than_installed_empty` | An OCI index, or any manifest without layers, is "installed": the old files are wiped, nothing is installed, and every pull exits 0. | artefact.rs:380 |
 | `artefact::edge_049_a_recreated_overlay_checkout_gets_its_build_again` | The overlay is skipped when its record names the commit, even after the checkout was deleted and re-cloned. | artefact.rs:848 |
 | `artefact::edge_051_an_image_with_a_readonly_directory_installs_and_updates` | A layer with a 0555 directory cannot be unpacked: the mode is applied before the directory's contents. | artefact.rs:597, 634 |
-| `artefact::edge_057_a_forced_republish_brings_the_dependencies_it_declares` | After a `--force` republish, resolution still reads the old image's config layer. | artefact.rs:1033-1038 |
+| `artefact::edge_057_a_forced_republish_brings_the_dependencies_it_declares` | After a `--force` republish, resolution still reads the config in the old image's manifest. | artefact.rs:1033-1038 |
 | `cache::normal_020_update_warms_overlay_images` | `cache update` warms only `replace` entries. | commands/cache.rs:67 |
-| `cache::edge_022_compact_keeps_the_images_resolution_just_read` | Config layers that resolution reads get no use marker, so `compact` evicts them at once. | artefact.rs:1053-1061 |
+| `cache::edge_022_compact_keeps_the_images_resolution_just_read` | Manifests that resolution reads for their config get no use marker, so `compact` evicts them at once. | artefact.rs:1053-1061 |
 | `cache::normal_027_status_names_an_overlay_image_after_its_entry` | `cache status` shows an overlay's image under its raw cache name, in a second row. | commands/cache.rs:140 |
 | `upgrade::edge_015_promotion_leaves_another_majors_entry_alone` | Promotion rewrites every root entry of the repository below the tag, across majors: v0.9.0 becomes v1.1.0. | commands/upgrade.rs:198 |
 | `resolution::edge_053_a_chain_seventy_deep_settles` | A dependency chain 64 or more deep fails with "did not settle after 64 rounds". | resolution.rs:578, 685 |
@@ -295,7 +295,7 @@ intended. Each doc comment says that it pins.
 - **`hook install` / `uninstall --system`** — no seam (see above).
 - **Races that cannot be made deterministic** — `compact` against a running
   install, worktree adds sharing a name.
-- **An artefact config layer that cannot be fetched**, and offline
+- **An artefact manifest that cannot be fetched for its config**, and offline
   `follow_commit` swallowing errors — no reliable way to build the state.
 - **Interactive mode's unbounded thread count** — no documented bound to test
   against.

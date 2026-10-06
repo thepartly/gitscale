@@ -18,7 +18,7 @@ the [implicit dependencies](recursive-dependencies.md#implicit-dependencies)
 its repositories bring in. It is read-only. It resolves from what is on this
 machine — in CI, what the job's placement fetched — unless `--fetch` asks the
 remotes first; even then it changes no checkout: it updates the root's [stores](stores.md), and for
-artefacts the record of what the registry has and the small config layer
+artefacts the record of what the registry has and the manifests whose config
 resolution reads.
 
 ```
@@ -104,7 +104,7 @@ to put them back:
 hint: imports/b: git sees the dependency links GitScale planted there (libs/d); git scale sync puts them back in its info/exclude
 ```
 
-See [ignoring the checkout directory](dependencies.md#ignoring-the-checkout-directory).
+See [checkouts are kept out of git status](dependencies.md#checkouts-are-kept-out-of-git-status).
 
 `ref-mismatch` compares where HEAD actually is, not the text of the two columns.
 A checkout off the topic is detached, so `REF` reads as a commit and can never

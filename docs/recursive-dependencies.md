@@ -204,8 +204,8 @@ allow = ["github.com/partner-org/*"]   # see below
 - Two repositories wanting one path is an error; declare one at the root under
   another directory.
 
-Like every checkout, they are kept out of the root's `git status` — see
-[ignoring the checkout directory](dependencies.md#ignoring-the-checkout-directory).
+Like [every checkout](dependencies.md#checkouts-are-kept-out-of-git-status),
+they are kept out of the root's `git status`.
 
 ### Source or artefact
 
@@ -389,7 +389,7 @@ Resolution reads, per repository, its branches and tags and the
   without files beyond it — from the [cache](stores.md#the-ci-cache)'s snapshot
   when the runner has one.
 - **A repository whose sources cannot be read**: its released versions from
-  its registry's tags, and the config from each image's `gitscale` layer, kept
+  its registry's tags, and the config from each image's manifest, kept
   with the images — see [no access](artefacts.md#no-access-to-the-sources).
 
 Offline, a repository nothing has fetched yet is `unresolved`, with a hint to

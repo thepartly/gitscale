@@ -1,8 +1,8 @@
 # Plan: the GitScale demo
 
-Status: agreed, not started. Needs
-[plan.config-in-manifest.md](plan.config-in-manifest.md) for Argo CD to take
-the root's artefact; every other GitScale feature it needs is implemented.
+Status: in progress. The GitScale features it needs are implemented. The six
+repositories are written in `~/projects`, uncommitted; next is the
+[bootstrap](#bootstrap).
 
 - [What it shows](#what-it-shows)
 - [Repositories](#repositories)
@@ -296,8 +296,8 @@ promotion on a topic, every service is.
    CI passes it when the root's pull request has the label
    `render:allow-released`.
 
-Then `kustomize edit set image` on a copy of `overlays/demo`, and `kustomize
-build` into `rendered/demo/`: `manifests.yaml`, and a `kustomization.yaml`
+Then a wrapper overlay over `overlays/demo`, with each image at its tag and
+each `gitscale-demo/lacks` annotation as a patch, and `kustomize build` into `rendered/demo/`: `manifests.yaml`, and a `kustomization.yaml`
 listing it, so each [environment](#environments) can patch it. The output
 names no namespace: the environment chooses it.
 
@@ -406,8 +406,9 @@ changes only how it runs.
 6. **`docker compose -p <workspace name> -f … <arguments>`**: the
    repositories' files, then the [override](#the-override), generated on
    every run into the repository's git directory. The project is named after
-   the workspace, so it is one stack whichever repository starts it. Every
-   argument not the script's own goes to compose.
+   the workspace, so it is one stack whichever repository starts it. The
+   script's options come before the compose command; every argument from it
+   on goes to compose.
 
 **Options:** `--build DIR`, `--image DIR` (repeatable, relative to the current
 directory), `--network NAME`, `--committed`, `--allow-released`.

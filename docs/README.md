@@ -5,7 +5,7 @@ GitScale manages several git repositories as one workspace, from a single
 
 ## Contents
 
-**1. [Overview](overview.md)** — what GitScale is, and why it exists.
+**1. [Overview](overview.md)** — what GitScale is, and getting a workspace.
 
 **2. Guides**
 

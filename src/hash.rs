@@ -180,7 +180,7 @@ fn own(ws: &Workspace, dir: Option<&str>, committed: bool) -> Result<Own> {
                 .ok_or_else(|| not_here(&slot.url, &commit))?;
             (
                 tree_of(ws, slot, &commit, None)?,
-                artefacts.config_layer(&slot.url, tag, ws.online)?,
+                artefacts.config(&slot.url, tag, ws.online)?,
             )
         }
     };

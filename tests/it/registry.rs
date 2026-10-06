@@ -21,7 +21,7 @@ use crate::support::artefacts::entry_config;
 use crate::support::artefacts::*;
 use crate::support::real_registry::*;
 use crate::support::registry_access::*;
-use crate::support::{git_stdout, TestEnv};
+use crate::support::TestEnv;
 
 // ---------------------------------------------------------------------------
 // Normal cases
@@ -99,12 +99,13 @@ fn normal_003_publish_and_sync_against_a_real_registry() {
             ("bin/tool", "#!/bin/sh\n"),
         ]
     };
+    support::real_registry::release(&bare, "v1.0.0");
     let (out, _) = env.publish_with(
         &bare,
         "main",
         support::real_registry::LAYERED,
         &files("v1"),
-        &[],
+        &["v1.0.0"],
     );
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     // Publishing the same files again is recognised as the same image.
@@ -113,7 +114,7 @@ fn normal_003_publish_and_sync_against_a_real_registry() {
         "main",
         support::real_registry::LAYERED,
         &files("v1"),
-        &[],
+        &["v1.0.0"],
     );
     assert!(again.success, "{}", again.stderr);
     assert!(
@@ -122,21 +123,28 @@ fn normal_003_publish_and_sync_against_a_real_registry() {
         again.stdout
     );
 
-    env.write_config(&support::real_registry::entry_config(&env, &bare));
+    env.write_config(&support::real_registry::entry_config(&env, &bare, "v1.0.0"));
     let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(
         std::fs::read_to_string(env.playground.join("meta/app/dist/app.js")).unwrap(),
         "v1"
     );
+    // The producer's config, from the manifest, at the top of the checkout.
+    assert!(
+        std::fs::read_to_string(env.playground.join("meta/app/.gitscale.toml"))
+            .unwrap()
+            .ends_with(support::real_registry::LAYERED)
+    );
 
     env.push_commit(&bare, "main", "README.md", "v2");
+    support::real_registry::release(&bare, "v1.1.0");
     let (out, _) = env.publish_with(
         &bare,
         "main",
         support::real_registry::LAYERED,
         &files("v2"),
-        &[],
+        &["v1.1.0"],
     );
     assert!(out.success, "{}", out.stderr);
     // The vendor layer is the one from the first publish.
@@ -145,6 +153,7 @@ fn normal_003_publish_and_sync_against_a_real_registry() {
         "{}",
         out.stdout
     );
+    env.write_config(&support::real_registry::entry_config(&env, &bare, "v1.1.0"));
     assert!(env.run(&["fetch"]).success);
     assert!(env.run(&["sync"]).success);
     assert_eq!(
@@ -161,12 +170,15 @@ fn normal_003_publish_and_sync_against_a_real_registry() {
             .lines()
             .next()
             .unwrap()
-            .ends_with("(2 images)"),
+            .ends_with("(2 releases)"),
         "{}",
         listed.stdout
     );
     assert!(
-        listed.stdout.contains("main  (installed)"),
+        listed
+            .stdout
+            .lines()
+            .any(|l| l.trim_start().starts_with("v1.1.0 ") && l.ends_with("(installed)")),
         "{}",
         listed.stdout
     );
@@ -186,24 +198,38 @@ fn normal_004_other_tools_read_what_gitscale_publishes() {
     let env = TestEnv::new("conformance_interop_out");
     use_registry(&env, &addr);
     let bare = env.create_bare_repo(&unique("out"), "main", &[("README.md", "x")]);
-    let (out, commit) = env.publish_with(
+    support::real_registry::release(&bare, "v1.0.0");
+    let (out, _) = env.publish_with(
         &bare,
         "main",
         support::real_registry::LAYERED,
         &[("vendor/lib.js", "vendor"), ("app.js", "app")],
-        &[],
+        &["v1.0.0"],
     );
     assert!(out.success, "{}", out.stderr);
 
-    let reference = format!("docker://{}/{}:{}", addr, env.image(&bare), commit);
+    let reference = format!("docker://{}/{}:v1.0.0", addr, env.image(&bare));
     let inspected = run("skopeo", &["inspect", "--tls-verify=false", &reference]);
     let inspected: serde_json::Value = serde_json::from_str(&inspected).unwrap();
-    // The config layer gitscale adds, then the two groups.
+    // The two groups, and nothing else: the config is in the manifest.
     assert_eq!(
         inspected["Layers"].as_array().unwrap().len(),
-        3,
+        2,
         "{}",
         inspected
+    );
+    let raw = run(
+        "skopeo",
+        &["inspect", "--raw", "--tls-verify=false", &reference],
+    );
+    let raw: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert!(
+        raw["annotations"]["dev.gitscale.config"]
+            .as_str()
+            .unwrap()
+            .ends_with(support::real_registry::LAYERED),
+        "{}",
+        raw
     );
     // And the whole image copies out as a standard layout.
     let layout = env.repos_remote.join("copied-layout");
@@ -230,37 +256,46 @@ fn normal_005_gitscale_reads_what_other_tools_publish() {
     let env = TestEnv::new("conformance_interop_in");
     use_registry(&env, &addr);
     let source = env.create_bare_repo(&unique("source"), "main", &[("README.md", "s")]);
-    let (out, commit) = env.publish_with(
+    support::real_registry::release(&source, "v1.0.0");
+    let (out, _) = env.publish_with(
         &source,
         "main",
         "[artefact]\ninclude = [\"dist/**\"]\n",
         &[("hello.txt", "copied by skopeo")],
-        &[],
+        &["v1.0.0"],
     );
     assert!(out.success, "{}", out.stderr);
 
     // Another repository's artefact, written by skopeo rather than gitscale:
-    // the image above, copied to the name and tag gitscale will look for.
+    // the image above, copied to the name and release gitscale will look
+    // for, as a Docker image — whose manifest has no annotations, so no
+    // config either.
     let target = env.create_bare_repo(&unique("target"), "main", &[("README.md", "t")]);
-    let target_commit = git_stdout(&target, &["rev-parse", "main"]);
+    support::real_registry::release(&target, "v1.0.0");
     run(
         "skopeo",
         &[
             "copy",
+            "--format",
+            "v2s2",
             "--src-tls-verify=false",
             "--dest-tls-verify=false",
-            &format!("docker://{}/{}:{}", addr, env.image(&source), commit),
-            &format!("docker://{}/{}:{}", addr, env.image(&target), target_commit),
+            &format!("docker://{}/{}:v1.0.0", addr, env.image(&source)),
+            &format!("docker://{}/{}:v1.0.0", addr, env.image(&target)),
         ],
     );
 
-    env.write_config(&support::real_registry::entry_config(&env, &target));
+    env.write_config(&support::real_registry::entry_config(
+        &env, &target, "v1.0.0",
+    ));
     let out = env.run(&["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
     assert_eq!(
         std::fs::read_to_string(env.playground.join("meta/app/dist/hello.txt")).unwrap(),
         "copied by skopeo"
     );
+    // No config to write: the image declares no dependencies.
+    assert!(!env.playground.join("meta/app/.gitscale.toml").exists());
 }
 
 /// A registry that challenges with `Basic` rather than a token service gets
@@ -713,7 +748,8 @@ fn error_008_a_missing_tag_is_reported_by_a_real_registry() {
     let env = TestEnv::new("conformance_missing");
     use_registry(&env, &addr);
     let bare = env.create_bare_repo(&unique("unpublished"), "main", &[("README.md", "x")]);
-    env.write_config(&support::real_registry::entry_config(&env, &bare));
+    support::real_registry::release(&bare, "v1.0.0");
+    env.write_config(&support::real_registry::entry_config(&env, &bare, "v1.0.0"));
     let out = env.run(&["sync"]);
     assert!(!out.success);
     assert!(out.stderr.contains("no artefact for"), "{}", out.stderr);
@@ -874,7 +910,7 @@ fn error_027_a_cut_off_download_leaves_no_partial_file_and_the_old_install() {
         "v1.1.0",
         "app v2 with a longer body to cut in half",
     );
-    let app_layer = layer_digests(&env, &bare, "v1.1.0")[2].clone();
+    let app_layer = layer_digests(&env, &bare, "v1.1.0")[1].clone();
     env.registry().truncate_blob(&app_layer);
     env.write_config(&entry_config(&env, &bare, "v1.1.0"));
     let out = env.run(&["sync"]);
@@ -907,7 +943,7 @@ fn perf_028_one_token_exchange_per_scope_per_command() {
     env.registry().clear_log();
     let out = env.run_with_env(&[("DOCKER_CONFIG", s(&docker))], &["sync"]);
     assert!(out.success, "{}{}", out.stdout, out.stderr);
-    assert!(blob_downloads(&env) >= 3, "{:?}", env.registry().log());
+    assert!(blob_downloads(&env) >= 2, "{:?}", env.registry().log());
     assert_eq!(
         env.registry().count("GET", "/token"),
         1,

@@ -696,15 +696,6 @@ fn parse_artefact(raw: Option<&RawArtefact>, config_path: &Path) -> Result<Optio
                 layer.name
             );
         }
-        if layer.name == crate::artefact::CONFIG_LAYER {
-            bail!(
-                "{}: layer name \"{}\" is reserved: publish adds that layer itself, to carry \
-                 the repository's {}",
-                at(""),
-                layer.name,
-                CONFIG_FILENAME
-            );
-        }
         if !seen.insert(layer.name.as_str()) {
             bail!("{}: layer name \"{}\" is used twice", at(""), layer.name);
         }
