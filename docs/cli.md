@@ -194,7 +194,7 @@ sequence.
 
 | Command | Then |
 |---|---|
-| `pull` | [Placement](workflow.md#placement), online: every checkout up to date, detached ones included |
+| `pull` | [Placement](stores.md#placement), online: every checkout up to date, detached ones included |
 | `fetch` | Every store of the root, and the image of every release taken as an artefact, refreshed. Nothing is placed |
 | anything else | When it moved any repository's `HEAD`: placement, fetching only what resolution lacks. Otherwise nothing |
 
@@ -419,7 +419,7 @@ git scale sync [GLOBAL] [--force] [DIR...]
 |---|---|
 | `--force` | Also relink checkouts with work, remove orphan links whose target still resolves, and remove checkouts nothing needs that hold work |
 
-[Placement](workflow.md#placement), online: resolve against the remotes, put
+[Placement](stores.md#placement), online: resolve against the remotes, put
 each checkout where resolution says, relink, prune unused images, and run
 [`post_sync`](hooks.md#post_sync). Anything holding work is reported and kept
 without `--force`, and the command exits 1. With directories, only those

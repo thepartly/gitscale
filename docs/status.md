@@ -72,9 +72,9 @@ order.
 | Flag | Meaning |
 |---|---|
 | `ok` | Clean, and on the expected revision |
-| `missed` | No checkout yet: the directory does not exist, or holds no repository — the next [placement](workflow.md#placement) checks it out |
+| `missed` | No checkout yet: the directory does not exist, or holds no repository — the next [placement](stores.md#placement) checks it out |
 | `symlink` | Resolved as a symlink to a root-level checkout (a deduped [recursive dependency](recursive-dependencies.md)) |
-| `unlinked` | A dependency inside this repo that should be a symlink is a real clone instead — see [unlinked checkouts](recursive-dependencies.md#unlinked-checkouts). The next [placement](workflow.md#placement) relinks it |
+| `unlinked` | A dependency inside this repo that should be a symlink is a real clone instead — see [unlinked checkouts](recursive-dependencies.md#unlinked-checkouts). The next [placement](stores.md#placement) relinks it |
 | `unlinked, modified` | …and that clone has uncommitted changes or unpushed commits, so relinking would lose work. `git scale sync --force` overrides |
 | `unlinked, dirty` | …and the repo itself has uncommitted changes |
 | `untracked-links` | Git sees the dependency links GitScale planted here as untracked files, though placement keeps them in `info/exclude` — see below. Not `dirty`: they are not anyone's work |
@@ -85,7 +85,7 @@ order.
 | `-N` | On a topic branch, N commits behind its upstream |
 | `ref-mismatch` | The checkout is not where resolution puts it: detached at another commit, or not on the topic branch. For an artefact: installed for another release than the one wanted now |
 | `missing` | Artefact only: the release wanted had no image in the registry when last fetched |
-| `changed` | Artefact only: the installed release's image was re-published with different files; the next [placement](workflow.md#placement) installs it |
+| `changed` | Artefact only: the installed release's image was re-published with different files; the next [placement](stores.md#placement) installs it |
 | `orphan` | A leftover GitScale symlink whose dependency is no longer declared; its target still resolves |
 | `orphan, broken` | …and its target no longer exists |
 | `override` | An override holds the checkout below a request it beat; `RESOLUTION` says which |

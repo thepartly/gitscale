@@ -50,7 +50,7 @@ list of values GitScale refuses, is in
 The checkouts are not content of the workspace repository. What that repository
 tracks is the *selection*: `.gitscale.toml`, which names each repository and the
 revision it is pinned to. The checkouts themselves are reproduced from it by
-[placement](workflow.md#placement).
+[placement](stores.md#placement).
 
 So GitScale keeps them out of git's sight itself: every placement writes the
 checkout directories into the workspace repository's `info/exclude` — git's
@@ -88,7 +88,7 @@ and creates the root's `.gitscale.toml` when there is none. `unrequire` refuses
 a directory that is not declared.
 
 Both edit the root's `.gitscale.toml` in place — comments, key order and tables
-GitScale does not know about are kept — and then [place](workflow.md#placement)
+GitScale does not know about are kept — and then [place](stores.md#placement)
 the workspace, online: `require` checks the new entry out; `unrequire` leaves
 its checkout to the relink step, which removes it when that loses nothing
 (files git ignores, such as build output, go with it) and reports it
@@ -148,7 +148,7 @@ it moves.
 ```
 
 The checkout is **detached at the branch's tip**, and each
-[placement](workflow.md#placement) that asks the remotes — `git scale pull`,
+[placement](stores.md#placement) that asks the remotes — `git scale pull`,
 `git scale sync` — moves it to the new tip. It never lands on the branch
 itself: a branch is something a repository is developed on, and that is what
 [topics](topics.md) are for.

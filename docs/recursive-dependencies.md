@@ -301,7 +301,7 @@ A symlink is created when the target checkout exists; entries whose target is
 not there yet are skipped and picked up on a later run. GitScale never clobbers
 a real file or directory sitting at a link path — that is reported by
 [`git scale ls`](status.md) as [`unlinked`](#unlinked-checkouts) and fixed by
-the next [placement](workflow.md#placement).
+the next [placement](stores.md#placement).
 
 - A git command run across the workspace with `git scale`, and
   [`clean`](clean.md), never go through a link: the checkout it points to is
@@ -330,7 +330,7 @@ says `recursive = false`.
 A path that should be a symlink can hold a real checkout instead: someone
 cloned into it by hand, or it comes from a layout made before the dependency
 was hoisted. `ls` flags the **parent repo** as `unlinked`, and every
-[placement](workflow.md#placement) fixes it:
+[placement](stores.md#placement) fixes it:
 
 - A clean checkout is removed and the symlink restored.
 - One with uncommitted changes or unpushed commits is kept and reported, and
@@ -353,7 +353,7 @@ An implicit checkout nothing asks for any more — like a declared one whose
 entry was removed — is removed by placement when it holds nothing to lose (no
 uncommitted changes, unpushed commits or stash; files git ignores go with it), and
 kept otherwise, with placement failing until it is dealt with or `--force` is
-given. See [placement](workflow.md#placement).
+given. See [placement](stores.md#placement).
 
 Symlinks you created yourself, and anything absolute or pointing elsewhere, are
 never touched.

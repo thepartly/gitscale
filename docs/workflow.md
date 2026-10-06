@@ -4,8 +4,6 @@
 - [A plain clone](#a-plain-clone)
 - [A bare clone with worktrees](#a-bare-clone-with-worktrees)
 - [Occasional tasks](#occasional-tasks)
-- [Placement](#placement)
-- [Forcing a cleanup](#forcing-a-cleanup)
 - [CI on hosted runners](#ci-on-hosted-runners)
 - [Choosing a command](#choosing-a-command)
 
@@ -14,13 +12,14 @@ what it does after it; then the plain git that does the same, with `lacks:`
 for what it misses and `note:` for anything else. Git commands GitScale does
 not know — `status`, `add`, `commit`, `push`, `pull`, `log` — run across the
 workspace with `git scale`: see [git commands](cli.md#git-commands-git-scale-git-command).
+What GitScale does to the checkouts after a command moves them is
+[placement](stores.md#placement).
 
 ## One-time setup
 
-```sh
-# Install
-cargo install gitscale    # binaries: gitscale, git-scale, git-topic, git-upgrade, git-explain
+With GitScale [installed](overview.md#install):
 
+```sh
 # Install the hook and the man pages
 git scale hook install --global --allow 'github.com/acme/*'
 #   or via native git:
@@ -270,87 +269,6 @@ git scale ls --fetch
 #       not available
 ```
 
-## Placement
-
-**Placement** is what `git scale sync` does, what the [hook](hooks.md#git-hooks)
-and CI run, and what `git scale pull` — and any git command that moved a
-`HEAD` — ends with: put every checkout where
-[resolution](recursive-dependencies.md#how-a-revision-is-chosen) says it goes,
-including a revision a dependency starts asking for in this very placement,
-and implicit dependencies new to the graph. Anything missing is checked out
-first. In order:
-
-1. **Tidy the stores**: repair checkouts the root's move broke, and prune what
-   deleted root worktrees left — see [moving and deleting](stores.md#moving-and-deleting).
-2. **Carry** the topic, when the root's branch was just created from another
-   topic — see [a new branch from a topic](topics.md#a-new-branch-from-a-topic).
-3. **Resolve** — online for `sync`, `pull`, the hook in the root and anything
-   in CI; fetching only what is missing otherwise. See
-   [when resolution asks the remotes](recursive-dependencies.md#when-resolution-asks-the-remotes).
-4. **Place** each checkout, below.
-5. **Relink**: restore [dependency links](recursive-dependencies.md#deduplication-by-symlink)
-   replaced by real checkouts, remove checkouts nothing needs any more, and
-   remove orphan links.
-6. In CI, **clean** each checkout placed with [`git scale clean -fdx`](clean.md).
-7. **Prune** images nothing has used lately, at most once a day — see
-   [images](stores.md#images).
-8. Run the [`post_sync` hook](hooks.md#post_sync), when every step succeeded.
-
-| Entry | What happens |
-|---|---|
-| Missing directory, or an empty one | A worktree of its store, detached at its commit, read-only |
-| Off the topic | Detached at the commit its revision resolves to, read-only. A [branch](dependencies.md#branch) revision moves to the new tip |
-| On the topic | On the topic branch, writable, fast-forwarded to its upstream — see [where each checkout goes](topics.md#where-each-checkout-goes) |
-| Taken as an [artefact](artefacts.md#choosing-how-a-checkout-arrives) | Nothing to do, and nothing asked of the registry, when the release wanted is the one installed. Otherwise the release's image is downloaded — only the layers the store does not hold — then the files are replaced. A revision that is no release, or a release with no image, fails and leaves the installed files alone. A source checkout there is replaced, unless it holds work |
-| Directory holding files but no repository | `FAIL … exists but holds no git repository`. Left as it is — [`git scale clean -fd`](clean.md#a-directory-holding-no-repository) removes it, or move it aside, and run again |
-| A checkout that is not a worktree of its store | `FAIL … not a gitscale worktree`, left alone — see [checkouts GitScale did not make](stores.md#checkouts-gitscale-did-not-make) |
-| The child the [hook fired in](hooks.md#the-hook-in-a-child) | `skip (left where git put it)` |
-| A link pointing out of the workspace | `skip (symlink)` |
-| Any other symlink | Removed and replaced by a checkout |
-| Artefact entry, no registry known for its host | `FAIL … no registry is known for …`, naming the [`[registries]`](configuration.md#registries) entry to add |
-
-A checkout is **moved only when nothing can be lost**. Uncommitted changes to
-tracked files fail the entry with `not moved: uncommitted changes; commit or
-stash, then pull again`; so do commits made at a detached HEAD that no branch,
-tag or remote holds, with the command to keep them. Untracked files do not
-block a move: git keeps them, and refuses rather than overwrite one. Commits on
-a topic branch never block a move: they stay on the branch in the store.
-
-In CI, where checkouts hold nobody's work, the move is forced, and every
-checkout placed is then cleaned — tracked files are updated in place, so
-unchanged files keep their mtimes and a restored build cache stays valid.
-
-**Relinking** is the step that can refuse. An
-[unlinked checkout](recursive-dependencies.md#unlinked-checkouts) with local
-work, a checkout nothing needs but with local work, or an orphan link whose
-target still resolves, is reported and left in place, and the command exits
-non-zero asking for `--force`. Broken orphans are always removed.
-
-**A checkout nothing needs any more** is one whose entry you removed or
-renamed in `.gitscale.toml`, or an implicit dependency no repository asks for
-now. Placement removes it when that loses nothing — no uncommitted changes,
-unpushed commits or stash, while untracked symlinks (the links GitScale
-planted) and files git ignores go with it; an artefact never holds any work,
-since every placement replaces it whole. GitScale keeps a record of the
-checkouts it manages — `gitscale/checkouts.json` in the root worktree's git
-directory — and only those are ever removed: a directory GitScale did not make
-is never touched.
-
-An entry that fails — a remote that cannot be reached, a move refused, a
-release with no image — does not stop the others:
-every other checkout is still placed and linked, and then the command exits
-non-zero naming how many failed.
-
-## Forcing a cleanup
-
-```sh
-# Pull, then also relink checkouts with local work and remove orphans
-git scale pull --force-sync
-
-# Not the same: git pull --force in each repo, normal cleanup
-git scale pull --force
-```
-
 ## CI on hosted runners
 
 Runners have no hook, so a job places the workspace itself:
@@ -384,4 +302,4 @@ job fetched would build a branch where it was then. See
 
 ---
 
-[← 2.3 Recursive dependencies](recursive-dependencies.md) · [Contents](README.md) · [Next → 2.5 Stores, worktrees and the CI cache](stores.md)
+[← 2.3 Recursive dependencies](recursive-dependencies.md) · [Contents](README.md) · [Next → 2.5 Stores, placement and the CI cache](stores.md)

@@ -171,7 +171,7 @@ repository's own `[clean]` table. An empty pattern, or one starting with `-`
 
 | Reason reported | Why |
 |---|---|
-| `artefact` | No working tree to clean; the directory's contents are managed by [placement](workflow.md#placement) |
+| `artefact` | No working tree to clean; the directory's contents are managed by [placement](stores.md#placement) |
 | `not cloned` | The directory does not exist |
 | `symlink` | A deduped [recursive dependency](recursive-dependencies.md); the real checkout is cleaned under its own name |
 | `not a git repository` | The directory has a `.git` but is not the top level of a working repository — a damaged checkout, which may still hold the only copy of somebody's work. For the workspace root this is only reported when `.` was asked for by name — a workspace that is not itself a repository is an ordinary setup, not a problem |
@@ -182,7 +182,7 @@ repository's own `[clean]` table. An empty pattern, or one starting with `-`
 
 An entry's directory can exist with no repository in it at all — no `.git` —
 after a failed checkout, an interrupted delete, an outside cleaner, or a CI cache
-restored into a path whose checkout was not. [Placement](workflow.md#placement)
+restored into a path whose checkout was not. [Placement](stores.md#placement)
 refuses to check out over one that holds files, and nothing inside it belongs
 to a checkout, so with `-d` `clean` **removes the whole directory**, as it
 would an untracked one; with `-X` it does not. The dry run lists it as

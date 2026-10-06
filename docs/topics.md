@@ -242,7 +242,7 @@ topic either.
 
 ### Where each checkout goes
 
-On a topic, every [placement](workflow.md#placement) places each checkout by
+On a topic, every [placement](stores.md#placement) places each checkout by
 the first of:
 
 1. **A local branch of the topic** in its store: on it, writable. This is a
@@ -655,4 +655,4 @@ finished one's worktree.
 
 ---
 
-[← 2.5 Stores, worktrees and the CI cache](stores.md) · [Contents](README.md) · [Next → 2.7 Hooks](hooks.md)
+[← 2.5 Stores, placement and the CI cache](stores.md) · [Contents](README.md) · [Next → 2.7 Hooks](hooks.md)

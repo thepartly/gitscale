@@ -6,7 +6,7 @@ front:
 - **[Config hooks](#config-hooks)** — the `[hooks]` table in `.gitscale.toml`:
   commands GitScale runs after its own operations.
 - **[Git hooks](#git-hooks)** — installing GitScale *into git*, so that
-  [placement](workflow.md#placement) runs whenever a checkout or merge changes
+  [placement](stores.md#placement) runs whenever a checkout or merge changes
   the working tree.
 
 They meet in the [hook allowlist](#the-hook-allowlist), which decides whose
@@ -37,7 +37,7 @@ on_pull_error = "warn"
 
 ### post_sync
 
-Runs at the end of every [placement](workflow.md#placement), when every step
+Runs at the end of every [placement](stores.md#placement), when every step
 of it succeeded: `git scale sync`, `git scale pull`, `require` and `unrequire`,
 any git command run across the workspace that moved a `HEAD`, and the
 [git hook](#git-hooks)'s. It is executed via `sh -c` with the workspace root as
@@ -72,7 +72,7 @@ run yourself, which always reports its own exit status.
 git scale hook install --local
 ```
 
-registers GitScale with git so that [placement](workflow.md#placement) runs
+registers GitScale with git so that [placement](stores.md#placement) runs
 whenever a checkout or merge changes the working tree. A fresh clone, a `git
 switch` onto or off a [topic](topics.md), a `git checkout` that moves the
 declared revisions, or a `git worktree add` then puts every checkout where it

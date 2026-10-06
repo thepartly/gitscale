@@ -65,7 +65,7 @@ see [declaring dependencies](dependencies.md).
 Using one means `git clone`, and nothing else. A `--global` or `--system`
 [git hook](hooks.md#git-hooks), installed once per machine, materialises every
 declared repository at the end of the clone. Where no hook applies, `git clone`
-followed by [`git scale sync`](workflow.md#placement) does the same work. A
+followed by [`git scale sync`](stores.md#placement) does the same work. A
 bare clone with a worktree per topic works too — see
 [everyday workflow](workflow.md#a-bare-clone-with-worktrees).
 

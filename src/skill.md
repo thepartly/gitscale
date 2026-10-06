@@ -28,7 +28,7 @@ Docs: https://github.com/thepartly/gitscale/blob/v{{version}}/docs/ — offline:
 | `git topic list` · `finish` | Every topic in progress; end a merged one | topics.md |
 | `git scale <git command>` | Run git in the root and every child on the topic, dependencies first | workflow.md |
 | `git scale pull` | Pull, then bring every child up to date, detached ones included | workflow.md |
-| `git scale sync` | Put every child where resolution says, against the remotes now | workflow.md |
+| `git scale sync` | Put every child where resolution says, against the remotes now | stores.md |
 | `git upgrade [--commit]` | Pin newly tagged layers into the topic's configs; their topic branches are deleted on their remotes | topics.md |
 | `git upgrade <dir>... [--major]` | Raise a dependency to its newest release in the topic's configs; requesters off the topic are named | topics.md |
 | `git scale check` | CI gate: fails while any child comes from a branch | topics.md |

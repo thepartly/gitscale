@@ -158,8 +158,8 @@ reasoning.
 | [Declaring dependencies](docs/dependencies.md) | Entries, artefacts, pinning |
 | [Status](docs/status.md) | Every flag `git scale ls` prints, and `git explain` |
 | [Recursive dependencies](docs/recursive-dependencies.md) | Hoisting, symlink dedup, version mismatches |
-| [Everyday workflow](docs/workflow.md) | `git scale <git command>`, `sync`, plain and bare clones |
-| [Stores, worktrees and the CI cache](docs/stores.md) | Where checkouts come from, roots made of worktrees, the CI cache |
+| [Everyday workflow](docs/workflow.md) | `git scale <git command>`, plain and bare clones, CI on hosted runners |
+| [Stores, placement and the CI cache](docs/stores.md) | Where checkouts come from, placement, roots made of worktrees, the CI cache |
 | [Topics](docs/topics.md) | One change across several repositories: `git topic`, `git upgrade`, `git scale check` |
 | [Hooks](docs/hooks.md) | `[hooks]` commands, and GitScale as a git hook |
 | [CI authentication](docs/ci-authentication.md) | Job tokens on GitLab and GitHub |

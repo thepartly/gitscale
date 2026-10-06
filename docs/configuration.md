@@ -247,7 +247,7 @@ Commands GitScale runs after its own operations. Not to be confused with
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `post_sync` | string | — | Shell command run at the end of every [placement](workflow.md#placement) that succeeded, via `sh -c` in the workspace root. A non-zero exit fails the command |
+| `post_sync` | string | — | Shell command run at the end of every [placement](stores.md#placement) that succeeded, via `sh -c` in the workspace root. A non-zero exit fails the command |
 | `on_pull_error` | string | `"fail"` under CI, `"warn"` otherwise | What a placement a **git hook** ran does when it fails: `"fail"` returns non-zero and fails the git operation, `"warn"` reports and lets it succeed |
 
 Under an installed [git hook](hooks.md#git-hooks), `post_sync` runs only for

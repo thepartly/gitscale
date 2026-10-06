@@ -562,7 +562,7 @@ the [release needs no build](#releasing-without-rebuilding):
 
 A checkout taken as an artefact holds the image and nothing else.
 
-- **[Placement](workflow.md#placement)** resolves the release, downloads
+- **[Placement](stores.md#placement)** resolves the release, downloads
   every layer, checks each against its digest, unpacks them in order, writes
   the `.gitscale.toml` the manifest carries, and strips the write bits of
   every file at any depth. Once installed, it does
