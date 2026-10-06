@@ -634,6 +634,26 @@ pub(crate) fn touch(path: &Path) {
     let _ = fs::write(path, b"");
 }
 
+/// How long ago the least recently fetched of `repos` was fetched — each
+/// one's `FETCH_HEAD`, which git rewrites on every fetch — when that is an
+/// hour or more: old enough that what was read from them may be out of
+/// date. `None` when it is recent, or none has been fetched.
+pub fn fetched_long_ago(repos: &[PathBuf]) -> Option<String> {
+    let oldest = repos
+        .iter()
+        .filter_map(|repo| {
+            let head = crate::git::git_path(repo, "FETCH_HEAD").unwrap_or(repo.join("FETCH_HEAD"));
+            modified(&head)
+        })
+        .min()?;
+    let hours = SystemTime::now().duration_since(oldest).ok()?.as_secs() / 3600;
+    match hours {
+        0 => None,
+        1..=47 => Some(format!("{} h", hours)),
+        _ => Some(format!("{} days", hours / 24)),
+    }
+}
+
 pub(crate) fn modified(marker: &Path) -> Option<SystemTime> {
     fs::metadata(marker).and_then(|m| m.modified()).ok()
 }

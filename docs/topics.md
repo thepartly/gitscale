@@ -423,8 +423,11 @@ then merge: imports/core
   no command to run, `next to merge:` alone. A release comes first: promoting
   it bumps the pins of what merges after it.
 
-Offline; `--fetch` fetches the joined repositories first. `--format json` is
-for scripts and agents. Off a topic: `not on a topic`, exit 1.
+It fetches the root and the joined repositories first: whether a branch is
+merged or released is the remotes' to say. `--offline` answers from what this
+machine has, and at a terminal says how old that is once it is an hour or
+more. `--format json` is for scripts and agents. Off a topic: `not on a
+topic`, exit 1.
 
 ## Promotion: `git upgrade`
 

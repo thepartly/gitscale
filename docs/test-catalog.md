@@ -2,7 +2,7 @@
 
 Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Regenerate with `GITSCALE_UPDATE_CATALOG=1 cargo test --test it catalog::`. The naming rules are in [testing.md](testing.md).
 
-646 integration tests (279 normal, 205 edge, 144 error, 18 perf), 44 of them ignored; 170 unit tests.
+650 integration tests (283 normal, 205 edge, 144 error, 18 perf), 44 of them ignored; 170 unit tests.
 
 | Feature | normal | edge | error | perf | total |
 |---|---:|---:|---:|---:|---:|
@@ -20,7 +20,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | [hash](#hash) | 5 | 2 | 1 | 0 | 8 |
 | [hook](#hook) | 19 | 22 | 10 | 1 | 52 |
 | [links](#links) | 10 | 14 | 0 | 0 | 24 |
-| [ls](#ls) | 20 | 9 | 3 | 1 | 33 |
+| [ls](#ls) | 22 | 9 | 3 | 1 | 35 |
 | [man](#man) | 1 | 0 | 0 | 0 | 1 |
 | [network](#network) | 2 | 0 | 1 | 0 | 3 |
 | [output](#output) | 5 | 0 | 0 | 0 | 5 |
@@ -33,7 +33,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | [skill](#skill) | 5 | 5 | 3 | 0 | 13 |
 | [stores](#stores) | 3 | 10 | 2 | 1 | 16 |
 | [sync](#sync) | 5 | 7 | 0 | 1 | 13 |
-| [topic](#topic) | 34 | 17 | 12 | 0 | 63 |
+| [topic](#topic) | 36 | 17 | 12 | 0 | 65 |
 | [upgrade](#upgrade) | 12 | 9 | 5 | 0 | 26 |
 | [workspace](#workspace) | 2 | 1 | 1 | 0 | 4 |
 
@@ -461,6 +461,8 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | ls-031 | edge | `edge_031_a_shallow_checkout_behind_its_upstream_is_stale` | `stale` stands in for a behind count where a depth-1 checkout has no history to count: a shallow checkout on a branch whose upstream has moved is `stale`, with `≠` in bright red, and `"stale": true` in the JSON. gitscale's own CI checkouts are detached and so have no upstream; this puts one on a branch by hand to reach the flag. |
 | ls-032 | edge | `edge_032_a_checkout_git_cannot_read_is_not_ok` | **ignored: bug: ls reads a failed git status as clean, so a checkout git cannot read shows ok** A checkout git cannot read — its `.git` names a git directory that is gone — is not `ok`: git could not say whether it is clean, or where its HEAD is, and `ls` must not claim either. |
 | ls-033 | normal | `normal_033_a_topic_branch_never_pushed_is_ahead_by_what_no_remote_has` | A topic branch never pushed has no upstream: its commits that no remote branch or tag has are its `+N` — work only this machine holds. Pushed, they are counted against the upstream again, and none is left. |
+| ls-034 | normal | `normal_034_at_a_terminal_ls_says_when_its_stores_were_fetched_long_ago` | Read at a terminal, `ls` says when what it read from the stores is an hour old or more, and how to refresh it; not after `--fetch`, and never off a terminal, where a script reads it. |
+| ls-035 | normal | `normal_035_changes_in_the_root_on_a_pinned_branch_are_pointed_at_a_topic` | The root is never read-only, so changes made in it on the branch it pins are pointed at a topic; on a topic, where they belong, nothing is said. |
 
 ### man
 
@@ -794,6 +796,8 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | topic-061 | normal | `normal_061_join_dependants_of_a_dependency_joins_those_asking_for_less` | `git topic join --dependants <dir>` joins the checkouts whose configs ask for less than the dependency's newest release — how a raise begins — and leaves those already asking for it. |
 | topic-062 | normal | `normal_062_join_dependants_climbs_one_level_from_the_topics_changes` | `git topic join --dependants` alone climbs one level from the topic's changes: the dependants of each checkout carrying one — commits on the topic, or uncommitted work — while none of them is on the topic. One taken off stays off, a checkout joined with nothing to carry is not climbed from, and the root is never joined. |
 | topic-063 | normal | `normal_063_off_a_topic_a_terminal_is_told_where_it_is` | Off a topic, `git topic` prints nothing for a script to read, but tells a person at a terminal where they are, on stderr: on a pinned branch, on no branch, or in a checkout the topic holds at its pin. |
+| topic-064 | normal | `normal_064_status_fetches_first_and_offline_says_how_old_it_is` | `git topic status` asks the remotes first: a merge of the root's branch since the last fetch is in its answer. `--offline` reads this machine only, and at a terminal says how old that is, once it is an hour or more. |
+| topic-065 | normal | `normal_065_a_merge_commit_counts_as_merged` | A root merged with a merge commit, rather than a squash, has every one of its commits in the default branch's history: it is merged, as a topic just started — on the same commit as the default branch — is not. |
 
 ### upgrade
 

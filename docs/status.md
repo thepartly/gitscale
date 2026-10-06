@@ -151,6 +151,13 @@ When any row counts more than one request, a `hint:` line under the table
 points at [`git explain`](#why-a-checkout-has-its-revision-git-explain), which lists them
 all. A checkout with nothing on disk yet is only `missed`.
 
+The root is never read-only: it is where topics start. When it has changes on
+a branch it pins — `main`, say — and a topic can start, with a commit and an
+`origin` to start from, the table ends with where they belong:
+`hint: the root has changes on main, a pinned branch: git topic start NAME to
+carry them onto a topic`. In a plain clone, `git topic start` takes them along;
+a topic in a worktree of its own does not.
+
 ## Topics
 
 On a [topic](topics.md), the table starts with the topic's branch and what may
@@ -242,6 +249,10 @@ explain` alone shows every checkout more than one repository asks for. Like
 
 Without `--fetch`, `ls` reports what is already on disk: ahead/behind counts
 come from the remote-tracking refs as they stand, which may be old.
+
+At a terminal, when the stores were fetched an hour ago or more, the table
+ends with how long ago and how to refresh: `hint: fetched 3 h ago: git scale
+ls --fetch, or git scale fetch`. Never in JSON, nor off a terminal.
 
 `--fetch` updates them first: one fetch per [store](stores.md), however many
 checkouts and root worktrees use it. Artefact entries resolve their revision with `ls-remote` and ask

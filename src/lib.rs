@@ -318,16 +318,24 @@ enum TopicAction {
     /// The current topic: its joined repositories, what each still needs,
     /// and what to merge next
     Status {
-        /// Fetch the joined repositories first
+        /// Answer from what this machine has, without fetching the root and
+        /// the joined repositories first
         #[arg(long)]
+        offline: bool,
+        /// The default: fetch first. Kept for scripts that pass it
+        #[arg(long, hide = true, conflicts_with = "offline")]
         fetch: bool,
         #[arg(short, long, value_parser = ["table", "json"], default_value = "table")]
         format: String,
     },
     /// Every topic of the root: its worktree, joined checkouts and state
     List {
-        /// Fetch the root and the joined checkouts first
+        /// Answer from what this machine has, without fetching the root and
+        /// the joined checkouts first
         #[arg(long)]
+        offline: bool,
+        /// The default: fetch first. Kept for scripts that pass it
+        #[arg(long, hide = true, conflicts_with = "offline")]
         fetch: bool,
         #[arg(short, long, value_parser = ["table", "json"], default_value = "table")]
         format: String,
@@ -656,9 +664,16 @@ fn run_command(cli: Cli, io: Io, out: &mut dyn Write, err: &mut dyn Write) -> Re
             out,
             err,
         ),
-        Commands::Ls { fetch, format } => {
-            commands::ls::run(root, fetch, &format, verbose, no_cache, out, err)
-        }
+        Commands::Ls { fetch, format } => commands::ls::run(
+            root,
+            fetch,
+            &format,
+            verbose,
+            no_cache,
+            io.interactive,
+            out,
+            err,
+        ),
         Commands::Explain { fetch, dirs } => {
             commands::ls::explain(root, fetch, &dirs, verbose, no_cache, out, err)
         }
@@ -691,12 +706,18 @@ fn run_command(cli: Cli, io: Io, out: &mut dyn Write, err: &mut dyn Write) -> Re
                     worktree: worktree_choice(worktree, no_worktree),
                     dir,
                 },
-                Some(TopicAction::Status { fetch, format }) => {
-                    commands::topic::Action::Status { fetch, format }
-                }
-                Some(TopicAction::List { fetch, format }) => {
-                    commands::topic::Action::List { fetch, format }
-                }
+                Some(TopicAction::Status {
+                    offline, format, ..
+                }) => commands::topic::Action::Status {
+                    fetch: !offline,
+                    format,
+                },
+                Some(TopicAction::List {
+                    offline, format, ..
+                }) => commands::topic::Action::List {
+                    fetch: !offline,
+                    format,
+                },
                 Some(TopicAction::Finish { force, name }) => {
                     commands::topic::Action::Finish { name, force }
                 }

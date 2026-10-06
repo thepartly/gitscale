@@ -1063,6 +1063,123 @@ fn normal_063_off_a_topic_a_terminal_is_told_where_it_is() {
     assert_eq!((out.stdout.as_str(), out.stderr.as_str()), ("feat/x\n", ""));
 }
 
+/// `git topic status` asks the remotes first: a merge of the root's branch
+/// since the last fetch is in its answer. `--offline` reads this machine
+/// only, and at a terminal says how old that is, once it is an hour or more.
+#[test]
+fn normal_064_status_fetches_first_and_offline_says_how_old_it_is() {
+    let f = fixture("topic_status_fetches", "");
+    let ws = f.clone_root("ws");
+    identity(&ws);
+    ok(&gs(&ws, &["topic", "start", "feat"]));
+    commit_in(&ws, "notes.txt", "the change");
+    run_git_pub(&ws, &["push", "-q", "-u", "origin", "feat"]);
+    let root_row = |stdout: &str| {
+        stdout
+            .lines()
+            .find(|l| l.split_whitespace().next() == Some("."))
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    squash_merge(&f.env, &f.root, "feat");
+    let offline = gs(&ws, &["topic", "status", "--offline"]);
+    ok(&offline);
+    assert!(
+        root_row(&offline.stdout).ends_with("ready to merge"),
+        "{}",
+        offline.stdout
+    );
+    let out = gs(&ws, &["topic", "status"]);
+    ok(&out);
+    assert!(
+        root_row(&out.stdout).ends_with("merged into main"),
+        "{}",
+        out.stdout
+    );
+    // The default, still accepted from scripts that pass it.
+    ok(&gs(&ws, &["topic", "status", "--fetch"]));
+    ok(&gs(&ws, &["topic", "list", "--fetch"]));
+
+    let fetch_head = ws.join(".git/FETCH_HEAD");
+    let aged = std::process::Command::new("touch")
+        .args(["-d", "3 hours ago", fetch_head.to_str().unwrap()])
+        .status()
+        .unwrap();
+    assert!(aged.success());
+    let at_terminal = |args: &[&str]| {
+        let mut full = vec!["gitscale", "-C", ws.to_str().unwrap()];
+        full.extend_from_slice(args);
+        gitscale::run_cli_with(&full, true)
+    };
+    let out = at_terminal(&["topic", "status", "--offline"]);
+    ok(&out);
+    assert!(
+        out.stdout
+            .contains("fetched 3 h ago: git topic status fetches first without --offline"),
+        "{}",
+        out.stdout
+    );
+    let out = at_terminal(&["topic", "list", "--offline"]);
+    ok(&out);
+    assert!(
+        out.stdout
+            .contains("fetched 3 h ago: git topic list fetches first without --offline"),
+        "{}",
+        out.stdout
+    );
+    // Not when it fetched, and never off a terminal.
+    let out = at_terminal(&["topic", "status"]);
+    ok(&out);
+    assert!(!out.stdout.contains("fetched"), "{}", out.stdout);
+    let out = gs(&ws, &["topic", "status", "--offline"]);
+    assert!(!out.stdout.contains("fetched"), "{}", out.stdout);
+}
+
+/// A root merged with a merge commit, rather than a squash, has every one of
+/// its commits in the default branch's history: it is merged, as a topic
+/// just started — on the same commit as the default branch — is not.
+#[test]
+fn normal_065_a_merge_commit_counts_as_merged() {
+    let f = fixture("topic_status_merge_commit", "");
+    let ws = f.clone_root("ws");
+    identity(&ws);
+    ok(&gs(&ws, &["topic", "start", "feat"]));
+    commit_in(&ws, "notes.txt", "the change");
+    run_git_pub(&ws, &["push", "-q", "-u", "origin", "feat"]);
+
+    let work = f.env.repos_remote.join("merge-commit");
+    run_git_pub(
+        &f.env.repos_remote,
+        &[
+            "clone",
+            "-q",
+            f.root.to_str().unwrap(),
+            work.to_str().unwrap(),
+        ],
+    );
+    identity(&work);
+    run_git_pub(
+        &work,
+        &["merge", "-q", "--no-ff", "-m", "merge feat", "origin/feat"],
+    );
+    run_git_pub(&work, &["push", "-q", "origin", "main"]);
+
+    let out = gs(&ws, &["topic", "status"]);
+    ok(&out);
+    let root = out
+        .stdout
+        .lines()
+        .find(|l| l.split_whitespace().next() == Some("."))
+        .unwrap_or_default();
+    assert!(root.ends_with("merged into main"), "{}", out.stdout);
+    assert!(
+        out.stdout.contains("next: git topic finish"),
+        "{}",
+        out.stdout
+    );
+}
+
 /// `join` and `leave` with nothing named fail, as `git add` does; inside a
 /// checkout the hint says how to name it.
 #[test]

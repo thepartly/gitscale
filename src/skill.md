@@ -41,7 +41,7 @@ Docs: https://github.com/thepartly/gitscale/blob/v{{version}}/docs/ — offline:
 
 `git upgrade` works on a topic only. Add `--dry-run` to see the plan first.
 
-For output to read, use `git scale ls --format json`, `git topic status --format json` and `git scale hash --format json`. Without `--fetch` they report what is on this machine; `git scale ls --fetch` and `git topic status --fetch` ask the remotes first, for whether a layer is tagged yet. Every option of a command: `gitscale help <command>`.
+For output to read, use `git scale ls --format json`, `git topic status --format json` and `git scale hash --format json`. `ls` and `hash` report what is on this machine, and `git scale ls --fetch` asks the remotes first; `git topic status` asks them itself, for whether a layer is merged or tagged yet, and `--offline` reads only this machine. Every option of a command: `gitscale help <command>`.
 
 ## Making a multi-repo change
 

@@ -367,6 +367,7 @@ never touched.
 | `git scale fetch` | Online: every store, and every artefact's image, refreshed; nothing placed |
 | The end of any other git command run with `git scale`; the [hook in a child](hooks.md#the-hook-in-a-child) | Fetch on miss |
 | `ls`, `explain` | Offline, in CI too: they show what was placed. `--fetch` goes online |
+| `git topic status`, `git topic list` | Online: whether a branch is merged or released is the remotes' to say. `--offline` reads what is here |
 | **Any placement in CI** | **Online** |
 
 **Online** fetches every store resolution reads, first. **Offline** reads only

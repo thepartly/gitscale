@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config::load_workspace;
 use crate::git::{get_artefact_status, get_repo_status, is_tree_modified, Expected, RepoStatus};
@@ -71,12 +71,14 @@ fn resolve_or_report(
 }
 
 /// `git scale ls [--fetch] [-f table|json]`.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     root: Option<&Path>,
     do_fetch: bool,
     output_format: &str,
     verbose: bool,
     no_cache: bool,
+    interactive: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
@@ -254,6 +256,59 @@ pub fn run(
             writeln!(out, "warning: {}", warning)?;
         }
         print_table(&rows, &orphans, &topic, out)?;
+        // The root is never read-only: changes made on a branch it pins are
+        // ones nobody can merge from there, so they are pointed at a topic.
+        if let crate::topic::Root::Pinned(branch) = crate::topic::root(&config, &config_root, false)
+        {
+            // Only where a topic can start: from a commit, off a remote.
+            let can_start = crate::git::resolve_ref(&config_root, "HEAD").is_some()
+                && crate::git::query(&config_root, &["remote", "get-url", "origin"]).is_some();
+            if can_start
+                && crate::git::porcelain(&config_root).is_some_and(|changes| !changes.is_empty())
+            {
+                writeln!(
+                    out,
+                    "{}",
+                    crate::output::hint(
+                        &format!(
+                            "the root has changes on {}, a pinned branch: git topic start NAME \
+                             to carry them onto a topic",
+                            branch
+                        ),
+                        crate::output::stdout()
+                    )
+                )?;
+            }
+        }
+        // Offline, a person reading the table is told when what it read from
+        // the stores is old: a merge or a release since is not in it.
+        if interactive && !do_fetch {
+            let stores: Vec<PathBuf> = resolution
+                .slots
+                .iter()
+                .filter(|slot| slot.form() == Form::Source)
+                .filter_map(|slot| {
+                    let path = sources
+                        .stores
+                        .as_ref()?
+                        .repo_path(&crate::ci::remote_url(&slot.url));
+                    path.is_dir().then_some(path)
+                })
+                .collect();
+            if let Some(age) = crate::store::fetched_long_ago(&stores) {
+                writeln!(
+                    out,
+                    "{}",
+                    crate::output::hint(
+                        &format!(
+                            "fetched {} ago: git scale ls --fetch, or git scale fetch",
+                            age
+                        ),
+                        crate::output::stdout()
+                    )
+                )?;
+            }
+        }
     }
     Ok(())
 }

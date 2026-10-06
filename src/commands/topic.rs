@@ -396,6 +396,28 @@ fn refuse_in_ci(what: &str) -> Result<()> {
     Ok(())
 }
 
+/// Offline at a terminal, the line that says how old what was read is, when
+/// an hour or more: a merge or a release since is not in it.
+fn offline_age(ctx: &Ctx, repos: &[PathBuf], command: &str, out: &mut dyn Write) -> Result<()> {
+    if !ctx.interactive {
+        return Ok(());
+    }
+    if let Some(age) = crate::store::fetched_long_ago(repos) {
+        writeln!(
+            out,
+            "{}",
+            crate::output::hint(
+                &format!(
+                    "fetched {} ago: {} fetches first without --offline",
+                    age, command
+                ),
+                crate::output::stdout()
+            )
+        )?;
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // git topic
 // ---------------------------------------------------------------------------
@@ -1041,9 +1063,18 @@ fn merged(repo: &Path, base: &str, branch: &str) -> bool {
 }
 
 /// Whether the topic has anything merged: commits beyond `base` that it
-/// holds.
+/// holds — after a squash or a rebase — or, once `base` has every one of the
+/// branch's commits in its history, as a merge commit or a fast-forward
+/// leaves it, commits of its own since the branch was created. `branch` is a
+/// branch's ref, whose reflog says where it was created.
 fn merged_with_work(repo: &Path, base: &str, branch: &str) -> bool {
-    count(repo, &["rev-list", branch, &format!("^{}", base)]) > 0 && merged(repo, base, branch)
+    if count(repo, &["rev-list", branch, &format!("^{}", base)]) > 0 {
+        return merged(repo, base, branch);
+    }
+    let created = crate::git::query(repo, &["reflog", "show", "--format=%H", branch])
+        .and_then(|log| log.lines().last().map(str::to_string));
+    let tip = crate::git::query(repo, &["rev-parse", branch]);
+    matches!((created, tip), (Some(created), Some(tip)) if created != tip)
 }
 
 fn status(ctx: &Ctx, fetch: bool, format: &str, out: &mut dyn Write) -> Result<()> {
@@ -1110,7 +1141,7 @@ fn status(ctx: &Ctx, fetch: bool, format: &str, out: &mut dyn Write) -> Result<(
         (root_ahead > 0).then(|| count(&root, &["rev-list", "HEAD", "--not", "--remotes"]) == 0);
     let root_merged = base
         .as_ref()
-        .is_some_and(|b| merged_with_work(&root, b, "HEAD"));
+        .is_some_and(|b| merged_with_work(&root, b, &format!("refs/heads/{}", topic)));
     let (root_state, root_label) = if root_merged {
         (
             format!("merged into {}", default.as_deref().unwrap_or("main")),
@@ -1219,6 +1250,16 @@ fn status(ctx: &Ctx, fetch: bool, format: &str, out: &mut dyn Write) -> Result<(
             writeln!(out, "then merge: {}", next.join(", "))?;
         }
         (true, true) => {}
+    }
+    if !fetch {
+        let mut repos = vec![root.clone()];
+        repos.extend(
+            resolution
+                .topic_slots()
+                .into_iter()
+                .map(|slot| stores.repo_path(&crate::ci::remote_url(&slot.url))),
+        );
+        offline_age(ctx, &repos, "git topic status", out)?;
     }
     Ok(())
 }
@@ -1447,7 +1488,11 @@ fn list(ctx: &Ctx, fetch: bool, format: &str, out: &mut dyn Write) -> Result<()>
             ]
         })
         .collect();
-    print_list(&table, out)
+    print_list(&table, out)?;
+    if !fetch {
+        offline_age(ctx, std::slice::from_ref(&repo.dir), "git topic list", out)?;
+    }
+    Ok(())
 }
 
 /// `list`'s table: the marker column has no header and sits tight against

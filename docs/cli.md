@@ -305,7 +305,9 @@ git scale ls [GLOBAL] [--fetch] [-f, --format table|json]
 | `-f, --format <FORMAT>` | `table` (default) or `json` |
 
 The table of every checkout — see [`git scale ls`](status.md). Takes no
-directories. Resolves from what is on this machine unless `--fetch` is given —
+directories. At a terminal, when the stores it read were fetched an hour ago or
+more, a last line says so: `hint: fetched 3 h ago: git scale ls --fetch, or git
+scale fetch`. Resolves from what is on this machine unless `--fetch` is given —
 in CI, what the job's placement fetched. While no agent skill is installed, the table prints a
 [one-time hint](agents.md#the-hint) to install it.
 
@@ -334,8 +336,8 @@ git topic join [GLOBAL] --dependants [DIR...]
 git topic leave [GLOBAL] <DIR>...
 git topic start [GLOBAL] [--from BRANCH] [--worktree | --no-worktree] [--dir DIR] <NAME>
 git topic switch [GLOBAL] [--worktree | --no-worktree] [--dir DIR] <NAME>
-git topic status [GLOBAL] [--fetch] [-f, --format table|json]
-git topic list [GLOBAL] [--fetch] [-f, --format table|json]
+git topic status [GLOBAL] [--offline] [-f, --format table|json]
+git topic list [GLOBAL] [--offline] [-f, --format table|json]
 git topic finish [GLOBAL] [--force] [NAME]
 ```
 
@@ -356,7 +358,7 @@ git topic finish [GLOBAL] [--force] [NAME]
 | `--from <BRANCH>` | `start` | Start from this branch; from a topic, its joined checkouts come along |
 | `--worktree`, `--no-worktree` | `start`, `switch` | In a worktree of its own, or in this one. Default: git config `gitscale.topic.worktree`, else a worktree when the root is a bare repository |
 | `--dir <DIR>` | `start`, `switch` | Where a new worktree goes, from the current directory |
-| `--fetch` | `status`, `list` | Fetch the joined repositories first |
+| `--offline` | `status`, `list` | Answer from what this machine has. Without it, both fetch first — `status` the root and the joined repositories, `list` the root — since what they answer, merged or released, is the remotes'. At a terminal, an offline answer read from a fetch an hour old or more says so: `hint: fetched 3 h ago: git topic status fetches first without --offline` |
 | `-f, --format <FORMAT>` | `status`, `list` | `table` (default) or `json` |
 | `--force` | `finish` | Abandon a topic: not merged, with checkouts still on it, which go back to their pins, or with commits no remote has, which are dropped. Uncommitted changes still refuse |
 

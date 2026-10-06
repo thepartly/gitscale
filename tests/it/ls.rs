@@ -5,7 +5,7 @@ use crate::support::artefacts::entry_config;
 use crate::support::resolution::{diamond, repos};
 use crate::support::status_clean::*;
 use crate::support::workspace::*;
-use crate::support::worktrees::{fixture, gs};
+use crate::support::worktrees::{fixture, gs, ok};
 use crate::support::{redact_shas, strip_ansi, TestEnv};
 
 // ---------------------------------------------------------------------------
@@ -254,6 +254,72 @@ fn normal_033_a_topic_branch_never_pushed_is_ahead_by_what_no_remote_has() {
         (row["ahead"].clone(), row["behind"].clone()),
         (0.into(), 0.into())
     );
+}
+
+/// The root is never read-only, so changes made in it on the branch it pins
+/// are pointed at a topic; on a topic, where they belong, nothing is said.
+#[test]
+fn normal_035_changes_in_the_root_on_a_pinned_branch_are_pointed_at_a_topic() {
+    let f = fixture("ls_root_changes_pinned", "");
+    let ws = f.clone_root("ws");
+    let said = "the root has changes on main, a pinned branch: git topic start NAME";
+
+    let out = gs(&ws, &["ls"]);
+    ok(&out);
+    assert!(!out.stdout.contains(said), "{}", out.stdout);
+
+    std::fs::write(ws.join("notes.txt"), "an agent's change").unwrap();
+    let out = gs(&ws, &["ls"]);
+    ok(&out);
+    assert!(out.stdout.contains(said), "{}", out.stdout);
+
+    ok(&gs(&ws, &["topic", "start", "--no-worktree", "notes"]));
+    assert!(ws.join("notes.txt").exists(), "the change came along");
+    let out = gs(&ws, &["ls"]);
+    ok(&out);
+    assert!(
+        !out.stdout.contains("the root has changes"),
+        "{}",
+        out.stdout
+    );
+}
+
+/// Read at a terminal, `ls` says when what it read from the stores is an
+/// hour old or more, and how to refresh it; not after `--fetch`, and never
+/// off a terminal, where a script reads it.
+#[test]
+fn normal_034_at_a_terminal_ls_says_when_its_stores_were_fetched_long_ago() {
+    let f = fixture("ls_fetched_long_ago", "");
+    let ws = f.clone_root("ws");
+    let stores = ws.join(".git/gitscale/repos");
+    for store in std::fs::read_dir(&stores).unwrap() {
+        let fetch_head = store.unwrap().path().join("FETCH_HEAD");
+        let aged = std::process::Command::new("touch")
+            .args(["-d", "2 days ago", fetch_head.to_str().unwrap()])
+            .status()
+            .unwrap();
+        assert!(aged.success());
+    }
+    let at_terminal = |args: &[&str]| {
+        let mut full = vec!["gitscale", "-C", ws.to_str().unwrap()];
+        full.extend_from_slice(args);
+        gitscale::run_cli_with(&full, true)
+    };
+    let said = "fetched 2 days ago: git scale ls --fetch, or git scale fetch";
+
+    let out = at_terminal(&["ls"]);
+    ok(&out);
+    assert!(out.stdout.contains(said), "{}", out.stdout);
+    let out = gs(&ws, &["ls"]);
+    ok(&out);
+    assert!(!out.stdout.contains("fetched"), "{}", out.stdout);
+    let out = at_terminal(&["ls", "--fetch"]);
+    ok(&out);
+    assert!(!out.stdout.contains("fetched"), "{}", out.stdout);
+    // The fetch refreshed the stores: offline, there is nothing to say.
+    let out = at_terminal(&["ls"]);
+    ok(&out);
+    assert!(!out.stdout.contains("fetched"), "{}", out.stdout);
 }
 
 /// On a topic branch with an upstream, commits on either side are counted:
