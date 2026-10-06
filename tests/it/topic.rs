@@ -1008,6 +1008,61 @@ fn normal_038_topic_prints_the_branch_of_the_checkout_it_is_run_in() {
     assert_eq!(out.stdout, "feat/x@v1\n");
 }
 
+/// Off a topic, `git topic` prints nothing for a script to read, but tells a
+/// person at a terminal where they are, on stderr: on a pinned branch, on no
+/// branch, or in a checkout the topic holds at its pin.
+#[test]
+fn normal_063_off_a_topic_a_terminal_is_told_where_it_is() {
+    let env = TestEnv::new("topic_print_terminal");
+    let d = env.create_bare_repo("d", "main", &[("d.txt", "v1")]);
+    run_git_pub(&d, &["tag", "v1.0.0", "main"]);
+    let config = format!(
+        "[repos]\n\"imports/d\" = {{ url = \"{}\", revision = \"v1.0.0\", override = true }}\n",
+        d.display()
+    );
+    let root = env.create_bare_repo("root", "main", &[(".gitscale.toml", &config)]);
+    let ws = env.repos_remote.join("ws");
+    run_git_pub(
+        &env.repos_remote,
+        &["clone", "-q", root.to_str().unwrap(), ws.to_str().unwrap()],
+    );
+    ok(&gs(&ws, &["sync"]));
+    let at_terminal = |dir: &std::path::Path| {
+        let full = ["gitscale", "-C", dir.to_str().unwrap(), "topic"];
+        gitscale::run_cli_with(&full, true)
+    };
+
+    let out = at_terminal(&ws);
+    assert!(!out.success);
+    assert_eq!(out.stdout, "");
+    assert_eq!(
+        out.stderr,
+        "main is pinned, not a topic: git topic start NAME, or git topic switch NAME\n"
+    );
+
+    run_git_pub(&ws, &["switch", "-q", "--detach"]);
+    let out = at_terminal(&ws);
+    assert!(!out.success);
+    assert_eq!(out.stdout, "");
+    assert!(
+        out.stderr.starts_with("on no branch, not a topic"),
+        "{}",
+        out.stderr
+    );
+
+    // The root's override holds imports/d at its pin on any topic.
+    run_git_pub(&ws, &["switch", "-q", "-c", "feat/x"]);
+    let out = at_terminal(&ws.join("imports/d"));
+    assert!(!out.success);
+    assert_eq!(out.stdout, "");
+    assert_eq!(out.stderr, "imports/d is held at its pin, not on feat/x\n");
+
+    // A script reads stdout, and sees only the answer.
+    let out = at_terminal(&ws);
+    ok(&out);
+    assert_eq!((out.stdout.as_str(), out.stderr.as_str()), ("feat/x\n", ""));
+}
+
 /// `join` and `leave` with nothing named fail, as `git add` does; inside a
 /// checkout the hint says how to name it.
 #[test]

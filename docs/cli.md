@@ -341,7 +341,7 @@ git topic finish [GLOBAL] [--force] [NAME]
 
 | Command | Does |
 |---|---|
-| `git topic` | Print the topic branch of the checkout the current directory is in; off a topic, nothing, exit 1. Offline |
+| `git topic` | Print the topic branch of the checkout the current directory is in; off a topic, nothing, exit 1 — and, at a terminal, why on stderr: `main is pinned, not a topic: git topic start NAME, or git topic switch NAME`. Offline |
 | `join <DIR>...` | Put checkouts on the topic, from the commit each is at, writable — see [join and leave](topics.md#git-topic-join--leave) |
 | `join --dependants [DIR...]` | Join the checkouts that ask for each `DIR` below its newest release; with none, those asking for the topic's changes, one level up |
 | `leave <DIR>...` | Take them back to their pins, their topic branches deleted |

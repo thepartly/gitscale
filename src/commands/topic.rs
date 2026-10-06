@@ -78,7 +78,7 @@ pub fn run(
         interactive,
     };
     match action {
-        Action::Print => print(&ctx, out),
+        Action::Print => print(&ctx, out, err),
         Action::Join { dirs, dependants } => {
             let how = if dependants {
                 How::Dependants
@@ -401,11 +401,29 @@ fn refuse_in_ci(what: &str) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// The topic branch of the checkout the current directory is in; nothing,
-/// and exit 1, off a topic. Offline.
-fn print(ctx: &Ctx, out: &mut dyn Write) -> Result<()> {
+/// and exit 1, off a topic. Offline. A person at a terminal is told where
+/// they are instead, on stderr: stdout stays what `$(git topic)` reads.
+fn print(ctx: &Ctx, out: &mut dyn Write, err: &mut dyn Write) -> Result<()> {
     let (config, root) = crate::config::load_workspace(ctx.start)?;
-    let Root::Topic(topic) = crate::topic::root(&config, &root, false) else {
-        return Err(crate::reported());
+    let mut no_topic = |why: &str| -> Result<()> {
+        if ctx.interactive {
+            writeln!(err, "{}", why)?;
+        }
+        Err(crate::reported())
+    };
+    let topic = match crate::topic::root(&config, &root, false) {
+        Root::Topic(topic) => topic,
+        Root::Pinned(branch) => {
+            return no_topic(&format!(
+                "{} is pinned, not a topic: git topic start NAME, or git topic switch NAME",
+                branch
+            ))
+        }
+        Root::Detached => {
+            return no_topic(
+                "on no branch, not a topic: git topic start NAME, or git topic switch NAME",
+            )
+        }
     };
     let here = Here::new(ctx.start, &root)?;
     if here.cwd != here.root {
@@ -416,7 +434,10 @@ fn print(ctx: &Ctx, out: &mut dyn Write) -> Result<()> {
             if let Some((slot, _)) = here.enclosing(&resolution) {
                 // A slot held at its pin has no branch of the topic.
                 let Some(branch) = &slot.branch else {
-                    return Err(crate::reported());
+                    return no_topic(&format!(
+                        "{} is held at its pin, not on {}",
+                        slot.directory, topic
+                    ));
                 };
                 writeln!(out, "{}", branch)?;
                 return Ok(());

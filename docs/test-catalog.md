@@ -2,7 +2,7 @@
 
 Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Regenerate with `GITSCALE_UPDATE_CATALOG=1 cargo test --test it catalog::`. The naming rules are in [testing.md](testing.md).
 
-644 integration tests (277 normal, 205 edge, 144 error, 18 perf), 44 of them ignored; 168 unit tests.
+645 integration tests (278 normal, 205 edge, 144 error, 18 perf), 44 of them ignored; 168 unit tests.
 
 | Feature | normal | edge | error | perf | total |
 |---|---:|---:|---:|---:|---:|
@@ -33,7 +33,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | [skill](#skill) | 5 | 5 | 3 | 0 | 13 |
 | [stores](#stores) | 3 | 10 | 2 | 1 | 16 |
 | [sync](#sync) | 5 | 7 | 0 | 1 | 13 |
-| [topic](#topic) | 33 | 17 | 12 | 0 | 62 |
+| [topic](#topic) | 34 | 17 | 12 | 0 | 63 |
 | [upgrade](#upgrade) | 12 | 9 | 5 | 0 | 26 |
 | [workspace](#workspace) | 2 | 1 | 1 | 0 | 4 |
 
@@ -792,6 +792,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | topic-060 | edge | `edge_060_a_worktree_deleted_by_hand_comes_back_with_switch` | A topic's worktree deleted by hand: `list` shows the topic with no worktree, and `switch` makes it again, the joined checkout back on its branch with the commit no remote has. |
 | topic-061 | normal | `normal_061_join_dependants_of_a_dependency_joins_those_asking_for_less` | `git topic join --dependants <dir>` joins the checkouts whose configs ask for less than the dependency's newest release — how a raise begins — and leaves those already asking for it. |
 | topic-062 | normal | `normal_062_join_dependants_climbs_one_level_from_the_topics_changes` | `git topic join --dependants` alone climbs one level from the topic's changes: the dependants of each checkout carrying one — commits on the topic, or uncommitted work — while none of them is on the topic. One taken off stays off, a checkout joined with nothing to carry is not climbed from, and the root is never joined. |
+| topic-063 | normal | `normal_063_off_a_topic_a_terminal_is_told_where_it_is` | Off a topic, `git topic` prints nothing for a script to read, but tells a person at a terminal where they are, on stderr: on a pinned branch, on no branch, or in a checkout the topic holds at its pin. |
 
 ### upgrade
 

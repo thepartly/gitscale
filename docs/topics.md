@@ -78,7 +78,7 @@ merges, and `git topic finish` ends the topic.
 | `git topic start <name>` | Begin a topic: a new branch of the root from the remote's default branch (`origin/main`, fetched first) — or a worktree of its own |
 | `git topic start --from <branch> <name>` | From another branch; from a topic, the checkouts joined to it come along |
 | `git topic switch <name>` | Go to an existing branch of the root: one of yours, a colleague's on the remote — tracking it — or a pinned one (`main`) |
-| `git topic` | Print the topic of the checkout the current directory is in; nothing, exit 1, off a topic |
+| `git topic` | Print the topic of the checkout the current directory is in; nothing, exit 1, off a topic — at a terminal, it says on stderr where you are instead |
 | `git topic list` | Every topic — each local branch the root does not pin, and the branch of each of its worktrees, `main` included — with its worktree, its joined checkouts, and `new` (nothing on it yet), `N not pushed`, `pushed` or `merged`; `-` for a pinned branch |
 | `git topic finish [<name>]` | End a merged topic; `--force` abandons one |
 
