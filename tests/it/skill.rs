@@ -81,7 +81,7 @@ fn normal_002_the_hint_shows_once_for_every_worktree_of_a_root() {
     assert!(gitscale::skill::hint(&user, &root, &mut err));
     assert_eq!(
         String::from_utf8(err).unwrap(),
-        "tip: gitscale skill install teaches coding agents this workflow\n"
+        "hint: git scale skill install teaches coding agents this workflow\n"
     );
     assert!(root.join(".git/gitscale/skill-hint").is_file());
 
@@ -162,8 +162,10 @@ fn normal_010_an_interactive_ls_table_hints_once() {
 
     let (ok, printed) = interactive(&user, &root, &["ls"], &[]);
     assert!(ok, "{}", printed);
+    // A hint line like the others: on a terminal, its word coloured.
     assert!(
-        printed.contains("tip: gitscale skill install teaches coding agents this workflow"),
+        printed.lines().any(|l| l.contains("hint:")
+            && l.ends_with(" git scale skill install teaches coding agents this workflow")),
         "{}",
         printed
     );
@@ -171,7 +173,7 @@ fn normal_010_an_interactive_ls_table_hints_once() {
     for dir in [&root, &second] {
         let (ok, printed) = interactive(&user, dir, &["ls"], &[]);
         assert!(ok, "{}", printed);
-        assert!(!printed.contains("tip:"), "{}", printed);
+        assert!(!printed.contains("skill install teaches"), "{}", printed);
     }
     assert!(!user.join(".agents").exists(), "the hint installs nothing");
     let _ = fs::remove_dir_all(&base);
@@ -203,7 +205,12 @@ fn edge_005_sync_and_ls_stay_quiet_when_nobody_is_watching() {
             .output()
             .unwrap();
         let err = String::from_utf8_lossy(&output.stderr);
-        assert!(!err.contains("tip:"), "{:?}: {}", args, err);
+        assert!(
+            !err.contains("skill install teaches"),
+            "{:?}: {}",
+            args,
+            err
+        );
     }
     assert!(!root.join(".git/gitscale/skill-hint").exists());
     let _ = fs::remove_dir_all(&base);
@@ -250,10 +257,10 @@ fn edge_011_no_hint_for_json_in_ci_or_after_a_failure() {
 
     let (ok, printed) = interactive(&user, &root, &["ls", "--format", "json"], &[]);
     assert!(ok, "{}", printed);
-    assert!(!printed.contains("tip:"), "{}", printed);
+    assert!(!printed.contains("skill install teaches"), "{}", printed);
     let (ok, printed) = interactive(&user, &root, &["ls"], &[("CI", "true")]);
     assert!(ok, "{}", printed);
-    assert!(!printed.contains("tip:"), "{}", printed);
+    assert!(!printed.contains("skill install teaches"), "{}", printed);
 
     fs::write(
         root.join(".gitscale.toml"),
@@ -262,7 +269,7 @@ fn edge_011_no_hint_for_json_in_ci_or_after_a_failure() {
     .unwrap();
     let (ok, printed) = interactive(&user, &root, &["sync"], &[]);
     assert!(!ok, "{}", printed);
-    assert!(!printed.contains("tip:"), "{}", printed);
+    assert!(!printed.contains("skill install teaches"), "{}", printed);
     assert!(!marker.exists());
     let _ = fs::remove_dir_all(&base);
 }

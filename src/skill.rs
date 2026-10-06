@@ -239,7 +239,11 @@ pub fn hint(home: &Path, root: &Path, err: &mut dyn Write) -> bool {
     if shown {
         let _ = writeln!(
             err,
-            "tip: gitscale skill install teaches coding agents this workflow"
+            "{}",
+            crate::output::hint(
+                "git scale skill install teaches coding agents this workflow",
+                crate::output::stderr()
+            )
         );
     }
     shown

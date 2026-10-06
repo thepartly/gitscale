@@ -67,7 +67,7 @@ While no skill is installed at either path, `git scale sync` and the
 `git scale ls` table print one line to stderr:
 
 ```
-tip: gitscale skill install teaches coding agents this workflow
+hint: git scale skill install teaches coding agents this workflow
 ```
 
 It shows once per root: a `skill-hint` file in the root's common git dir
