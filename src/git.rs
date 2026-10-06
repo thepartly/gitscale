@@ -49,11 +49,65 @@ pub(crate) fn git_command() -> Command {
     cmd
 }
 
+/// Whether a person ran this command, at a terminal, and may answer a
+/// credential prompt — set once, as it starts: see [`set_watched`].
+static WATCHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record whether someone is watching this run. Watched, every git call
+/// gitscale makes keeps the user's askpass helpers, so it authenticates as
+/// their own `git` in that terminal would — an editor's credential prompt
+/// included. Unwatched — a git hook, CI, a run with no terminal — no helper
+/// may ask, and what needs a credential git does not have fails rather than
+/// waits.
+pub fn set_watched(watched: bool) {
+    WATCHED.store(watched, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub(crate) fn run_git(
     args: &[&str],
     cwd: Option<&Path>,
     check: bool,
 ) -> Result<std::process::Output> {
+    run(
+        args,
+        cwd,
+        check,
+        WATCHED.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+/// [`run_git`] for a remote write the user's own command makes — `upgrade`
+/// deleting a promoted branch: the user's askpass helpers are kept, watched
+/// or not, so an HTTPS remote can be written as their own `git push` would.
+/// Never from a hook: nobody may be there to answer.
+pub(crate) fn run_git_as_user(
+    args: &[&str],
+    cwd: Option<&Path>,
+    check: bool,
+) -> Result<std::process::Output> {
+    run(args, cwd, check, true)
+}
+
+fn run(
+    args: &[&str],
+    cwd: Option<&Path>,
+    check: bool,
+    askpass: bool,
+) -> Result<std::process::Output> {
+    let mut cmd = prepared(args, cwd, askpass);
+    let output = cmd
+        .output()
+        .with_context(|| format!("failed to run: git {}", args.join(" ")))?;
+    if check && !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("{}", git_failure(&stderr, ci::active()));
+    }
+    Ok(output)
+}
+
+/// The git command [`run`] runs. Without `askpass`, no helper may ask for a
+/// credential either: a run nobody watches must fail rather than wait.
+fn prepared(args: &[&str], cwd: Option<&Path>, askpass: bool) -> Command {
     let mut cmd = git_command();
     // Under CI, teach git how to authenticate to the CI server. Scoped to that
     // one host, and carrying the name of the token variable rather than the
@@ -68,20 +122,15 @@ pub(crate) fn run_git(
     // can tell re-entry from a genuine user operation and bail out. Without
     // it, a hook that places the workspace recurses without bound.
     cmd.env("GITSCALE_HOOK", "1");
-    cmd.env("GIT_ASKPASS", "");
-    cmd.env("SSH_ASKPASS", "");
-    cmd.env("SSH_ASKPASS_REQUIRE", "never");
+    if !askpass {
+        cmd.env("GIT_ASKPASS", "");
+        cmd.env("SSH_ASKPASS", "");
+        cmd.env("SSH_ASKPASS_REQUIRE", "never");
+    }
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
-    let output = cmd
-        .output()
-        .with_context(|| format!("failed to run: git {}", args.join(" ")))?;
-    if check && !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("{}", git_failure(&stderr, ci::active()));
-    }
-    Ok(output)
+    cmd
 }
 
 /// [`run_git`] with `input` on stdin, never checked: the caller reads the
@@ -1176,9 +1225,38 @@ pub fn get_artefact_status(entry: &RepoEntry, root: &Path) -> RepoStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::{git_error_line, git_failure, version_at_least};
+    use super::{git_error_line, git_failure, prepared, version_at_least};
     use crate::ci::CiAuth;
     use std::collections::HashMap;
+
+    /// A run nobody may be watching blanks every askpass helper; a remote
+    /// write the user's own command makes keeps theirs.
+    #[test]
+    fn only_the_users_own_writes_keep_their_askpass_helpers() {
+        let envs = |askpass| -> Vec<(String, Option<String>)> {
+            prepared(&["push"], None, askpass)
+                .get_envs()
+                .map(|(k, v)| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.map(|v| v.to_string_lossy().into_owned()),
+                    )
+                })
+                .collect()
+        };
+        let blank = |var: &str| (var.to_string(), Some(String::new()));
+        let quiet = envs(false);
+        assert!(quiet.contains(&blank("GIT_ASKPASS")));
+        assert!(quiet.contains(&blank("SSH_ASKPASS")));
+        let user = envs(true);
+        assert!(!user
+            .iter()
+            .any(|(k, _)| k == "GIT_ASKPASS" || k == "SSH_ASKPASS"));
+        // Never a terminal prompt either way: stdin is not the user's.
+        for set in [&quiet, &user] {
+            assert!(set.contains(&("GIT_TERMINAL_PROMPT".to_string(), Some("0".to_string()))));
+        }
+    }
 
     #[test]
     fn picks_fatal_line_over_leading_warning() {

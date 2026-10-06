@@ -402,10 +402,10 @@ topic PROJ-12-price-cache
   REPO           BRANCH                AHEAD  PUSHED  STATE
   .              PROJ-12-price-cache   2      no      waits on imports/core
   imports/core   PROJ-12-price-cache   3      yes     no tag
-  imports/b      PROJ-12-price-cache   1      yes     promoted → v1-2026.10.04
+  imports/b      PROJ-12-price-cache   1      yes     released as v1-2026.10.04
 
-next to merge: imports/core
-then: git upgrade --commit, git scale push
+next: git upgrade --commit, git scale push
+then merge: imports/core
 ```
 
 - `BRANCH`: the slot's topic branch — per-major slots differ.
@@ -416,10 +416,12 @@ then: git upgrade --commit, git scale push
 - `STATE`: for a checkout, its [promotion state](#promotion-git-upgrade); for
   the root, `waits on REPOS` while a joined checkout with a change is not
   promoted, else `ready to merge`, and `merged into main` once it is.
-- **Footer:** `next to merge`, as `upgrade` prints it; `then:` the next
-  commands — `git upgrade --commit` once a checkout is promoted, `git scale
-  push` when something is not pushed, `git topic finish` once the root is
-  merged and no checkout is still on the topic.
+- **Footer:** `next:` the commands to run now — `git upgrade --commit` once a
+  checkout is released, `git scale push` when something is not pushed, `git
+  topic finish` once the root is merged and no checkout is still on the topic
+  — and then `then merge:` what may merge next, as `upgrade` prints it. With
+  no command to run, `next to merge:` alone. A release comes first: promoting
+  it bumps the pins of what merges after it.
 
 Offline; `--fetch` fetches the joined repositories first. `--format json` is
 for scripts and agents. Off a topic: `not on a topic`, exit 1.
@@ -460,7 +462,7 @@ follows it too. A list that names no branch of the repository is an error.
 | `no tag` | No release holds the change | Nothing |
 | `no release contains <pin>` | No release holds the pin itself: its tag was moved, or it was cut on no release branch | Nothing; raise it explicitly with `git upgrade <dir>` |
 | `tagged <tag>, no image` | Released, but the repository publishes artefacts and the release has no image | Nothing |
-| `promoted → <tag>` | The tag holds the change | Edits the configs, then the slot leaves the topic |
+| `released as <tag>` | The tag holds the change | Edits the configs, then the slot leaves the topic. It says `promoted → <tag>`; a dry run, `would promote → <tag>` |
 | `cannot tell` | Merging conflicts: a later commit in the tag rewrote the same lines | Nothing; bump it explicitly with `git upgrade <dir>` |
 | `held (… uncommitted)` | Work no tag can hold | Nothing; commit or discard it first |
 
@@ -490,9 +492,12 @@ Error: imports/d: origin/feat/price-cache has changes v1-2026.10.01 does not hol
 
 Then each branch is deleted — only while it is still at the tip checked, so a
 push made meanwhile fails the deletion instead of being lost — and only then
-are the configs edited. A refused deletion, by permissions or a protected
-branch, fails `upgrade` with no config edited; branches already deleted stay
-deleted, since their releases hold them, and running it again continues.
+are the configs edited. The deletion is pushed as your own `git push` would
+be, with your credential helpers — an editor's prompt for an HTTPS remote
+included. A refused deletion, by permissions or a protected branch, fails
+`upgrade` with no config edited, and says git's reason; branches already
+deleted stay deleted, since their releases hold them, and running it again
+continues.
 `--dry-run` lists what it would delete.
 
 **Leaving.** The slot's local topic branch is deleted and it is checked out

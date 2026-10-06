@@ -2,7 +2,7 @@
 
 Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Regenerate with `GITSCALE_UPDATE_CATALOG=1 cargo test --test it catalog::`. The naming rules are in [testing.md](testing.md).
 
-646 integration tests (279 normal, 205 edge, 144 error, 18 perf), 44 of them ignored; 168 unit tests.
+646 integration tests (279 normal, 205 edge, 144 error, 18 perf), 44 of them ignored; 170 unit tests.
 
 | Feature | normal | edge | error | perf | total |
 |---|---:|---:|---:|---:|---:|
@@ -921,6 +921,7 @@ In `#[cfg(test)]` modules beside the code, by source file.
 
 ### src/git.rs
 
+- `only_the_users_own_writes_keep_their_askpass_helpers` — A run nobody may be watching blanks every askpass helper; a remote write the user's own command makes keeps theirs.
 - `picks_fatal_line_over_leading_warning`
 - `falls_back_to_last_line_when_no_fatal_marker`
 - `git_versions_compare_by_major_and_minor`
@@ -940,6 +941,7 @@ In `#[cfg(test)]` modules beside the code, by source file.
 
 ### src/lib.rs
 
+- `only_a_person_at_a_terminal_is_watched` — A command run at a terminal is watched, so git keeps the user's askpass helpers; with no terminal, in CI, or from a git hook — which may have the terminal of the git command that fired it — it is not.
 - `every_command_the_skill_names_exists`
 - `every_doc_the_skill_links_exists`
 

@@ -154,8 +154,9 @@ all. A checkout with nothing on disk yet is only `missed`.
 ## Topics
 
 On a [topic](topics.md), the table starts with the topic's branch and what may
-merge next, and each topic row's `RESOLUTION` says how it joined, where its
-change stands and what it waits on:
+merge next — after `next: git upgrade --commit` when a checkout is released,
+which comes first — and each topic row's `RESOLUTION` says how it joined, where
+its change stands and what it waits on:
 
 ```
 topic feat/price-cache · next to merge: imports/d
@@ -170,7 +171,7 @@ topic feat/price-cache · next to merge: imports/d
 | `topic, from remote` | Its remote has the topic branch; the next placement puts it on a local branch tracking that |
 | `waits on imports/d` | Asks, directly or further down, for a topic slot that is not promoted yet |
 | `behind v1-2026.09.30 wanted by imports/c: rebase it` | The topic branch lacks a release another repository now asks for |
-| `no change yet`, `no tag`, `promoted → <tag>`, … | Where its change stands — see [promotion](topics.md#promotion-git-upgrade) |
+| `no change yet`, `no tag`, `released as <tag>`, … | Where its change stands — see [promotion](topics.md#promotion-git-upgrade) |
 
 The promotion states and `behind` need history, so they are worked out from
 the root's stores, and never in CI.
@@ -317,7 +318,7 @@ How resolution got there is in the same object, as structure only:
 | `unread` | Why the checkout's own dependencies could not be read, when they could not |
 | `untracked_links` | The planted links git sees as untracked files, relative to the checkout |
 | `source_hash` | What its own pipeline builds — see [`git scale hash`](cli.md#git-scale-hash); `null` with uncommitted changes |
-| `topic` | `null` off the topic; else `branch`, `commit`, `developed` (on a local branch, rather than only the remote's), `pin` (`revision`, `commit`, `by`: what a merge would ship) and `state` (`unchanged`, `no-tag`, `no-release`, `no-image`, `promoted`, `cannot-tell`, `held`, `unknown`) |
+| `topic` | `null` off the topic; else `branch`, `commit`, `developed` (on a local branch, rather than only the remote's), `pin` (`revision`, `commit`, `by`: what a merge would ship) and `state` (`unchanged`, `no-tag`, `no-release`, `no-image`, `released`, `cannot-tell`, `held`, `unknown`) |
 | `pinned_by` | The repository whose pinned branch holds this slot at its pin, or `null` |
 
 An artefact's object also carries what is installed and what the last

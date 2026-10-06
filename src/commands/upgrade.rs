@@ -150,7 +150,7 @@ fn promote_topic(
     }
     let promoted: BTreeSet<String> = states
         .iter()
-        .filter(|(_, s)| s.is_promoted())
+        .filter(|(_, s)| s.is_released())
         .map(|(d, _)| d.clone())
         .collect();
     let requests = promote::topic_requests(config, config_root, resolution);
@@ -159,8 +159,13 @@ fn promote_topic(
     let mut leaving = Vec::new();
     for slot in &topic {
         let state = &states[&slot.directory];
-        writeln!(out, "{}  {}", slot.directory, state.describe())?;
-        let State::Promoted(tag) = state else {
+        let said = match state {
+            State::Released(tag) if opts.dry_run => format!("would promote → {}", tag),
+            State::Released(tag) => format!("promoted → {}", tag),
+            _ => state.describe(),
+        };
+        writeln!(out, "{}  {}", slot.directory, said)?;
+        let State::Released(tag) = state else {
             continue;
         };
         // Every config of the topic that asks for this one, for less.
@@ -260,10 +265,11 @@ struct RemoteBranch {
 
 impl RemoteBranch {
     /// Delete it on its remote — only while it is still at the tip checked,
-    /// so a push made since fails the deletion instead of being lost.
+    /// so a push made since fails the deletion instead of being lost. As
+    /// the user's own `git push` would: with their credential helpers.
     fn delete(&self, stores: &Stores) -> Result<()> {
         let lease = format!("--force-with-lease=refs/heads/{}:{}", self.branch, self.tip);
-        crate::git::run_git(
+        crate::git::run_git_as_user(
             &[
                 "push",
                 "--quiet",
@@ -274,11 +280,14 @@ impl RemoteBranch {
             Some(&stores.repo_path(&self.url)),
             true,
         )
-        .with_context(|| {
-            format!(
-                "{}: cannot delete origin/{}; no config was changed. Run git upgrade again once \
-                 it can be",
-                self.dir, self.branch
+        .map_err(|e| {
+            // Git's own reason in the one message the command prints.
+            anyhow::anyhow!(
+                "{}: cannot delete origin/{} ({:#}); no config was changed. Run git upgrade \
+                 again once it can be",
+                self.dir,
+                self.branch,
+                e
             )
         })?;
         Ok(())

@@ -364,10 +364,15 @@ git config --global gitscale.topic.worktree true
 
 ### Set by GitScale for git
 
-Every git call GitScale makes runs with `GIT_TERMINAL_PROMPT=0`, an empty
-`GIT_ASKPASS` and `SSH_ASKPASS`, and `SSH_ASKPASS_REQUIRE=never`, with stdin
-closed. GitScale never prompts for credentials: a repository that needs
-credentials git does not already have fails rather than hanging.
+Every git call GitScale makes runs with `GIT_TERMINAL_PROMPT=0` and stdin
+closed: git never asks at the terminal. Run from a terminal, GitScale's git
+calls keep your `GIT_ASKPASS` and `SSH_ASKPASS`, so they authenticate as your
+own `git` in that terminal would — an editor's credential prompt included,
+such as VS Code's for HTTPS. Where nobody may be watching — a git hook, CI, a
+run with no terminal — they run with an empty `GIT_ASKPASS` and `SSH_ASKPASS`
+and `SSH_ASKPASS_REQUIRE=never`: a repository that needs credentials git does
+not already have, from a credential helper or an ssh agent, fails rather than
+hangs. The branch deletion `git upgrade` pushes keeps your helpers either way.
 
 That includes the passphrase of an ssh key: a key that has one must be loaded
 into an ssh agent (`ssh-add`). On a machine you reach over SSH, forwarding the

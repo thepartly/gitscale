@@ -1092,7 +1092,7 @@ fn status(ctx: &Ctx, fetch: bool, format: &str, out: &mut dyn Write) -> Result<(
     // A child with nothing to release holds nothing up either.
     let promoted: BTreeSet<String> = states
         .iter()
-        .filter(|(_, s)| s.is_promoted() || **s == State::Unchanged)
+        .filter(|(_, s)| s.is_released() || **s == State::Unchanged)
         .map(|(d, _)| d.clone())
         .collect();
     let waiting: Vec<String> = states
@@ -1139,8 +1139,10 @@ fn status(ctx: &Ctx, fetch: bool, format: &str, out: &mut dyn Write) -> Result<(
     } else {
         crate::promote::next_to_merge(&requests, &promoted)
     };
+    // Commands to run now: a release waiting to be promoted comes before any
+    // merge, which the promotion's pin bumps change.
     let mut then = Vec::new();
-    if states.values().any(State::is_promoted) {
+    if states.values().any(State::is_released) {
         then.push("git upgrade --commit");
     }
     if rows.iter().any(|r| r.pushed == Some(false)) {
@@ -1209,11 +1211,14 @@ fn status(ctx: &Ctx, fetch: bool, format: &str, out: &mut dyn Write) -> Result<(
     if !next.is_empty() || !then.is_empty() {
         writeln!(out)?;
     }
-    if !next.is_empty() {
-        writeln!(out, "next to merge: {}", next.join(", "))?;
-    }
-    if !then.is_empty() {
-        writeln!(out, "then: {}", then.join(", "))?;
+    match (then.is_empty(), next.is_empty()) {
+        (true, false) => writeln!(out, "next to merge: {}", next.join(", "))?,
+        (false, true) => writeln!(out, "next: {}", then.join(", "))?,
+        (false, false) => {
+            writeln!(out, "next: {}", then.join(", "))?;
+            writeln!(out, "then merge: {}", next.join(", "))?;
+        }
+        (true, true) => {}
     }
     Ok(())
 }

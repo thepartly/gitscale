@@ -314,7 +314,7 @@ fn topic_view(
     }
     let promoted: std::collections::BTreeSet<String> = states
         .iter()
-        .filter(|(_, s)| s.is_promoted())
+        .filter(|(_, s)| s.is_released())
         .map(|(d, _)| d.clone())
         .collect();
     let requests = crate::promote::topic_requests(config, config_root, resolution);
@@ -785,15 +785,22 @@ fn print_table(
         return Ok(());
     }
     if let Some(branch) = &topic.branch {
-        if topic.next.is_empty() {
-            writeln!(out, "topic {}", branch)?;
-        } else {
-            writeln!(
+        let upgrade = topic.states.values().any(State::is_released);
+        match (upgrade, topic.next.is_empty()) {
+            (false, true) => writeln!(out, "topic {}", branch)?,
+            (false, false) => writeln!(
                 out,
                 "topic {} · next to merge: {}",
                 branch,
                 topic.next.join(", ")
-            )?;
+            )?,
+            (true, true) => writeln!(out, "topic {} · next: git upgrade --commit", branch)?,
+            (true, false) => writeln!(
+                out,
+                "topic {} · next: git upgrade --commit, then merge: {}",
+                branch,
+                topic.next.join(", ")
+            )?,
         }
     }
 

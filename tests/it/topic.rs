@@ -1515,13 +1515,10 @@ fn normal_050_status_says_what_each_joined_repository_still_needs() {
         "{}",
         out.stdout
     );
+    // What to run comes first: the branch is pushed before it is merged.
     assert!(
-        out.stdout.contains("next to merge: imports/core"),
-        "{}",
         out.stdout
-    );
-    assert!(
-        out.stdout.contains("then: git scale push"),
+            .contains("next: git scale push\nthen merge: imports/core\n"),
         "{}",
         out.stdout
     );
@@ -1533,7 +1530,7 @@ fn normal_050_status_says_what_each_joined_repository_still_needs() {
     let out = gs(&ws, &["topic", "status", "--fetch"]);
     ok(&out);
     assert!(
-        row(&out.stdout, "imports/core").ends_with("promoted → v1.1.0"),
+        row(&out.stdout, "imports/core").ends_with("released as v1.1.0"),
         "{}",
         out.stdout
     );
@@ -1542,8 +1539,19 @@ fn normal_050_status_says_what_each_joined_repository_still_needs() {
         "{}",
         out.stdout
     );
+    // The promotion is the next step: nothing is left to merge before it.
     assert!(
-        out.stdout.contains("then: git upgrade --commit"),
+        out.stdout.contains("\nnext: git upgrade --commit"),
+        "{}",
+        out.stdout
+    );
+    assert!(!out.stdout.contains("next to merge"), "{}", out.stdout);
+    // `ls` says the same in its first line.
+    let out = gs(&ws, &["ls"]);
+    ok(&out);
+    assert_eq!(
+        out.stdout.lines().next(),
+        Some("topic feat · next: git upgrade --commit, then merge: ."),
         "{}",
         out.stdout
     );
@@ -1553,7 +1561,7 @@ fn normal_050_status_says_what_each_joined_repository_still_needs() {
     let json: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
     assert_eq!(json["topic"], "feat");
     assert_eq!(json["repos"][1]["repo"], "imports/core");
-    assert_eq!(json["repos"][1]["state"], "promoted");
+    assert_eq!(json["repos"][1]["state"], "released");
     assert_eq!(json["repos"][1]["pushed"], true);
 }
 

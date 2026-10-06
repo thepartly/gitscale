@@ -272,7 +272,7 @@ fn normal_012_a_dry_run_promotion_changes_nothing_and_the_real_one_deletes_the_r
     let out = gs(&ws, &["upgrade", "--dry-run"]);
     ok(&out);
     for expected in [
-        "imports/core  promoted → v1.1.0",
+        "imports/core  would promote → v1.1.0",
         "imports/core  v1.0.0 → v1.1.0",
         "imports/core: would delete origin/feat/x",
         "(dry run: nothing changed)",
@@ -761,9 +761,15 @@ fn error_024_a_refused_deletion_changes_no_config_and_a_second_run_completes() {
 
     let out = gs(&ws, &["upgrade", "--commit"]);
     assert!(!out.success, "{}", out.stdout);
+    // Git's own reason is in the message, not dropped.
     assert!(
         out.stderr
-            .contains("imports/core: cannot delete origin/feat/x; no config was changed"),
+            .contains("imports/core: cannot delete origin/feat/x (error: failed to push"),
+        "{}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("; no config was changed"),
         "{}",
         out.stderr
     );
@@ -895,7 +901,7 @@ fn normal_027_promotion_takes_the_newest_release_that_holds_the_change() {
     let out = gs(&ws, &["upgrade", "--dry-run"]);
     ok(&out);
     assert!(
-        out.stdout.contains("imports/core  promoted → v1.1.0"),
+        out.stdout.contains("imports/core  would promote → v1.1.0"),
         "{}",
         out.stdout
     );
@@ -1032,7 +1038,7 @@ fn normal_031_promotion_waits_for_the_image_of_a_repository_that_publishes_one()
     let out = gs(&ws, &["upgrade", "--dry-run"]);
     ok(&out);
     assert!(
-        out.stdout.contains("imports/core  promoted → v1.1.0"),
+        out.stdout.contains("imports/core  would promote → v1.1.0"),
         "{}",
         out.stdout
     );

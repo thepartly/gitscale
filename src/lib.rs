@@ -550,6 +550,13 @@ pub fn run_cli_with(args: &[&str], interactive: bool) -> CliOutput {
     }
 }
 
+/// Whether a person is watching this run: at a terminal, and neither in CI
+/// nor run by a git hook — which may inherit the terminal of the git command
+/// that fired it, with nobody expecting a prompt.
+fn watched(io: Io, ci: bool, hook: bool) -> bool {
+    (io.interactive || io.streams.stdout_tty || io.streams.stderr_tty) && !ci && !hook
+}
+
 fn run_args(args: Vec<OsString>, io: Io, out: &mut dyn Write, err: &mut dyn Write) -> bool {
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
@@ -565,6 +572,11 @@ fn run_args(args: Vec<OsString>, io: Io, out: &mut dyn Write, err: &mut dyn Writ
         }
     };
     output::init(cli.color, io.streams);
+    git::set_watched(watched(
+        io,
+        git::is_ci(),
+        std::env::var_os("GITSCALE_HOOK").is_some_and(|v| !v.is_empty()),
+    ));
     match run_cli_inner(cli, io, out, err) {
         Ok(()) => true,
         Err(e) if e.is::<Reported>() => false,
@@ -871,6 +883,25 @@ fn worktree_choice(worktree: bool, no_worktree: bool) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A command run at a terminal is watched, so git keeps the user's
+    /// askpass helpers; with no terminal, in CI, or from a git hook — which
+    /// may have the terminal of the git command that fired it — it is not.
+    #[test]
+    fn only_a_person_at_a_terminal_is_watched() {
+        let io = |stderr_tty| Io {
+            interactive: false,
+            inherit: true,
+            streams: output::Streams {
+                stdout_tty: false,
+                stderr_tty,
+            },
+        };
+        assert!(watched(io(true), false, false));
+        assert!(!watched(io(false), false, false));
+        assert!(!watched(io(true), true, false), "in CI");
+        assert!(!watched(io(true), false, true), "from a git hook");
+    }
 
     /// Each GitScale command line in the skill — `git scale …`, `git topic
     /// …`, `git upgrade …`, `git explain …`, `gitscale …` — as the words that

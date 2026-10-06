@@ -257,8 +257,9 @@ pub enum State {
     /// The tag holds the change, but the tag's commit has no image — for
     /// a repository that publishes artefacts.
     NoImage(String),
-    /// The tag holds the change: ready for `upgrade`.
-    Promoted(String),
+    /// The tag holds the change: released, waiting for `upgrade` to
+    /// promote it.
+    Released(String),
     /// Merging conflicts, so content cannot tell.
     CannotTell(String),
     /// Uncommitted work, or commits nobody has: what could be in a tag is
@@ -277,7 +278,7 @@ impl State {
             State::NoTag => "no tag".to_string(),
             State::NoRelease(pin) => format!("no release contains {}", pin),
             State::NoImage(tag) => format!("tagged {}, no image", tag),
-            State::Promoted(tag) => format!("promoted → {}", tag),
+            State::Released(tag) => format!("released as {}", tag),
             State::CannotTell(why) => format!("cannot tell ({})", why),
             State::Held(why) => format!("held ({})", why),
             State::Unknown(why) => why.clone(),
@@ -290,15 +291,15 @@ impl State {
             State::NoTag => "no-tag",
             State::NoRelease(_) => "no-release",
             State::NoImage(_) => "no-image",
-            State::Promoted(_) => "promoted",
+            State::Released(_) => "released",
             State::CannotTell(_) => "cannot-tell",
             State::Held(_) => "held",
             State::Unknown(_) => "unknown",
         }
     }
 
-    pub fn is_promoted(&self) -> bool {
-        matches!(self, State::Promoted(_))
+    pub fn is_released(&self) -> bool {
+        matches!(self, State::Released(_))
     }
 }
 
@@ -391,7 +392,7 @@ pub fn assess(
             }
         }
     }
-    State::Promoted(tag)
+    State::Released(tag)
 }
 
 /// Whether the repository in `store` publishes artefacts at `revision`: its
