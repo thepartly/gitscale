@@ -220,6 +220,42 @@ fn normal_010_a_dirty_checkout_in_the_table_and_the_json() {
     assert_eq!(row["exists"], true, "{}", row);
 }
 
+/// A topic branch never pushed has no upstream: its commits that no remote
+/// branch or tag has are its `+N` — work only this machine holds. Pushed,
+/// they are counted against the upstream again, and none is left.
+#[test]
+fn normal_033_a_topic_branch_never_pushed_is_ahead_by_what_no_remote_has() {
+    let (env, _bare, clone) = setup_commit_env("status_ahead_unpushed");
+    std::fs::write(clone.join("work.txt"), "one").unwrap();
+    assert!(env.run(&["--for", "libs/mylib", "add", "-A"]).success);
+    assert!(
+        env.run(&["--for", "libs/mylib", "commit", "-m", "one"])
+            .success
+    );
+
+    let out = env.run(&["ls", "--color", "always"]);
+    assert_eq!(
+        status_cell(&out.stdout, "libs/mylib"),
+        "+1",
+        "{}",
+        out.stdout
+    );
+    assert_eq!(icon_and_colour(&out.stdout, "libs/mylib").0, "⇑");
+    let row = json_row(&env, "libs/mylib");
+    assert_eq!(
+        (row["ahead"].clone(), row["behind"].clone()),
+        (1.into(), 0.into())
+    );
+
+    let push = env.run(&["--for", "libs/mylib", "push"]);
+    assert!(push.success, "{}{}", push.stdout, push.stderr);
+    let row = json_row(&env, "libs/mylib");
+    assert_eq!(
+        (row["ahead"].clone(), row["behind"].clone()),
+        (0.into(), 0.into())
+    );
+}
+
 /// On a topic branch with an upstream, commits on either side are counted:
 /// `+N` with `⇑`, `-N` with `⇓`, both with `⇅` — in the table and as `ahead`
 /// and `behind` in the JSON.

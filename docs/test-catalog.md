@@ -2,7 +2,7 @@
 
 Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Regenerate with `GITSCALE_UPDATE_CATALOG=1 cargo test --test it catalog::`. The naming rules are in [testing.md](testing.md).
 
-645 integration tests (278 normal, 205 edge, 144 error, 18 perf), 44 of them ignored; 168 unit tests.
+646 integration tests (279 normal, 205 edge, 144 error, 18 perf), 44 of them ignored; 168 unit tests.
 
 | Feature | normal | edge | error | perf | total |
 |---|---:|---:|---:|---:|---:|
@@ -20,7 +20,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | [hash](#hash) | 5 | 2 | 1 | 0 | 8 |
 | [hook](#hook) | 19 | 22 | 10 | 1 | 52 |
 | [links](#links) | 10 | 14 | 0 | 0 | 24 |
-| [ls](#ls) | 19 | 9 | 3 | 1 | 32 |
+| [ls](#ls) | 20 | 9 | 3 | 1 | 33 |
 | [man](#man) | 1 | 0 | 0 | 0 | 1 |
 | [network](#network) | 2 | 0 | 1 | 0 | 3 |
 | [output](#output) | 5 | 0 | 0 | 0 | 5 |
@@ -460,6 +460,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | ls-029 | normal | `normal_029_a_topic_branch_behind_the_pin_says_rebase_it` | A topic branch cut before the release the graph now pins is behind it, and the row says what to do: rebase. |
 | ls-031 | edge | `edge_031_a_shallow_checkout_behind_its_upstream_is_stale` | `stale` stands in for a behind count where a depth-1 checkout has no history to count: a shallow checkout on a branch whose upstream has moved is `stale`, with `≠` in bright red, and `"stale": true` in the JSON. gitscale's own CI checkouts are detached and so have no upstream; this puts one on a branch by hand to reach the flag. |
 | ls-032 | edge | `edge_032_a_checkout_git_cannot_read_is_not_ok` | **ignored: bug: ls reads a failed git status as clean, so a checkout git cannot read shows ok** A checkout git cannot read — its `.git` names a git directory that is gone — is not `ok`: git could not say whether it is clean, or where its HEAD is, and `ls` must not claim either. |
+| ls-033 | normal | `normal_033_a_topic_branch_never_pushed_is_ahead_by_what_no_remote_has` | A topic branch never pushed has no upstream: its commits that no remote branch or tag has are its `+N` — work only this machine holds. Pushed, they are counted against the upstream again, and none is left. |
 
 ### man
 

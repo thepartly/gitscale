@@ -961,8 +961,10 @@ pub(crate) fn head_ref(dir: &Path) -> Option<(String, bool)> {
     commit.status.success().then(|| (stdout_str(&commit), true))
 }
 
-/// Commits `dir`'s HEAD has that its upstream does not, and the reverse;
-/// `(0, 0)` without an upstream.
+/// Commits `dir`'s HEAD has that its upstream does not, and the reverse. A
+/// branch with no upstream — a topic branch not pushed yet — is ahead by the
+/// commits no remote branch or tag has: work only this machine holds.
+/// `(0, 0)` detached.
 pub(crate) fn ahead_behind(dir: &Path) -> (i32, i32) {
     let Ok(output) = run_git(
         &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
@@ -975,6 +977,20 @@ pub(crate) fn ahead_behind(dir: &Path) -> (i32, i32) {
     match counts.split_whitespace().collect::<Vec<_>>()[..] {
         [ahead, behind] if output.status.success() => {
             (ahead.parse().unwrap_or(0), behind.parse().unwrap_or(0))
+        }
+        _ if head_ref(dir).is_some_and(|(_, detached)| !detached) => {
+            let unpushed = query(
+                dir,
+                &[
+                    "rev-list",
+                    "--count",
+                    "HEAD",
+                    "--not",
+                    "--remotes",
+                    "--tags",
+                ],
+            );
+            (unpushed.and_then(|n| n.parse().ok()).unwrap_or(0), 0)
         }
         _ => (0, 0),
     }

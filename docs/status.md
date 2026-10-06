@@ -81,7 +81,7 @@ order.
 | `dirty` | The working tree has uncommitted changes (`git status --porcelain` is non-empty, untracked files included — except the links GitScale planted, which are `untracked-links`) |
 | `foreign` | Not a worktree of the root's store: a clone made by hand or by an older GitScale. Placement leaves it alone — see [stores](stores.md#checkouts-gitscale-did-not-make) |
 | `stale` | A CI checkout whose commit differs from upstream. A depth-1 checkout cannot produce an exact behind count, so this stands in for it |
-| `+N` | On a topic branch, N commits ahead of its upstream |
+| `+N` | On a topic branch, N commits ahead of its upstream — or, never pushed, N commits no remote branch or tag has |
 | `-N` | On a topic branch, N commits behind its upstream |
 | `ref-mismatch` | The checkout is not where resolution puts it: detached at another commit, or not on the topic branch. For an artefact: installed for another release than the one wanted now |
 | `missing` | Artefact only: the release wanted had no image in the registry when last fetched |
