@@ -91,6 +91,24 @@ git topic finish               # back on main, every checkout at its pin
 
 See [everyday workflow](docs/workflow.md) and [topics](docs/topics.md).
 
+## Demo
+
+[gitscale-demo](https://github.com/thepartly/gitscale-demo) is a small system
+of six repositories — a frontend, two applications, a shared library, a
+local-stack helper and the workspace root — with every dependency pinned to a
+release. Clone the root and follow its
+[`DEMO.md`](https://github.com/thepartly/gitscale-demo/blob/main/DEMO.md):
+
+```
+git clone https://github.com/thepartly/gitscale-demo.git && cd gitscale-demo
+git scale ls
+```
+
+It walks through topics across repositories, releasing a shared library to
+some of its users and not others, taking dependencies as artefacts instead of
+sources, running the stack locally from any repository, and rendering the
+deployment from what is pinned.
+
 ## Why
 
 The problems GitScale is built for:
