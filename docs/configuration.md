@@ -336,7 +336,7 @@ git config --global gitscale.topic.worktree true
 | `USER`, `USERNAME` | The name `{user}` stands for in a [`[topic] prefix`](#topic) when `gitscale.user` is not set |
 | `GITSCALE_NO_CI_AUTH` | Any non-empty value disables [CI authentication](ci-authentication.md) |
 | `GITSCALE_HOOK_ALLOW` | Set by an installed [git hook shim](hooks.md#the-hook-allowlist) to the allowlist it was installed with. Not something to set yourself |
-| `GITSCALE_HOOK` | Set by GitScale on every git call it makes, so an installed hook can tell re-entry from a genuine user operation |
+| `GITSCALE_HOOK` | Set by GitScale on every git call it makes, so an installed hook does not place the workspace again for it |
 | `CI_MERGE_REQUEST_SOURCE_BRANCH_NAME`, `CI_COMMIT_BRANCH`, `CI_DEFAULT_BRANCH`, `CI_MERGE_REQUEST_TARGET_BRANCH_NAME` | GitLab — the [topic of a pipeline](topics.md#topics-in-ci), the default branch, and the merge request's target for `check` |
 | `GITHUB_HEAD_REF`, `GITHUB_REF_NAME`, `GITHUB_REF_TYPE`, `GITHUB_BASE_REF`, `GITHUB_EVENT_PATH` | GitHub — the same |
 | `GITLAB_CI` | `true` makes a hook-triggered placement check that the runner's post-checkout clean keeps the declared checkouts, and [fail if it would not](hooks.md#git-hooks-in-ci) |

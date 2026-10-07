@@ -633,10 +633,10 @@ git scale hook <install|uninstall|status|run> [GLOBAL] [OPTIONS]
 
 | Subcommand | Purpose |
 |---|---|
-| `install` | Install the `post-checkout` and `post-merge` hooks, and the [man pages](#man-pages) |
+| `install` | Install the `post-checkout` and `post-merge` hooks, those `--hooks` names, and the [man pages](#man-pages) |
 | `uninstall` | Remove the hooks, restoring any hook that was displaced |
 | `status` | Where hooks are installed, what they allow, and what shadows them |
-| `run <NAME>` | Place the workspace for a git hook. Invoked by the installed hook, not by you |
+| `run <NAME>` | Run a git hook: the repository's own, git-lfs, `.githooks/` and the placement. Invoked by the installed hook, not by you |
 
 | Option | Subcommand | Meaning |
 |---|---|---|
@@ -644,15 +644,20 @@ git scale hook <install|uninstall|status|run> [GLOBAL] [OPTIONS]
 | `--global` | `install`, `uninstall` | The current user (`~/.gitconfig`) |
 | `--system` | `install`, `uninstall` | Every user on this machine (`/etc/gitconfig`) |
 | `--force` | `install` | Replace an existing `core.hooksPath` or an already-displaced hook |
-| `--allow <PATTERNS>` | `install` | Comma-separated glob patterns naming the repositories whose `.gitscale.toml` `[hooks]` commands this hook may run, matched against `host/owner/repo`. **Required for `--global` and `--system`**; use `'*'` to allow every repository |
-| `--child <PATH>` | `run` | The hook fired in this child: placement leaves it where git put it |
+| `--hooks <HOOKS>` | `install` | Hooks to install besides `post-checkout` and `post-merge`: comma-separated hook names, `lfs` for git-lfs's hooks, `all` for every one. With `--global` or `--system` no other hook runs in any repository. Re-installing without it keeps the hooks installed before |
+| `--allow <PATTERNS>` | `install` | Comma-separated glob patterns naming the repositories whose `.githooks/` and `.gitscale.toml` `[hooks]` commands this hook may run, matched against `host/owner/repo`. **Required for `--global` and `--system`**; use `'*'` to allow every repository |
+| `--shim <PATH>` | `run` | The installed hook that ran this, beside which a displaced hook is found |
+| `--scope <SCOPE>` | `run` | The scope the hook was installed at: `local`, `global` or `system` |
+| `-- <ARGS>…` | `run` | git's arguments to the hook |
+| `--child <PATH>` | `run` | The hook fired in this child: placement leaves it where git put it. Passed by hooks an earlier GitScale installed |
 
-The scope flags are mutually exclusive. See [hooks](hooks.md#git-hooks), the
+The scope flags are mutually exclusive. See [hooks](hooks.md#git-hooks),
+[what a hook runs](hooks.md#what-a-hook-runs), the
 [hook allowlist](hooks.md#the-hook-allowlist) and
 [the hook in a child](hooks.md#the-hook-in-a-child).
 
 ```
-git scale hook install --global --allow 'github.com/acme/*'
+git scale hook install --global --allow 'github.com/acme/*' --hooks pre-commit,lfs
 git scale hook install --system --allow 'github.com/acme/*,git.internal.example/*'
 git scale hook status
 git scale hook uninstall --local

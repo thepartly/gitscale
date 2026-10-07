@@ -438,6 +438,13 @@ enum HookAction {
         /// --global and --system; use '*' to allow every repository.
         #[arg(long, value_name = "PATTERNS")]
         allow: Option<String>,
+        /// Hooks to install besides post-checkout and post-merge, which are
+        /// always installed: comma-separated hook names, `lfs` for git-lfs's
+        /// hooks, `all` for every one. With a --global or --system install no
+        /// other hook runs in any repository. Re-installing without it keeps
+        /// the hooks installed before.
+        #[arg(long, value_name = "HOOKS")]
+        hooks: Option<String>,
     },
     /// Remove gitscale's git hooks
     Uninstall {
@@ -450,12 +457,23 @@ enum HookAction {
     },
     /// Show where hooks are installed and whether anything shadows them
     Status,
-    /// Place the workspace for a git hook (invoked by the installed hook)
+    /// Run a git hook: the repository's own, git-lfs, .githooks/ and the
+    /// placement (invoked by the installed hook)
     Run {
         name: String,
-        /// The hook fired in this child: placement leaves it where git put it
+        /// The hook fired in this child: placement leaves it where git put it.
+        /// Passed by hooks an earlier gitscale installed
         #[arg(long, value_name = "PATH")]
         child: Option<PathBuf>,
+        /// The installed hook that ran this; git's arguments follow `--`
+        #[arg(long, value_name = "PATH", requires = "scope")]
+        shim: Option<PathBuf>,
+        /// The scope the hook was installed at: local, global or system
+        #[arg(long, value_name = "SCOPE", requires = "shim")]
+        scope: Option<String>,
+        /// git's arguments to the hook
+        #[arg(last = true, value_name = "ARGS")]
+        args: Vec<OsString>,
     },
 }
 
@@ -524,13 +542,9 @@ pub fn main(insert: Option<&str>) -> i32 {
         inherit: true,
         streams,
     };
-    let success = run_args(args, io, &mut std::io::stdout(), &mut std::io::stderr());
+    let code = run_args(args, io, &mut std::io::stdout(), &mut std::io::stderr());
     let _ = std::io::stdout().flush();
-    if success {
-        0
-    } else {
-        1
-    }
+    code
 }
 
 pub fn run_cli(args: &[&str]) -> CliOutput {
@@ -551,11 +565,11 @@ pub fn run_cli_with(args: &[&str], interactive: bool) -> CliOutput {
         streams: output::Streams::default(),
     };
     let args: Vec<OsString> = args.iter().map(OsString::from).collect();
-    let success = run_args(args, io, &mut stdout_buf, &mut stderr_buf);
+    let code = run_args(args, io, &mut stdout_buf, &mut stderr_buf);
     CliOutput {
         stdout: String::from_utf8_lossy(&stdout_buf).into_owned(),
         stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
-        success,
+        success: code == 0,
     }
 }
 
@@ -566,7 +580,8 @@ fn watched(io: Io, ci: bool, hook: bool) -> bool {
     (io.interactive || io.streams.stdout_tty || io.streams.stderr_tty) && !ci && !hook
 }
 
-fn run_args(args: Vec<OsString>, io: Io, out: &mut dyn Write, err: &mut dyn Write) -> bool {
+/// Run a command line: the process's exit status.
+fn run_args(args: Vec<OsString>, io: Io, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(e) => {
@@ -574,35 +589,50 @@ fn run_args(args: Vec<OsString>, io: Io, out: &mut dyn Write, err: &mut dyn Writ
             let success = matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion);
             if success {
                 let _ = write!(out, "{}", e);
-            } else {
-                let _ = write!(err, "{}", e);
+                return 0;
             }
-            return success;
+            let _ = write!(err, "{}", e);
+            return 1;
         }
     };
     output::init(cli.color, io.streams);
     git::set_watched(watched(
         io,
         git::is_ci(),
-        std::env::var_os("GITSCALE_HOOK").is_some_and(|v| !v.is_empty()),
+        std::env::var_os("GITSCALE_HOOK").is_some_and(|v| !v.is_empty()) || is_hook_run(&cli),
     ));
     match run_cli_inner(cli, io, out, err) {
-        Ok(()) => true,
-        Err(e) if e.is::<Reported>() => false,
-        Err(e) => {
-            let _ = writeln!(
-                err,
-                "{} {}",
-                output::paint(output::stderr(), output::BOLD_RED, "Error:"),
-                e
-            );
-            false
-        }
+        Ok(()) => 0,
+        Err(e) if e.is::<Reported>() => 1,
+        Err(e) => match e.downcast_ref::<commands::hook::HookExit>() {
+            Some(exit) => exit.0,
+            None => {
+                let _ = writeln!(
+                    err,
+                    "{} {}",
+                    output::paint(output::stderr(), output::BOLD_RED, "Error:"),
+                    e
+                );
+                1
+            }
+        },
     }
+}
+
+/// `hook run`: started by git, for every hook in every repository, with the
+/// terminal of whatever git command fired it.
+fn is_hook_run(cli: &Cli) -> bool {
+    matches!(
+        cli.command,
+        Commands::Hook {
+            action: HookAction::Run { .. }
+        }
+    )
 }
 
 fn run_cli_inner(cli: Cli, io: Io, out: &mut dyn Write, err: &mut dyn Write) -> Result<()> {
     let is_skill = matches!(cli.command, Commands::Skill { .. });
+    let is_hook = is_hook_run(&cli);
     // Where a sync and a table may point at `skill install`.
     let hint = match &cli.command {
         Commands::Sync { .. } => true,
@@ -612,8 +642,9 @@ fn run_cli_inner(cli: Cli, io: Io, out: &mut dyn Write, err: &mut dyn Write) -> 
     let start = cli.root.clone();
 
     let result = run_command(cli, io, out, err);
-    // Only on a run somebody is watching, and never in CI.
-    if io.interactive && !git::is_ci() {
+    // Only on a run somebody is watching, never in CI, and never from a git
+    // hook, which fires on every commit.
+    if io.interactive && !git::is_ci() && !is_hook {
         // Installed man pages follow the binary; they are never created here.
         man::refresh();
         if let (Some(home), false) = (skill::home(), is_skill) {
@@ -866,11 +897,13 @@ fn run_command(cli: Cli, io: Io, out: &mut dyn Write, err: &mut dyn Write) -> Re
                 local,
                 force,
                 allow,
+                hooks,
             } => commands::hook::install(
                 hook_scope(system, global, local),
                 root,
                 force,
                 allow.as_deref(),
+                hooks.as_deref(),
                 out,
             ),
             HookAction::Uninstall {
@@ -879,16 +912,37 @@ fn run_command(cli: Cli, io: Io, out: &mut dyn Write, err: &mut dyn Write) -> Re
                 local,
             } => commands::hook::uninstall(hook_scope(system, global, local), root, out),
             HookAction::Status => commands::hook::status(root, out),
-            HookAction::Run { name, child } => commands::hook::run(
-                &name,
-                root,
-                child.as_deref(),
-                verbose,
-                no_cache,
-                interactive,
-                out,
-                err,
-            ),
+            HookAction::Run {
+                name,
+                child,
+                shim,
+                scope,
+                args,
+            } => {
+                let scope = scope
+                    .as_deref()
+                    .map(commands::hook::Scope::parse)
+                    .transpose()?;
+                let handoff = match (shim.as_deref(), scope) {
+                    (Some(shim), Some(scope)) => Some(commands::hook::Handoff {
+                        shim,
+                        scope,
+                        args: &args,
+                    }),
+                    _ => None,
+                };
+                commands::hook::run(
+                    &name,
+                    root,
+                    child.as_deref(),
+                    handoff,
+                    verbose,
+                    no_cache,
+                    interactive,
+                    out,
+                    err,
+                )
+            }
         },
     }
 }

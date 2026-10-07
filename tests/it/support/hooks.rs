@@ -196,6 +196,44 @@ pub fn point_shim_at(shim: &Path, bin: &Path) {
     std::fs::write(shim, body.join("\n") + "\n").unwrap();
 }
 
+pub use gitscale::commands::hook::HOOKS;
+
+/// Point every shim in `dir` at `bin`.
+pub fn point_shims_at(dir: &Path, bin: &Path) {
+    for hook in HOOKS {
+        let shim = dir.join(hook);
+        if shim.is_file() {
+            point_shim_at(&shim, bin);
+        }
+    }
+}
+
+/// `hook install --local` in `repo`, with `extra` arguments — every hook,
+/// unless they name `--hooks` — and every shim then pointed at the real
+/// binary: the shim hands everything to `gitscale hook run`, and an
+/// in-process install bakes in the test harness instead. Returns the
+/// directory the shims are in.
+pub fn install_local(repo: &Path, extra: &[&str]) -> PathBuf {
+    let mut args = vec!["hook", "install", "--local", "-C", repo.to_str().unwrap()];
+    args.extend_from_slice(extra);
+    if !extra.contains(&"--hooks") {
+        args.extend_from_slice(&["--hooks", "all"]);
+    }
+    let out = cli(&args);
+    assert!(out.success, "install failed: {}{}", out.stdout, out.stderr);
+    let configured = Command::new("git")
+        .args(["config", "--local", "--get", "core.hooksPath"])
+        .current_dir(repo)
+        .output()
+        .expect("failed to run git");
+    let dir = match String::from_utf8_lossy(&configured.stdout).trim() {
+        "" => hooks_dir(repo),
+        path => repo.join(path),
+    };
+    point_shims_at(&dir, Path::new(env!("CARGO_BIN_EXE_gitscale")));
+    dir
+}
+
 /// Run an installed hook script the way git would, with arguments, from `cwd`;
 /// `sentinel` is `GITSCALE_HOOK`. Returns the exit code and all output.
 pub fn run_hook_args(
@@ -215,6 +253,70 @@ pub fn run_hook_args(
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
     (out.status.code().unwrap_or(-1), text)
+}
+
+/// [`run_hook_args`] with extra environment and `stdin` fed to the hook.
+pub fn run_hook_with(
+    script: &Path,
+    cwd: &Path,
+    args: &[&str],
+    vars: &[(&str, &std::ffi::OsStr)],
+    stdin: &[u8],
+) -> (i32, String) {
+    use std::io::Write as _;
+    let mut cmd = Command::new("sh");
+    cmd.arg(script)
+        .args(args)
+        .current_dir(cwd)
+        .env_remove("GITSCALE_HOOK")
+        .env_remove(ALLOW_ENV)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    for (name, value) in vars {
+        cmd.env(name, value);
+    }
+    let mut child = cmd.spawn().expect("failed to run hook");
+    child.stdin.take().unwrap().write_all(stdin).unwrap();
+    let out = child.wait_with_output().expect("failed to run hook");
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    (out.status.code().unwrap_or(-1), text)
+}
+
+/// A stand-in for git-lfs in a directory of its own: each call appends its
+/// arguments, then whatever it was given on stdin, to the returned log.
+/// Returns that directory, to put in front of `PATH`, and the log.
+pub fn fake_lfs(dir: &Path) -> (PathBuf, PathBuf) {
+    let bin = dir.join("fake-lfs-bin");
+    let log = dir.join("fake-lfs.log");
+    write_script(
+        &bin.join("git-lfs"),
+        &format!(
+            "echo \"git-lfs $*\" >> '{log}'\ncat >> '{log}'\n",
+            log = log.display()
+        ),
+    );
+    (bin, log)
+}
+
+/// `PATH` with `dir` in front.
+pub fn path_with(dir: &Path) -> std::ffi::OsString {
+    let mut paths = vec![dir.to_path_buf()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    std::env::join_paths(paths).unwrap()
+}
+
+/// The hook git-lfs writes for `hook`.
+pub fn lfs_stock_hook(hook: &str) -> String {
+    format!(
+        "command -v git-lfs >/dev/null 2>&1 || {{ printf >&2 \"\\n%s\\n\\n\" \"This \
+         repository is configured for Git LFS but 'git-lfs' was not found on your path.\"; \
+         exit 2; }}\ngit lfs {} \"$@\"\n",
+        hook
+    )
 }
 
 /// Where `hook run` leaves word of a failed placement.

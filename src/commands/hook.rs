@@ -1,24 +1,78 @@
-//! `gitscale hook` — install gitscale as a git hook so the workspace is
-//! placed whenever a checkout or merge changes what is in a working tree:
-//! the root's, or a child's.
+//! `gitscale hook` — install gitscale as git's hooks, so the workspace is
+//! placed whenever a checkout or merge changes what is in a working tree —
+//! the root's, or a child's — and every other hook a repository relies on
+//! keeps running.
 //!
-//! Only `post-checkout` and `post-merge` are installed. Between them they
-//! cover clone, checkout/switch, CI's `fetch --depth=1` + `checkout
-//! FETCH_HEAD`, merge, `git pull` and rebase (which fires `post-checkout`
-//! too). Neither reads stdin, so chaining to a repo's own hook cannot lose a
-//! payload. `git reset --hard` fires no worktree hook at all and is therefore
-//! not covered — `git scale ls` remains the safety net there.
+//! A global or system install points `core.hooksPath` at a directory of its
+//! own, and git then looks for every hook there and nowhere else. So besides
+//! `post-checkout` and `post-merge`, which place the workspace, an install
+//! writes a shim for each hook it is asked for with `--hooks`, and each hands
+//! over to `gitscale hook run`, which runs, in order: the repository's own hook
+//! in `.git/hooks`, git-lfs, the repository's committed `.githooks/`
+//! (allowlisted), and the placement. The shim decides nothing itself, so a
+//! newer gitscale changes what a hook does without a reinstall.
+//!
+//! `post-checkout` and `post-merge` between them cover clone,
+//! checkout/switch, CI's `fetch --depth=1` + `checkout FETCH_HEAD`, merge,
+//! `git pull` and rebase (which fires `post-checkout` too). `git reset --hard`
+//! fires no worktree hook at all and is therefore not covered — `git scale ls`
+//! remains the safety net there.
 
 use anyhow::{bail, Context, Result};
+use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::config::{OnHookError, CONFIG_FILENAME};
 use crate::trust;
 
-/// The git hooks gitscale installs.
-pub const HOOKS: [&str; 2] = ["post-checkout", "post-merge"];
+/// The git hooks gitscale can install: every client-side hook git runs, but
+/// `reference-transaction` and `post-index-change`, which fire on every ref
+/// update and index write — a program started for each would be felt — and
+/// `push-to-checkout`, `fsmonitor-watchman` and the server-side hooks, which
+/// mean nothing on a developer's machine.
+pub const HOOKS: [&str; 19] = [
+    "applypatch-msg",
+    "pre-applypatch",
+    "post-applypatch",
+    "pre-commit",
+    "pre-merge-commit",
+    "prepare-commit-msg",
+    "commit-msg",
+    "post-commit",
+    "pre-rebase",
+    "post-checkout",
+    "post-merge",
+    "pre-push",
+    "post-rewrite",
+    "pre-auto-gc",
+    "sendemail-validate",
+    "p4-changelist",
+    "p4-prepare-changelist",
+    "p4-post-changelist",
+    "p4-pre-submit",
+];
+
+/// The hooks that place the workspace, which every install writes.
+const PLACING: [&str; 2] = ["post-checkout", "post-merge"];
+
+/// The hooks git-lfs installs, each of which is `git lfs <hook> "$@"`.
+const LFS_HOOKS: [&str; 4] = ["pre-push", "post-checkout", "post-commit", "post-merge"];
+
+/// The hooks git hands a payload on stdin. Every stage of one gets its own
+/// copy: the first to read it would otherwise leave the rest nothing.
+const STDIN_HOOKS: [&str; 2] = ["pre-push", "post-rewrite"];
+
+/// Where a repository commits hooks for everyone who clones it.
+pub const COMMITTED_HOOKS_DIR: &str = ".githooks";
+
+/// Whether a failure of `hook` stops the operation git is running. The rest
+/// run after the fact: every stage still runs, and the first failure is
+/// reported.
+fn can_abort(hook: &str) -> bool {
+    !(hook.starts_with("post-") || hook == "p4-post-changelist")
+}
 
 /// Where an install writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,83 +105,59 @@ impl Scope {
 
 const SHIM_MARKER: &str = "# installed by gitscale";
 
-/// Body of the installed hook. The gitscale binary, the chained hook and the
-/// allowlist are all baked in at install time: resolving them at run time would
-/// mean asking git where hooks live, and `git rev-parse --git-path hooks/<name>`
-/// honours `core.hooksPath` — which resolves right back to this shim.
+/// What a shim passes that one written before `hook run` decided everything
+/// does not: how `hook status` tells the two apart.
+const SHIM_HANDOFF: &str = " --shim ";
+
+/// Body of the installed hook. It hands everything to `gitscale hook run`,
+/// so what a hook does is the installed gitscale's to decide, and an upgrade
+/// needs no reinstall.
 ///
-/// Baking the allowlist in is also what makes it trustworthy. The shim sits in
-/// the user's config directory or in /etc, so no branch can reach it; a
-/// repository therefore cannot say anything about whether its own hooks may run.
-fn shim_source(hook: &str, binary: &Path, chain: Option<&Path>, allow: &str) -> String {
+/// The binary, the scope and the allowlist are baked in at install time.
+/// Baking the allowlist in is what makes it trustworthy: the shim sits in the
+/// user's config directory or in /etc, so no branch can reach it, and a
+/// repository therefore cannot say anything about whether its own committed
+/// hooks may run.
+///
+/// Without the binary, the shim still runs the repository's own hook — the
+/// one git would have run had `core.hooksPath` not pointed here — and says on
+/// every hook that gitscale is gone, since every repository's other hooks
+/// stopped with it.
+fn shim_source(hook: &str, binary: &Path, scope: Scope, allow: &str) -> String {
     format!(
         r#"#!/bin/sh
 {marker} — regenerate with `gitscale hook install`, do not edit.
-set -u
+#
+# What this hook does — the repository's own hook, git-lfs, .githooks/, and
+# placing a gitscale workspace — is decided by `gitscale hook run`.
 GITSCALE_BIN={binary}
-CHAIN={chain}
 HOOK={hook}
 
-# Which repositories may run the [hooks] commands in their own .gitscale.toml.
-# Comma-separated glob patterns, matched against host/owner/repo. Change it with
-# `gitscale hook install --allow ...`, never by editing this line.
+# Which repositories may run what they commit themselves: hooks in .githooks/
+# and [hooks] commands in .gitscale.toml. Comma-separated glob patterns, matched
+# against host/owner/repo. Change it with `gitscale hook install --allow ...`,
+# never by editing this line.
 ALLOW={allow}
 
-# The repository's own hook runs first and decides the exit status. A global
-# core.hooksPath replaces .git/hooks rather than adding to it, so without this
-# every repo's own hooks would silently stop running.
-RC=0
-if [ -n "$CHAIN" ] && [ -x "$CHAIN" ]; then
-    "$CHAIN" "$@" || RC=$?
-fi
-
-# Every git call gitscale makes sets this. Placement runs `git checkout`, which
-# fires this hook again; without the guard that recurses without bound.
-if [ -n "${{GITSCALE_HOOK:-}}" ]; then
-    exit $RC
-fi
-
-# post-checkout's third argument is 0 for a file checkout (`git checkout -- <path>`),
-# which moves no revision and so gives a pull nothing to do. A build restoring one
-# file must not have its sub-repositories reset and cleaned underneath it.
-if [ "$HOOK" = post-checkout ] && [ "${{3:-1}}" = 0 ]; then
-    exit $RC
-fi
-
-# A child — a checkout gitscale made, whose git common dir is one of a root's
-# stores — places the workspace it belongs to. Anything else opts in with a
-# config at its own top. Deliberately not gitscale's usual upward search: an
-# unrelated repo cloned inside a gitscale workspace would otherwise inherit the
-# parent config and trigger a placement of the whole thing.
-ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit $RC
-COMMON=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit $RC
-CHILD=
-case "$COMMON" in
-    */gitscale/repos/*.git) CHILD=1 ;;
-    *) [ -f "$ROOT/{config}" ] || exit $RC ;;
-esac
-
-# Checked only after we know this repo opted in, so repos that never asked for
-# gitscale stay completely silent while a broken install still gets reported.
 if [ ! -x "$GITSCALE_BIN" ]; then
-    echo "gitscale: $HOOK skipped — $GITSCALE_BIN not found, but $ROOT is a gitscale repository" >&2
-    exit $RC
+    echo "gitscale: $GITSCALE_BIN not found; only this repository's own $HOOK hook runs. Reinstall with \`gitscale hook install\`, or remove with \`gitscale hook uninstall\`." >&2
+    for OWN in "$0.local" "$(git rev-parse --git-common-dir 2>/dev/null)/hooks/$HOOK"; do
+        if [ -f "$OWN" ] && [ -x "$OWN" ] && ! grep -q '{marker}' "$OWN"; then
+            exec "$OWN" "$@"
+        fi
+    done
+    exit 0
 fi
 
-if [ -n "$CHILD" ]; then
-    GITSCALE_HOOK="$HOOK" {allow_env}="$ALLOW" "$GITSCALE_BIN" hook run "$HOOK" --child "$ROOT" -C "$ROOT" || RC=$?
-else
-    GITSCALE_HOOK="$HOOK" {allow_env}="$ALLOW" "$GITSCALE_BIN" hook run "$HOOK" -C "$ROOT" || RC=$?
-fi
-exit $RC
+{allow_env}="$ALLOW" exec "$GITSCALE_BIN" hook run "$HOOK"{handoff}"$0" --scope {scope} -- "$@"
 "#,
         marker = SHIM_MARKER,
         binary = sh_quote(&binary.display().to_string()),
-        chain = sh_quote(&chain.map(|p| p.display().to_string()).unwrap_or_default()),
         hook = sh_quote(hook),
         allow = sh_quote(allow),
         allow_env = trust::ALLOW_ENV,
-        config = CONFIG_FILENAME,
+        handoff = SHIM_HANDOFF,
+        scope = scope.label(),
     )
 }
 
@@ -235,8 +265,15 @@ fn gitscale_binary() -> Result<PathBuf> {
 
 fn is_shim(path: &Path) -> bool {
     std::fs::read_to_string(path)
-        .map(|s| s.contains(SHIM_MARKER))
+        .map(|s| has_marker(&s))
         .unwrap_or(false)
+}
+
+/// The marker as the line a shim starts with — not merely the text, which the
+/// shim's own fallback also holds, and which a repository's copy of a shim,
+/// its header replaced, therefore still carries.
+fn has_marker(text: &str) -> bool {
+    text.lines().any(|line| line.starts_with(SHIM_MARKER))
 }
 
 /// A hook that hands off to `gitscale hook run`, whoever wrote it: a shim of
@@ -281,6 +318,7 @@ pub fn install(
     root: Option<&Path>,
     force: bool,
     allow: Option<&str>,
+    hooks: Option<&str>,
     out: &mut dyn Write,
 ) -> Result<()> {
     let binary = gitscale_binary()?;
@@ -318,23 +356,30 @@ pub fn install(
     };
 
     let allow = resolve_allow(scope, &dir, allow)?;
+    let chosen = resolve_hooks(&dir, hooks)?;
 
     std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
 
-    for hook in HOOKS {
-        let target = dir.join(hook);
-        let mut chain: Option<PathBuf> = None;
-
-        if target.exists() && !is_shim(&target) {
-            // Somebody else's hook already lives here. Displace rather than
-            // destroy it, and have the shim call it.
-            let displaced = dir.join(format!("{}.local", hook));
-            if displaced.exists() && !force {
+    // Every displacement is checked before any is made, so a refusal leaves
+    // the directory as it was.
+    if !force {
+        for &hook in &chosen {
+            let (target, displaced) = (dir.join(hook), displaced_path(&dir, hook));
+            if target.exists() && !is_shim(&target) && displaced.exists() {
                 bail!(
                     "{} already exists; refusing to overwrite it (use --force)",
                     displaced.display()
                 );
             }
+        }
+    }
+
+    for &hook in &chosen {
+        let target = dir.join(hook);
+        if target.exists() && !is_shim(&target) {
+            // Somebody else's hook already lives here. Displace rather than
+            // destroy it; `hook run` finds it beside the shim and runs it.
+            let displaced = displaced_path(&dir, hook);
             std::fs::rename(&target, &displaced).with_context(|| {
                 format!(
                     "cannot move {} aside to {}",
@@ -348,19 +393,23 @@ pub fn install(
                 hook,
                 displaced.file_name().unwrap().to_string_lossy()
             )?;
-            chain = Some(displaced);
-        } else if target.exists() {
-            // Re-installing over our own shim: keep whatever it chained to.
-            chain = existing_chain(&target);
         }
 
-        std::fs::write(
-            &target,
-            shim_source(hook, &binary, chain.as_deref(), &allow),
-        )
-        .with_context(|| format!("cannot write {}", target.display()))?;
+        std::fs::write(&target, shim_source(hook, &binary, scope, &allow))
+            .with_context(|| format!("cannot write {}", target.display()))?;
         make_executable(&target)?;
-        writeln!(out, "  installed {}", target.display())?;
+    }
+    writeln!(
+        out,
+        "  installed {} in {}",
+        describe_hooks(&chosen),
+        dir.display()
+    )?;
+    // A hook left out of the selection is one gitscale no longer handles.
+    for hook in HOOKS.into_iter().filter(|h| !chosen.contains(h)) {
+        if remove_shim(&dir, hook, out)? {
+            writeln!(out, "  removed {}", hook)?;
+        }
     }
 
     if scope != Scope::Local {
@@ -368,6 +417,30 @@ pub fn install(
     }
 
     writeln!(out, "  allowing {}", allow)?;
+    let lfs_chosen = LFS_HOOKS.iter().all(|h| chosen.contains(h));
+    if scope != Scope::Local && chosen.len() < HOOKS.len() {
+        // git looks for every hook in this directory and nowhere else.
+        writeln!(
+            out,
+            "  no other git hook runs in any repository, its own .git/hooks included; add \
+             them with --hooks"
+        )?;
+        if lfs_binary().is_some() && !lfs_chosen {
+            writeln!(
+                out,
+                "  git-lfs is installed, but its hooks are not: add --hooks lfs, or a push \
+                 leaves the large files behind"
+            )?;
+        }
+    }
+    // git-lfs writes its own hooks wherever `core.hooksPath` points, and
+    // refuses to replace ours; `hook run` already runs it.
+    if lfs_binary().is_some() && lfs_chosen {
+        writeln!(
+            out,
+            "  git-lfs runs through these hooks; set it up with `git lfs install --skip-repo`"
+        )?;
+    }
     // `git <cmd> --help` is a man page lookup: the pages go beside the
     // binary's own share directory, where `man` finds them.
     if let Some(dir) = crate::man::write() {
@@ -399,9 +472,10 @@ fn resolve_allow(scope: Scope, dir: &Path, requested: Option<&str>) -> Result<St
     bail!(
         "--allow is required for a {} install.\n\n\
          A {} hook runs on every clone and checkout on this machine, including of a \
-         branch\nyou are only reviewing — and a branch can carry its own .gitscale.toml \
-         with a\n[hooks] command in it. --allow decides which repositories those commands \
-         may come\nfrom, as comma-separated glob patterns matched against host/owner/repo:\n\n\
+         branch\nyou are only reviewing — and a branch can carry hooks of its own, in \
+         .githooks/ or as\n[hooks] commands in .gitscale.toml. --allow decides which \
+         repositories those may come\nfrom, as comma-separated glob patterns matched against \
+         host/owner/repo:\n\n\
          \x20   gitscale hook install --{} --allow 'github.com/acme/*,git.internal.example/*'\n\n\
          Use --allow '{}' to allow every repository.",
         scope.label(),
@@ -409,6 +483,62 @@ fn resolve_allow(scope: Scope, dir: &Path, requested: Option<&str>) -> Result<St
         scope.label(),
         trust::ALLOW_ANY
     )
+}
+
+/// Decide the hooks to install, in [`HOOKS`] order: the placing hooks, and
+/// what `--hooks` names — hook names, `lfs` for git-lfs's four, `all` for
+/// every one. Re-installing without `--hooks` keeps the hooks installed
+/// before, so an upgrade neither adds nor drops one.
+fn resolve_hooks(dir: &Path, requested: Option<&str>) -> Result<Vec<&'static str>> {
+    let mut wanted: Vec<&str> = PLACING.to_vec();
+    match requested {
+        None => wanted.extend(HOOKS.iter().filter(|h| is_shim(&dir.join(h)))),
+        Some(spec) => {
+            for word in spec.split(',').map(str::trim).filter(|w| !w.is_empty()) {
+                match word {
+                    "all" => wanted.extend(HOOKS),
+                    "lfs" => wanted.extend(LFS_HOOKS),
+                    name => match HOOKS.iter().find(|h| **h == name) {
+                        Some(hook) => wanted.push(hook),
+                        None => bail!(
+                            "unknown hook '{}' in --hooks. Name any of:\n  {}\nor `lfs` for \
+                             git-lfs's hooks, or `all`.",
+                            name,
+                            HOOKS.join(", ")
+                        ),
+                    },
+                }
+            }
+        }
+    }
+    Ok(HOOKS.into_iter().filter(|h| wanted.contains(h)).collect())
+}
+
+/// The hooks `hooks` names, for one line of output.
+fn describe_hooks(hooks: &[&str]) -> String {
+    if hooks.len() == HOOKS.len() {
+        format!("all {} hooks", hooks.len())
+    } else {
+        hooks.join(", ")
+    }
+}
+
+/// Take a shim of ours out of `dir`, putting back the hook it displaced.
+/// Whether there was one to take.
+fn remove_shim(dir: &Path, hook: &str, out: &mut dyn Write) -> Result<bool> {
+    let target = dir.join(hook);
+    if !is_shim(&target) {
+        return Ok(false);
+    }
+    std::fs::remove_file(&target).with_context(|| format!("cannot remove {}", target.display()))?;
+    // Put the repo's own hook back where git expects it.
+    let displaced = displaced_path(dir, hook);
+    if displaced.exists() {
+        std::fs::rename(&displaced, &target)
+            .with_context(|| format!("cannot restore {}", target.display()))?;
+        writeln!(out, "  restored {}", target.display())?;
+    }
+    Ok(true)
 }
 
 /// Read the allowlist out of a shim we previously wrote.
@@ -454,10 +584,9 @@ fn sh_unquote(word: &str) -> Option<String> {
     Some(value)
 }
 
-/// Read the chained hook out of a shim we previously wrote.
-fn existing_chain(shim: &Path) -> Option<PathBuf> {
-    let value = shim_field(shim, "CHAIN")?;
-    (!value.is_empty()).then(|| PathBuf::from(value))
+/// Where install moves a hook it finds in its way, beside the shim.
+fn displaced_path(dir: &Path, hook: &str) -> PathBuf {
+    dir.join(format!("{}.local", hook))
 }
 
 /// Where global/system installs keep their hooks. Kept beside the git config
@@ -506,24 +635,12 @@ pub fn uninstall(scope: Scope, root: Option<&Path>, out: &mut dyn Write) -> Resu
 
     let mut removed = 0;
     for hook in HOOKS {
-        let target = dir.join(hook);
-        if !target.exists() || !is_shim(&target) {
-            continue;
+        if remove_shim(&dir, hook, out)? {
+            removed += 1;
         }
-        let chain = existing_chain(&target);
-        std::fs::remove_file(&target)
-            .with_context(|| format!("cannot remove {}", target.display()))?;
-        removed += 1;
-        // Put the repo's own hook back where git expects it.
-        if let Some(displaced) = chain {
-            if displaced.exists() {
-                std::fs::rename(&displaced, &target)
-                    .with_context(|| format!("cannot restore {}", target.display()))?;
-                writeln!(out, "  restored {}", target.display())?;
-                continue;
-            }
-        }
-        writeln!(out, "  removed {}", target.display())?;
+    }
+    if removed > 0 {
+        writeln!(out, "  removed {} hooks from {}", removed, dir.display())?;
     }
 
     if scope != Scope::Local {
@@ -571,7 +688,7 @@ pub fn status(root: Option<&Path>, out: &mut dyn Write) -> Result<()> {
             // The advice depends on what is in the directory the repo chose: a
             // monorepo that commits its own copies of the shim is covered, and
             // telling it to install over them would be wrong.
-            let covered = HOOKS.iter().all(|hook| runs_gitscale(&dir.join(hook)));
+            let covered = PLACING.iter().all(|hook| runs_gitscale(&dir.join(hook)));
             if covered {
                 writeln!(
                     out,
@@ -588,18 +705,52 @@ pub fn status(root: Option<&Path>, out: &mut dyn Write) -> Result<()> {
         }
     }
 
+    // One line per state, naming the hooks in it: nineteen lines of
+    // "gitscale" would bury the one that is not.
+    const OUTDATED: &str = "gitscale, written by an older version";
+    let mut states: Vec<(&str, Vec<&str>)> = Vec::new();
     for hook in HOOKS {
         let target = dir.join(hook);
         let state = if !target.exists() {
             "not installed"
         } else if is_shim(&target) {
-            "gitscale"
+            let current =
+                std::fs::read_to_string(&target).is_ok_and(|text| text.contains(SHIM_HANDOFF));
+            if current {
+                "gitscale"
+            } else {
+                OUTDATED
+            }
         } else if runs_gitscale(&target) {
             "gitscale (repository's own copy)"
         } else {
             "other (not gitscale)"
         };
-        writeln!(out, "  {:<14} {}", hook, state)?;
+        match states.iter_mut().find(|(s, _)| *s == state) {
+            Some((_, hooks)) => hooks.push(hook),
+            None => states.push((state, vec![hook])),
+        }
+    }
+    for (state, hooks) in &states {
+        writeln!(out, "  {:<38} {}", state, describe_hooks(hooks))?;
+    }
+    if states.iter().any(|(s, _)| *s == OUTDATED) {
+        writeln!(
+            out,
+            "\nSome hooks were written by an older gitscale, which runs neither this repository's\n\
+             other hooks nor git-lfs. Re-run `gitscale hook install` with the scope it was\n\
+             installed at."
+        )?;
+    }
+    // Under a hooks path the repository did not choose, git runs no hook
+    // from its own .git/hooks: one not installed here runs nowhere.
+    let shared = !repo_chose_it && dir != default_hooks_dir(&repo)?;
+    if shared && states.iter().any(|(s, _)| *s == "not installed") {
+        writeln!(
+            out,
+            "\nHooks not installed here do not run in this repository at all, not even from its own\n\
+             .git/hooks. Add them with `gitscale hook install --hooks ...`."
+        )?;
     }
 
     report_trust(&repo, &dir, out)?;
@@ -633,7 +784,10 @@ fn report_trust(repo: &Path, dir: &Path, out: &mut dyn Write) -> Result<()> {
 
     writeln!(out, "\nhook allowlist")?;
     if allowlist.patterns().is_empty() {
-        writeln!(out, "  (empty — no repository may run [hooks] commands)")?;
+        writeln!(
+            out,
+            "  (empty — no repository may run its .githooks/ or [hooks] commands)"
+        )?;
     }
     for pattern in allowlist.patterns() {
         writeln!(out, "  {}", pattern)?;
@@ -649,7 +803,7 @@ fn report_trust(repo: &Path, dir: &Path, out: &mut dyn Write) -> Result<()> {
         )?,
         None => writeln!(
             out,
-            "\nthis repo  {} — NOT allowed; a [hooks] command here would be refused",
+            "\nthis repo  {} — NOT allowed; its .githooks/ and [hooks] commands would be refused",
             workspace.describe()
         )?,
     }
@@ -673,6 +827,425 @@ fn read_breadcrumb(repo: &Path) -> Result<Option<String>> {
     }
 }
 
+/// The process exits with this status and prints nothing more: a hook that
+/// failed has said why itself.
+#[derive(Debug)]
+pub struct HookExit(pub i32);
+
+impl std::fmt::Display for HookExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "a hook exited with status {}", self.0)
+    }
+}
+
+impl std::error::Error for HookExit {}
+
+/// What an installed shim hands to `hook run`: its own path, the scope it was
+/// installed at, and git's arguments.
+pub struct Handoff<'a> {
+    pub shim: &'a Path,
+    pub scope: Scope,
+    pub args: &'a [OsString],
+}
+
+impl Scope {
+    /// The scope a shim names with `--scope`.
+    pub fn parse(label: &str) -> Result<Self> {
+        match label {
+            "local" => Ok(Scope::Local),
+            "global" => Ok(Scope::Global),
+            "system" => Ok(Scope::System),
+            other => bail!("unknown hook scope '{}' (local, global or system)", other),
+        }
+    }
+}
+
+/// Run a git hook, as the installed shim asks.
+///
+/// With a [`Handoff`] — every shim this version writes — the stages of the
+/// hook run in turn: the repository's own hook, git-lfs, `.githooks/`, and the
+/// placement. Without one, the caller is a shim written before that, which
+/// fired for `post-checkout` and `post-merge` only, ran the repository's hook
+/// itself and passes none of git's arguments: it gets the placement alone.
+#[allow(clippy::too_many_arguments)]
+pub fn run(
+    hook: &str,
+    root: Option<&Path>,
+    child: Option<&Path>,
+    handoff: Option<Handoff>,
+    verbose: bool,
+    no_cache: bool,
+    interactive: bool,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<()> {
+    let known: &[&str] = if handoff.is_some() { &HOOKS } else { &PLACING };
+    if !known.contains(&hook) {
+        bail!(
+            "unknown hook '{}' (gitscale installs: {})",
+            hook,
+            known.join(", ")
+        );
+    }
+
+    // Every shim exports this, so its absence means one of two things: a shim
+    // written by a gitscale that predates the allowlist, or someone running the
+    // subcommand by hand. Both are refused rather than run wide open — an
+    // upgrade must not leave the old behaviour quietly in place.
+    let Some(allowlist) = trust::Allowlist::from_env() else {
+        bail!(
+            "`gitscale hook run` is invoked by the installed hook, which passes {} to it.\n\
+             That variable is not set, so this hook was installed by an older gitscale.\n\
+             Reinstall it to choose what it may run:\n\n    \
+             gitscale hook install --global --allow 'github.com/acme/*'",
+            trust::ALLOW_ENV
+        );
+    };
+
+    match handoff {
+        Some(handoff) => dispatch(
+            hook,
+            &handoff,
+            &allowlist,
+            verbose,
+            no_cache,
+            interactive,
+            out,
+            err,
+        ),
+        None => place(hook, root, child, verbose, no_cache, interactive, out, err),
+    }
+}
+
+/// Where git ran a hook. Found without running git, since every hook in every
+/// repository on the machine pays for it: git starts a hook at the top of the
+/// worktree, or in the git directory of a bare repository, and sometimes
+/// exports `GIT_DIR` — absolute in a linked worktree, relative in a clone.
+struct Site {
+    /// The git directory every worktree shares: where `hooks/` and `lfs/` live.
+    common: PathBuf,
+    /// The top of the worktree; `None` in a bare repository.
+    top: Option<PathBuf>,
+}
+
+impl Site {
+    fn here() -> Result<Self> {
+        let cwd = std::env::current_dir().context("cannot get current directory")?;
+        let git_dir = match std::env::var_os("GIT_DIR").filter(|d| !d.is_empty()) {
+            Some(dir) => cwd.join(dir),
+            None => {
+                let dot = cwd.join(".git");
+                if dot.is_dir() {
+                    dot
+                } else if dot.is_file() {
+                    let text = std::fs::read_to_string(&dot)
+                        .with_context(|| format!("cannot read {}", dot.display()))?;
+                    let target = text
+                        .lines()
+                        .find_map(|l| l.strip_prefix("gitdir:"))
+                        .with_context(|| format!("{} names no gitdir", dot.display()))?;
+                    cwd.join(target.trim())
+                } else {
+                    cwd.clone()
+                }
+            }
+        };
+        let common = match std::fs::read_to_string(git_dir.join("commondir")) {
+            Ok(rel) => git_dir.join(rel.trim()),
+            Err(_) => git_dir.clone(),
+        };
+        let canonical = |p: PathBuf| p.canonicalize().unwrap_or(p);
+        let (git_dir, cwd) = (canonical(git_dir), canonical(cwd));
+        let top = match std::env::var_os("GIT_WORK_TREE").filter(|d| !d.is_empty()) {
+            Some(tree) => Some(canonical(cwd.join(tree))),
+            None => (git_dir != cwd).then_some(cwd),
+        };
+        Ok(Site {
+            common: canonical(common),
+            top,
+        })
+    }
+}
+
+/// What a hook file is, to the dispatcher.
+#[derive(PartialEq)]
+enum Kind {
+    /// It runs `gitscale hook run` — a shim, or a repository's copy of one.
+    /// Running it from here would run everything a second time.
+    Gitscale,
+    /// The hook git-lfs installs, nothing added: the git-lfs stage covers it.
+    Lfs,
+    Other,
+}
+
+fn kind(path: &Path, hook: &str) -> Kind {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Kind::Other;
+    };
+    if has_marker(&text) || runs_gitscale(path) {
+        return Kind::Gitscale;
+    }
+    let call = format!("git lfs {} \"$@\"", hook);
+    let mut calls_lfs = false;
+    let only_lfs = text.lines().map(str::trim).all(|line| {
+        if line == call {
+            calls_lfs = true;
+        }
+        line.is_empty()
+            || line.starts_with('#')
+            || line.starts_with("command -v git-lfs")
+            || line == call
+    });
+    if only_lfs && calls_lfs {
+        Kind::Lfs
+    } else {
+        Kind::Other
+    }
+}
+
+/// A file git would run as a hook: present and executable.
+fn runnable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
+/// The git-lfs executable, when one is installed where git would find it.
+fn lfs_binary() -> Option<PathBuf> {
+    let name = if cfg!(windows) {
+        "git-lfs.exe"
+    } else {
+        "git-lfs"
+    };
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect())
+        .unwrap_or_default();
+    if let Some(exec) = std::env::var_os("GIT_EXEC_PATH") {
+        dirs.push(PathBuf::from(exec));
+    }
+    dirs.into_iter().map(|d| d.join(name)).find(|p| runnable(p))
+}
+
+/// Run one stage of a hook: its exit status, or 128 plus the signal that
+/// ended it, as a shell would report it.
+fn run_stage(mut cmd: Command, stdin: Option<&[u8]>) -> Result<i32> {
+    cmd.stdin(if stdin.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::inherit()
+    });
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("cannot run {:?}", cmd.get_program()))?;
+    if let (Some(bytes), Some(mut pipe)) = (stdin, child.stdin.take()) {
+        // A hook that never reads its payload closes the pipe on us: fine.
+        let _ = pipe.write_all(bytes);
+    }
+    let status = child.wait()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return Ok(128 + signal);
+        }
+    }
+    Ok(status.code().unwrap_or(1))
+}
+
+/// Run a hook file with git's arguments. A script with no `#!` line is run
+/// by `sh`, as git runs one.
+fn run_file(path: &Path, args: &[OsString], stdin: Option<&[u8]>) -> Result<i32> {
+    let mut cmd = Command::new(path);
+    cmd.args(args);
+    match run_stage(cmd, stdin) {
+        Err(e)
+            if e.downcast_ref::<std::io::Error>()
+                .and_then(std::io::Error::raw_os_error)
+                == Some(ENOEXEC) =>
+        {
+            let mut cmd = Command::new("sh");
+            cmd.arg(path).args(args);
+            run_stage(cmd, stdin)
+        }
+        other => other,
+    }
+}
+
+/// `ENOEXEC`, the same on Linux and macOS: the file is executable, but not
+/// in a format the kernel runs.
+const ENOEXEC: i32 = 8;
+
+/// Record a stage's exit status. A failure of a hook that can stop git's
+/// operation stops the rest; any other is remembered, and the rest run.
+fn settle(hook: &str, code: i32, failed: &mut Option<i32>) -> Result<()> {
+    if code == 0 {
+        return Ok(());
+    }
+    if can_abort(hook) {
+        return Err(HookExit(code).into());
+    }
+    failed.get_or_insert(code);
+    Ok(())
+}
+
+/// The stages of a hook, in order:
+///
+/// 1. the repository's own hook — the one beside the shim that install moved
+///    aside, and, for a global or system install, `<common dir>/hooks/<name>`,
+///    which git no longer looks at;
+/// 2. git-lfs, for the hooks it installs, in a repository that uses it;
+/// 3. `.githooks/<name>` at the top of the worktree, when the repository is on
+///    the allowlist;
+/// 4. the placement, for `post-checkout` and `post-merge`.
+///
+/// A hook file that runs gitscale is skipped wherever it is found, and so is
+/// git-lfs's own hook: stage 2 runs git-lfs once.
+#[allow(clippy::too_many_arguments)]
+fn dispatch(
+    hook: &str,
+    handoff: &Handoff,
+    allowlist: &trust::Allowlist,
+    verbose: bool,
+    no_cache: bool,
+    interactive: bool,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<()> {
+    let site = Site::here()?;
+    let args = handoff.args;
+    let stdin = if STDIN_HOOKS.contains(&hook) {
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin(), &mut bytes)
+            .context("cannot read the hook's input")?;
+        Some(bytes)
+    } else {
+        None
+    };
+    let stdin = stdin.as_deref();
+    let mut failed = None;
+
+    // 1. The repository's own hook.
+    let shim = handoff
+        .shim
+        .canonicalize()
+        .unwrap_or_else(|_| handoff.shim.to_path_buf());
+    let shim_dir = shim.parent().unwrap_or(Path::new("/"));
+    let mut own = vec![displaced_path(shim_dir, hook)];
+    if handoff.scope != Scope::Local {
+        let hooks = site.common.join("hooks");
+        if hooks.canonicalize().ok().as_deref() != Some(shim_dir) {
+            own.push(hooks.join(hook));
+        }
+    }
+    let mut lfs_hook = false;
+    for path in own.into_iter().filter(|p| runnable(p)) {
+        match kind(&path, hook) {
+            Kind::Gitscale => {}
+            Kind::Lfs => lfs_hook = true,
+            Kind::Other => settle(hook, run_file(&path, args, stdin)?, &mut failed)?,
+        }
+    }
+
+    // 2. git-lfs. A repository uses it once git-lfs has a store in it, or a
+    // hook git-lfs installed there says so.
+    if LFS_HOOKS.contains(&hook) && (lfs_hook || site.common.join("lfs").is_dir()) {
+        let code = if lfs_binary().is_some() {
+            let mut cmd = Command::new("git");
+            cmd.arg("lfs").arg(hook).args(args);
+            run_stage(cmd, stdin)?
+        } else {
+            writeln!(
+                err,
+                "gitscale: this repository uses Git LFS, but git-lfs is not installed. Install \
+                 it, or, if the repository no longer uses Git LFS, delete {}.",
+                site.common.join("lfs").display()
+            )?;
+            2
+        };
+        settle(hook, code, &mut failed)?;
+    }
+
+    // 3. The repository's committed hook, if the allowlist lets it run.
+    if let Some(top) = &site.top {
+        let committed = top.join(COMMITTED_HOOKS_DIR).join(hook);
+        if runnable(&committed) && kind(&committed, hook) != Kind::Gitscale {
+            let workspace = trust::Workspace::probe(top);
+            if allowlist.matched_by(&workspace).is_some() {
+                settle(hook, run_file(&committed, args, stdin)?, &mut failed)?;
+            } else {
+                writeln!(
+                    err,
+                    "gitscale: {}/{} not run — {} is not on this machine's hook allowlist; see \
+                     `gitscale hook status`",
+                    COMMITTED_HOOKS_DIR,
+                    hook,
+                    trust::sanitize(&workspace.describe())
+                )?;
+            }
+        }
+    }
+
+    // 4. The placement. Never when gitscale itself ran the git command —
+    // every git call it makes is marked, and a placement running `git
+    // checkout` would otherwise recurse without bound — and never for a file
+    // checkout: post-checkout's third argument is 0 for `git checkout --
+    // <path>`, which moves no revision, and a build restoring one file must
+    // not have its sub-repositories reset and cleaned underneath it.
+    let ours = std::env::var_os("GITSCALE_HOOK").is_some_and(|v| !v.is_empty());
+    let file_checkout = hook == "post-checkout" && args.get(2).is_some_and(|a| a == "0");
+    if PLACING.contains(&hook) && !ours && !file_checkout {
+        if let Some(top) = &site.top {
+            // A child — a checkout gitscale made, whose common dir is one of
+            // a root's stores — places the workspace it belongs to. Anything
+            // else opts in with a config at its own top: deliberately not the
+            // usual upward search, or an unrelated repository cloned inside a
+            // workspace would place the whole thing.
+            let result = if crate::config::child_of(&site.common).is_some() {
+                place(
+                    hook,
+                    None,
+                    Some(top),
+                    verbose,
+                    no_cache,
+                    interactive,
+                    out,
+                    err,
+                )
+            } else if top.join(CONFIG_FILENAME).is_file() {
+                place(
+                    hook,
+                    Some(top),
+                    None,
+                    verbose,
+                    no_cache,
+                    interactive,
+                    out,
+                    err,
+                )
+            } else {
+                Ok(())
+            };
+            if let Err(e) = result {
+                if failed.is_none() {
+                    return Err(e);
+                }
+                writeln!(err, "gitscale: {} hook — {:#}", hook, e)?;
+            }
+        }
+    }
+
+    match failed {
+        Some(code) => Err(HookExit(code).into()),
+        None => Ok(()),
+    }
+}
+
 /// Place the workspace for a git hook.
 ///
 /// A failure here is reported three ways, because none alone is sufficient: on
@@ -682,7 +1255,7 @@ fn read_breadcrumb(repo: &Path) -> Result<Option<String>> {
 /// the three: git collapses any non-zero hook exit to 1 and reports it as the
 /// *checkout* failing, which it did not.
 #[allow(clippy::too_many_arguments)]
-pub fn run(
+fn place(
     hook: &str,
     root: Option<&Path>,
     child: Option<&Path>,
@@ -692,28 +1265,6 @@ pub fn run(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
-    if !HOOKS.contains(&hook) {
-        bail!(
-            "unknown hook '{}' (gitscale installs: {})",
-            hook,
-            HOOKS.join(", ")
-        );
-    }
-
-    // Every shim exports this, so its absence means one of two things: a shim
-    // written by a gitscale that predates the allowlist, or someone running the
-    // subcommand by hand. Both are refused rather than run wide open — an
-    // upgrade must not leave the old behaviour quietly in place.
-    if std::env::var(trust::ALLOW_ENV).is_err() {
-        bail!(
-            "`gitscale hook run` is invoked by the installed hook, which passes {} to it.\n\
-             That variable is not set, so this hook was installed by an older gitscale.\n\
-             Reinstall it to choose what it may run:\n\n    \
-             gitscale hook install --global --allow 'github.com/acme/*'",
-            trust::ALLOW_ENV
-        );
-    }
-
     let (repo, leave) = match child {
         Some(child) => {
             let child = child

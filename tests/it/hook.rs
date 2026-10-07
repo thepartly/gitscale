@@ -16,13 +16,22 @@ use std::process::Command;
 // ---------------------------------------------------------------------------
 
 #[test]
-fn normal_001_install_local_writes_both_hooks() {
+fn normal_001_install_local_writes_the_placing_hooks() {
     let env = TestEnv::new("hook_install_local");
     let repo = repo_with(&env, Some("[repos]\n"));
 
     let out = cli(&["hook", "install", "--local", "-C", repo.to_str().unwrap()]);
     assert!(out.success, "stderr: {}", out.stderr);
 
+    for hook in HOOKS {
+        let installed = hooks_dir(&repo).join(hook).exists();
+        assert_eq!(
+            installed,
+            ["post-checkout", "post-merge"].contains(&hook),
+            "{}",
+            hook
+        );
+    }
     for hook in ["post-checkout", "post-merge"] {
         let path = hooks_dir(&repo).join(hook);
         assert!(path.is_file(), "{} was not installed", hook);
@@ -61,10 +70,16 @@ fn normal_002_install_displaces_and_chains_an_existing_hook() {
         "#!/bin/sh\necho MINE\n"
     );
 
-    let shim = std::fs::read_to_string(hooks_dir(&repo).join("post-checkout")).unwrap();
-    assert!(
-        shim.contains(displaced.to_str().unwrap()),
-        "the shim should chain to the displaced hook"
+    point_shims_at(
+        &hooks_dir(&repo),
+        std::path::Path::new(env!("CARGO_BIN_EXE_gitscale")),
+    );
+    let (code, output) = run_hook(&hooks_dir(&repo).join("post-checkout"), &repo, Some("1"));
+    assert_eq!(code, 0, "{}", output);
+    assert_eq!(
+        output.trim(),
+        "MINE",
+        "the shim should run the displaced hook"
     );
 }
 
@@ -94,55 +109,51 @@ fn normal_003_uninstall_restores_the_displaced_hook() {
 #[test]
 fn normal_004_shim_runs_the_chained_hook_and_honours_the_recursion_guard() {
     let env = TestEnv::new("hook_shim_chain");
-    // A config is present, so without the guard the shim would invoke gitscale.
+    // A config is present, so without the guard the hook places the workspace.
     let repo = repo_with(&env, Some("[repos]\n"));
-    let own = hooks_dir(&repo).join("post-checkout");
-    std::fs::write(&own, "#!/bin/sh\necho CHAINED\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    assert!(cli(&["hook", "install", "--local", "-C", repo.to_str().unwrap()]).success);
+    write_script(&hooks_dir(&repo).join("post-checkout"), "echo CHAINED\n");
+    let shim = install_local(&repo, &[]).join("post-checkout");
 
-    // GITSCALE_HOOK set == this git call came from gitscale itself.
-    let (code, output) = run_hook(&hooks_dir(&repo).join("post-checkout"), &repo, Some("1"));
-    assert_eq!(code, 0);
-    assert!(
-        output.contains("CHAINED"),
-        "the repo's own hook must still run: {}",
-        output
-    );
-    assert!(
-        !output.contains("Pulling"),
-        "the recursion guard should have stopped gitscale from running: {}",
-        output
-    );
+    // GITSCALE_HOOK set == this git call came from gitscale itself: the
+    // repository's own hook still runs, and the placement does not.
+    let (code, output) = run_hook(&shim, &repo, Some("1"));
+    assert_eq!(code, 0, "{}", output);
     assert_eq!(
         output.trim(),
         "CHAINED",
         "nothing but the chained hook may run under the guard"
     );
 
-    // The same shim calling a recorder instead of the test harness: silent
-    // under the guard, called once without it.
-    let shim = hooks_dir(&repo).join("post-checkout");
+    // Without it, the placement runs after the repository's own hook.
+    let (code, output) = run_hook(&shim, &repo, None);
+    assert_eq!(code, 0, "{}", output);
+    let (chained, placed) = (output.find("CHAINED"), output.find("Nothing to sync"));
+    assert!(
+        chained.is_some() && placed.is_some() && chained < placed,
+        "{}",
+        output
+    );
+}
+
+/// The shim decides nothing: it hands `hook run` the hook's name, its own
+/// path, its scope, git's arguments and the allowlist.
+#[test]
+fn normal_051_the_shim_hands_everything_to_hook_run() {
+    let env = TestEnv::new("hook_shim_handoff");
+    let repo = repo_with(&env, None);
+    let shim = install_local(&repo, &["--allow", "github.com/acme/*"]).join("post-checkout");
     let (bin, log) = fake_gitscale(&env.repos_remote);
     point_shim_at(&shim, &bin);
-    let (code, _) = run_hook(&shim, &repo, Some("1"));
-    assert_eq!(code, 0);
-    assert!(
-        calls(&log).is_empty(),
-        "the guard let gitscale run: {:?}",
-        calls(&log)
-    );
-    let (code, _) = run_hook(&shim, &repo, None);
-    assert_eq!(code, 0);
-    assert_eq!(calls(&log).len(), 1, "{:?}", calls(&log));
-    assert!(
-        calls(&log)[0].starts_with("args=hook run post-checkout -C "),
-        "{:?}",
-        calls(&log)
+
+    let (code, output) = run_hook_args(&shim, &repo, Some("1"), &["a b", "c", "1"]);
+    assert_eq!(code, 0, "{}", output);
+    assert_eq!(
+        calls(&log),
+        vec![format!(
+            "args=hook run post-checkout --shim {} --scope local -- a b c 1 \
+             allow=github.com/acme/*",
+            shim.display()
+        )]
     );
 }
 
@@ -157,20 +168,16 @@ fn normal_005_status_reports_installed_hooks() {
     // means consulting a global core.hooksPath — the developer may have one.
     let out = cli_isolated(&isolated_home(&env), &["hook", "status", "-C", root]);
     assert!(out.success, "stderr: {}", out.stderr);
-    assert!(out.stdout.contains("post-checkout"), "{}", out.stdout);
-    assert!(out.stdout.contains("gitscale"), "{}", out.stdout);
-    // The rows themselves: the words above are also in every repository path
-    // under tests/, and in the system line on a machine with a gitscale hook.
-    for hook in ["post-checkout", "post-merge"] {
-        assert!(
-            out.stdout
-                .lines()
-                .any(|l| l.split_whitespace().collect::<Vec<_>>() == [hook, "gitscale"]),
-            "no `{} gitscale` row:\n{}",
-            hook,
-            out.stdout
-        );
-    }
+    // The row itself: "gitscale" is also in every repository path under
+    // tests/, and in the system line on a machine with a gitscale hook.
+    assert!(
+        out.stdout
+            .lines()
+            .any(|l| l.split_whitespace().collect::<Vec<_>>()
+                == ["gitscale", "post-checkout,", "post-merge"]),
+        "no `gitscale  post-checkout, post-merge` row:\n{}",
+        out.stdout
+    );
 }
 
 #[test]
@@ -242,7 +249,6 @@ fn normal_008_status_reports_the_allowlist() {
 /// gitscale never installs — must keep running once a global install is in
 /// place, or a secret scanner or git-lfs hook silently stops working.
 #[test]
-#[ignore = "bug: a --global install never runs a repository's own .git/hooks"]
 fn normal_021_global_install_keeps_each_repositorys_own_git_hooks_running() {
     let env = TestEnv::new("hook_global_keeps_repo_hooks");
     let repo = repo_with(&env, None);
@@ -258,7 +264,18 @@ fn normal_021_global_install_keeps_each_repositorys_own_git_hooks_running() {
         &format!("touch '{}'\n", commit_mark.display()),
     );
 
-    let out = cli_isolated(&home, &["hook", "install", "--global", "--allow", "*"]);
+    let out = cli_isolated(
+        &home,
+        &[
+            "hook",
+            "install",
+            "--global",
+            "--allow",
+            "*",
+            "--hooks",
+            "pre-commit",
+        ],
+    );
     assert!(out.success, "stderr: {}", out.stderr);
 
     git_ok(&home, &repo, &["checkout", "-q", "-b", "other"]);
@@ -421,7 +438,7 @@ fn normal_025_shim_passes_its_arguments_to_the_chained_hook_and_returns_its_stat
         &hooks_dir(&repo).join("post-checkout"),
         "echo \"args:$*\"\nexit 3\n",
     );
-    assert!(cli(&["hook", "install", "--local", "-C", repo.to_str().unwrap()]).success);
+    install_local(&repo, &[]);
 
     let (code, output) = run_hook_args(
         &hooks_dir(&repo).join("post-checkout"),
@@ -587,7 +604,7 @@ fn edge_009_install_local_from_a_linked_worktree_writes_the_shared_hooks() {
 fn edge_010_shim_is_silent_in_a_repo_without_a_gitscale_config() {
     let env = TestEnv::new("hook_shim_silent");
     let repo = repo_with(&env, None); // no .gitscale.toml
-    assert!(cli(&["hook", "install", "--local", "-C", repo.to_str().unwrap()]).success);
+    install_local(&repo, &[]);
 
     let (code, output) = run_hook(&hooks_dir(&repo).join("post-checkout"), &repo, None);
     assert_eq!(code, 0, "must not disturb repos that never opted in");
@@ -598,19 +615,14 @@ fn edge_010_shim_is_silent_in_a_repo_without_a_gitscale_config() {
     );
 }
 
-/// The shim names the chained hook by path, and a path may hold a quote.
+/// The repository's path may hold a quote: the shim passes its own path on,
+/// and `hook run` finds the displaced hook beside it.
 #[test]
 fn edge_011_shim_chains_a_hook_whose_path_holds_a_quote() {
     let env = TestEnv::new("hook_shim_it's");
     let repo = repo_with(&env, Some("[repos]\n"));
-    let own = hooks_dir(&repo).join("post-checkout");
-    std::fs::write(&own, "#!/bin/sh\necho CHAINED\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    assert!(cli(&["hook", "install", "--local", "-C", repo.to_str().unwrap()]).success);
+    write_script(&hooks_dir(&repo).join("post-checkout"), "echo CHAINED\n");
+    install_local(&repo, &[]);
 
     let (code, output) = run_hook(&hooks_dir(&repo).join("post-checkout"), &repo, Some("1"));
     assert_eq!(code, 0, "the shim failed: {}", output);
@@ -624,8 +636,7 @@ fn edge_011_shim_chains_a_hook_whose_path_holds_a_quote() {
 fn edge_012_shim_ignores_a_file_checkout() {
     let env = TestEnv::new("hook_shim_file_checkout");
     let repo = repo_with(&env, Some("[repos]\n"));
-    assert!(cli(&["hook", "install", "--local", "-C", repo.to_str().unwrap()]).success);
-    let script = hooks_dir(&repo).join("post-checkout");
+    let script = install_local(&repo, &[]).join("post-checkout");
 
     let run = |flag: &str| {
         let out = Command::new("sh")
@@ -642,18 +653,15 @@ fn edge_012_shim_ignores_a_file_checkout() {
         )
     };
 
-    // An in-process install bakes in the test binary rather than gitscale, so
-    // what the shim reaches cannot run a real placement here. Whether it
-    // reaches it at all is the question: silence means the shim stopped first.
     let file_checkout = run("0");
     assert!(
         file_checkout.trim().is_empty(),
-        "a file checkout must not reach gitscale: {}",
+        "a file checkout must not place the workspace: {}",
         file_checkout
     );
     assert!(
-        !run("1").trim().is_empty(),
-        "a branch checkout must still reach gitscale"
+        run("1").contains("Nothing to sync"),
+        "a branch checkout must still place the workspace"
     );
 }
 
@@ -911,10 +919,11 @@ fn edge_028_reinstall_keeps_chaining_to_the_displaced_hook() {
     let out = cli(&["hook", "install", "--local", "-C", root]);
     assert!(out.success, "stderr: {}", out.stderr);
 
-    let displaced = hooks_dir(&repo).join("post-checkout.local");
-    assert!(displaced.is_file());
-    let shim = std::fs::read_to_string(hooks_dir(&repo).join("post-checkout")).unwrap();
-    assert!(shim.contains(displaced.to_str().unwrap()), "{}", shim);
+    assert!(hooks_dir(&repo).join("post-checkout.local").is_file());
+    point_shims_at(
+        &hooks_dir(&repo),
+        std::path::Path::new(env!("CARGO_BIN_EXE_gitscale")),
+    );
     let (code, output) = run_hook(&hooks_dir(&repo).join("post-checkout"), &repo, Some("1"));
     assert_eq!(code, 0);
     assert_eq!(output.trim(), "CHAINED");
@@ -978,36 +987,27 @@ fn edge_030_uninstall_removes_the_shim_when_the_displaced_hook_is_gone() {
     assert!(!out.stdout.contains("restored"), "{}", out.stdout);
 }
 
-/// A shim whose gitscale binary has gone says so — but only in a repository
-/// that opted in with a `.gitscale.toml`; every other repository stays silent.
-/// Either way the git operation is not failed for it.
+/// A shim whose gitscale binary has gone says so on every hook, in every
+/// repository — the repository's other hooks went with it — and still runs
+/// the repository's own hook. The git operation is not failed for it.
 #[test]
-fn edge_031_shim_reports_a_missing_binary_only_where_the_repo_opted_in() {
+fn edge_031_a_shim_without_its_binary_says_so_and_runs_the_repositorys_own_hook() {
     let missing = std::path::Path::new("/nonexistent/gitscale-test/gitscale");
-    for (name, config) in [
-        ("hook_missing_binary_opted_in", Some("[repos]\n")),
-        ("hook_missing_binary_elsewhere", None),
-    ] {
-        let env = TestEnv::new(name);
-        let repo = repo_with(&env, config);
-        assert!(cli(&["hook", "install", "--local", "-C", repo.to_str().unwrap()]).success);
-        let shim = hooks_dir(&repo).join("post-checkout");
-        point_shim_at(&shim, missing);
+    let env = TestEnv::new("hook_missing_binary");
+    let repo = repo_with(&env, None);
+    write_script(&hooks_dir(&repo).join("post-checkout"), "echo MINE\n");
+    assert!(cli(&["hook", "install", "--local", "-C", repo.to_str().unwrap()]).success);
+    let shim = hooks_dir(&repo).join("post-checkout");
+    point_shim_at(&shim, missing);
 
-        let (code, output) = run_hook(&shim, &repo, None);
-        assert_eq!(code, 0, "{}: {}", name, output);
-        if config.is_some() {
-            assert!(
-                output.contains("post-checkout skipped")
-                    && output.contains("/nonexistent/gitscale-test/gitscale not found"),
-                "{}: {}",
-                name,
-                output
-            );
-        } else {
-            assert!(output.trim().is_empty(), "{}: {}", name, output);
-        }
-    }
+    let (code, output) = run_hook(&shim, &repo, None);
+    assert_eq!(code, 0, "{}", output);
+    assert!(
+        output.contains("/nonexistent/gitscale-test/gitscale not found"),
+        "{}",
+        output
+    );
+    assert!(output.contains("MINE"), "{}", output);
 }
 
 /// git itself skips a hook file that is not executable; the shim does the
@@ -1021,7 +1021,7 @@ fn edge_032_shim_skips_a_chained_hook_that_is_not_executable() {
         "#!/bin/sh\necho SHOULD-NOT-RUN\nexit 7\n",
     )
     .unwrap();
-    assert!(cli(&["hook", "install", "--local", "-C", repo.to_str().unwrap()]).success);
+    install_local(&repo, &[]);
     assert!(!is_executable(
         &hooks_dir(&repo).join("post-checkout.local")
     ));
@@ -1064,7 +1064,7 @@ fn edge_033_status_shows_a_global_hooks_path_that_hides_a_local_install() {
         out.stdout
             .lines()
             .any(|l| l.split_whitespace().collect::<Vec<_>>()
-                == ["post-checkout", "not", "installed"]),
+                == ["not", "installed", "all", &HOOKS.len().to_string(), "hooks"]),
         "{}",
         out.stdout
     );
@@ -1209,15 +1209,24 @@ fn edge_038_a_refused_post_sync_leaves_a_breadcrumb_and_follows_the_policy() {
 
 /// A monorepo may commit its own copy of the shim and point `core.hooksPath`
 /// at it; `hook status` already recognises such a copy. A `--local` install
-/// there must not end up running gitscale twice on every checkout — once from
-/// the displaced copy and again from the new shim.
+/// there displaces the copy and must not end up running gitscale twice on
+/// every checkout — once from the displaced copy and again from the new shim.
 #[test]
-#[ignore = "bug: install displaces a repository's own gitscale copy and chains to it, so every checkout is placed twice"]
 fn edge_039_install_beside_a_repositorys_own_copy_runs_gitscale_once() {
     let env = TestEnv::new("hook_vendored_double_run");
     let repo = repo_with(&env, Some("[repos]\n"));
     let root = repo.to_str().unwrap();
-    let (bin, log) = fake_gitscale(&env.repos_remote);
+    // Counts every call, then hands over to the real binary.
+    let log = env.repos_remote.join("calls.log");
+    let wrapper = env.repos_remote.join("counting-gitscale");
+    write_script(
+        &wrapper,
+        &format!(
+            "echo \"$*\" >> '{}'\nexec '{}' \"$@\"\n",
+            log.display(),
+            env!("CARGO_BIN_EXE_gitscale")
+        ),
+    );
 
     // The repository's own copy: a real shim, its marker swapped for its own
     // header, as edge_014 builds it.
@@ -1237,7 +1246,7 @@ fn edge_039_install_beside_a_repositorys_own_copy_runs_gitscale_once() {
             })
             .collect();
         std::fs::write(vendored.join(hook), copy.join("\n") + "\n").unwrap();
-        point_shim_at(&vendored.join(hook), &bin);
+        point_shim_at(&vendored.join(hook), &wrapper);
     }
     assert!(cli(&["hook", "uninstall", "--local", "-C", root]).success);
     support::run_git_pub(&repo, &["config", "core.hooksPath", ".githooks"]);
@@ -1249,7 +1258,8 @@ fn edge_039_install_beside_a_repositorys_own_copy_runs_gitscale_once() {
     }
 
     assert!(cli(&["hook", "install", "--local", "-C", root]).success);
-    point_shim_at(&vendored.join("post-checkout"), &bin);
+    assert!(vendored.join("post-checkout.local").is_file());
+    point_shim_at(&vendored.join("post-checkout"), &wrapper);
     let (code, output) = run_hook(&vendored.join("post-checkout"), &repo, None);
     assert_eq!(code, 0, "{}", output);
     assert_eq!(
@@ -1259,6 +1269,7 @@ fn edge_039_install_beside_a_repositorys_own_copy_runs_gitscale_once() {
         calls(&log).len(),
         calls(&log)
     );
+    assert_eq!(output.matches("Nothing to sync").count(), 1, "{}", output);
 }
 
 // ---------------------------------------------------------------------------
@@ -1475,6 +1486,10 @@ fn error_041b_install_with_force_displaces_over_an_older_displaced_hook() {
         std::fs::read_to_string(hooks_dir(&repo).join("post-checkout.local")).unwrap(),
         "#!/bin/sh\necho new\n"
     );
+    point_shims_at(
+        &hooks_dir(&repo),
+        std::path::Path::new(env!("CARGO_BIN_EXE_gitscale")),
+    );
     let (code, output) = run_hook(&hooks_dir(&repo).join("post-checkout"), &repo, Some("1"));
     assert_eq!(code, 0);
     assert_eq!(output.trim(), "new");
@@ -1483,7 +1498,6 @@ fn error_041b_install_with_force_displaces_over_an_older_displaced_hook() {
 /// A refused install leaves every hook as it found it — including the ones
 /// it would have handled before reaching the one that made it refuse.
 #[test]
-#[ignore = "bug: a .local collision on post-merge is found after post-checkout was already displaced and rewritten"]
 fn error_042_a_refused_install_leaves_every_hook_untouched() {
     let env = TestEnv::new("hook_refused_partial");
     let repo = repo_with(&env, Some("[repos]\n"));
@@ -1550,12 +1564,12 @@ fn error_043_status_never_prints_credentials_from_the_origin() {
 // Performance
 // ---------------------------------------------------------------------------
 
-/// One clone runs gitscale once. The placement it starts checks out every
-/// declared repository with git, which fires the same global hook in each —
-/// and each carries a `.gitscale.toml` here, so only the recursion guard
-/// stops that from recursing.
+/// One clone places the workspace once. The placement it starts checks out
+/// every declared repository with git, which fires the same global hook in
+/// each — and each carries a `.gitscale.toml` here, so only the recursion
+/// guard stops that from recursing.
 #[test]
-fn perf_044_a_hooked_clone_runs_gitscale_exactly_once() {
+fn perf_044_a_hooked_clone_places_the_workspace_exactly_once() {
     let env = TestEnv::new("hook_clone_once");
     let home = isolated_home(&env);
     let lib = env.create_bare_repo(
@@ -1579,13 +1593,15 @@ fn perf_044_a_hooked_clone_runs_gitscale_exactly_once() {
     );
     assert!(cli_isolated(&home, &["hook", "install", "--global", "--allow", "*"]).success);
 
-    // Count every call the shims make, then hand over to the real binary.
+    // Count every call git itself makes through the shims — not the ones
+    // the placement's own git calls make, which carry GITSCALE_HOOK — then
+    // hand over to the real binary.
     let log = env.repos_remote.join("calls.log");
     let wrapper = env.repos_remote.join("counting-gitscale");
     write_script(
         &wrapper,
         &format!(
-            "echo \"$*\" >> '{}'\nexec '{}' \"$@\"\n",
+            "[ -n \"$GITSCALE_HOOK\" ] || echo \"$*\" >> '{}'\nexec '{}' \"$@\"\n",
             log.display(),
             env!("CARGO_BIN_EXE_gitscale")
         ),
@@ -1612,6 +1628,7 @@ fn perf_044_a_hooked_clone_runs_gitscale_exactly_once() {
         "gitscale ran {:?} for one clone",
         calls(&log)
     );
+    assert_eq!(report.matches("Pulling").count(), 1, "{}", report);
 }
 
 // ---------------------------------------------------------------------------
@@ -1849,4 +1866,373 @@ fn normal_050_the_installed_shim_fires_in_a_child() {
     assert_eq!(branch(&d).as_deref(), Some("feat"));
     assert!(writable(&d.join("VERSION")), "{}", said);
     assert!(said.contains("left where git put it"), "{}", said);
+}
+
+// ---------------------------------------------------------------------------
+// Every hook: the repository's own, git-lfs and .githooks/
+// ---------------------------------------------------------------------------
+
+/// git-lfs runs once in a repository that uses it — the hook git-lfs wrote
+/// there is recognised and not run a second time — and never in one that
+/// does not.
+#[test]
+fn normal_052_git_lfs_runs_once_in_a_repository_that_uses_it() {
+    let env = TestEnv::new("hook_lfs_once");
+    let repo = repo_with(&env, None);
+    std::fs::create_dir_all(repo.join(".git/lfs")).unwrap();
+    write_script(
+        &hooks_dir(&repo).join("post-commit"),
+        &lfs_stock_hook("post-commit"),
+    );
+    let shim = install_local(&repo, &[]).join("post-commit");
+    let (bin, log) = fake_lfs(&env.repos_remote);
+
+    let (code, output) = run_hook_with(&shim, &repo, &[], &[("PATH", &path_with(&bin))], b"");
+    assert_eq!(code, 0, "{}", output);
+    assert_eq!(calls(&log), vec!["git-lfs post-commit"], "{}", output);
+
+    let other = env.repos_remote.join("plain");
+    support::run_git_pub(&env.repos_remote, &["init", "-q", other.to_str().unwrap()]);
+    let shim = install_local(&other, &[]).join("post-commit");
+    std::fs::remove_file(&log).unwrap();
+    let (code, output) = run_hook_with(&shim, &other, &[], &[("PATH", &path_with(&bin))], b"");
+    assert_eq!(code, 0, "{}", output);
+    assert!(calls(&log).is_empty(), "{:?}", calls(&log));
+}
+
+/// `pre-push` reads the refs being pushed on stdin. The repository's own hook,
+/// git-lfs and `.githooks/` each get the whole of it.
+#[test]
+fn normal_053_each_stage_of_pre_push_gets_the_refs_on_stdin() {
+    let env = TestEnv::new("hook_pre_push_stdin");
+    let repo = repo_with(&env, None);
+    std::fs::create_dir_all(repo.join(".git/lfs")).unwrap();
+    let own = env.repos_remote.join("own.txt");
+    let committed = env.repos_remote.join("committed.txt");
+    write_script(
+        &hooks_dir(&repo).join("pre-push"),
+        &format!("cat > '{}'\n", own.display()),
+    );
+    write_script(
+        &repo.join(".githooks/pre-push"),
+        &format!("cat > '{}'\n", committed.display()),
+    );
+    let shim = install_local(&repo, &[]).join("pre-push");
+    let (bin, log) = fake_lfs(&env.repos_remote);
+    let refs = "refs/heads/main 1111 refs/heads/main 2222\n";
+
+    let (code, output) = run_hook_with(
+        &shim,
+        &repo,
+        &["origin", "https://example.invalid/r.git"],
+        &[("PATH", &path_with(&bin))],
+        refs.as_bytes(),
+    );
+    assert_eq!(code, 0, "{}", output);
+    assert_eq!(std::fs::read_to_string(&own).unwrap(), refs);
+    assert_eq!(std::fs::read_to_string(&committed).unwrap(), refs);
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap(),
+        format!(
+            "git-lfs pre-push origin https://example.invalid/r.git\n{}",
+            refs
+        )
+    );
+}
+
+/// A repository's committed `.githooks/` runs only when the allowlist the
+/// hook was installed with names it; otherwise the hook says so and git's
+/// operation goes on.
+#[test]
+fn normal_054_githooks_run_only_for_an_allowed_repository() {
+    let env = TestEnv::new("hook_githooks_allowlist");
+    let repo = repo_with(&env, None);
+    support::run_git_pub(
+        &repo,
+        &["remote", "add", "origin", "https://github.com/acme/app.git"],
+    );
+    let mark = env.repos_remote.join("committed-ran");
+    write_script(
+        &repo.join(".githooks/pre-commit"),
+        &format!("touch '{}'\n", mark.display()),
+    );
+
+    let shim = install_local(&repo, &["--allow", "github.com/acme/*"]).join("pre-commit");
+    let (code, output) = run_hook(&shim, &repo, None);
+    assert_eq!(code, 0, "{}", output);
+    assert!(mark.exists(), "{}", output);
+
+    std::fs::remove_file(&mark).unwrap();
+    let shim = install_local(&repo, &["--allow", "github.com/other/*"]).join("pre-commit");
+    let (code, output) = run_hook(&shim, &repo, None);
+    assert_eq!(code, 0, "{}", output);
+    assert!(!mark.exists(), "{}", output);
+    assert!(
+        output.contains(
+            ".githooks/pre-commit not run — github.com/acme/app is not on this \
+                         machine's hook allowlist"
+        ),
+        "{}",
+        output
+    );
+}
+
+/// A failing stage of a hook that can stop git's operation stops the rest,
+/// and its status is the hook's. After the fact, every stage still runs, and
+/// the first failure is reported.
+#[test]
+fn edge_055_a_failure_stops_a_pre_hook_but_not_a_post_hook() {
+    let env = TestEnv::new("hook_stage_failure");
+    let repo = repo_with(&env, None);
+    let pre = env.repos_remote.join("pre-ran");
+    let post = env.repos_remote.join("post-ran");
+    write_script(&hooks_dir(&repo).join("pre-commit"), "exit 5\n");
+    write_script(&hooks_dir(&repo).join("post-commit"), "exit 4\n");
+    for (hook, mark) in [("pre-commit", &pre), ("post-commit", &post)] {
+        write_script(
+            &repo.join(".githooks").join(hook),
+            &format!("touch '{}'\n", mark.display()),
+        );
+    }
+    let dir = install_local(&repo, &[]);
+
+    let (code, output) = run_hook(&dir.join("pre-commit"), &repo, None);
+    assert_eq!(code, 5, "{}", output);
+    assert!(!pre.exists(), "a stage ran after pre-commit failed");
+
+    let (code, output) = run_hook(&dir.join("post-commit"), &repo, None);
+    assert_eq!(code, 4, "{}", output);
+    assert!(post.exists(), "post-commit stopped at its first failure");
+}
+
+/// A repository that uses Git LFS, on a machine without git-lfs: pushing
+/// would leave the large files behind, so `pre-push` fails and says why, as
+/// git-lfs's own hook does.
+#[test]
+fn edge_056_a_repository_using_lfs_without_git_lfs_cannot_push() {
+    let env = TestEnv::new("hook_lfs_missing");
+    let repo = repo_with(&env, None);
+    std::fs::create_dir_all(repo.join(".git/lfs")).unwrap();
+    let shim = install_local(&repo, &[]).join("pre-push");
+    // A PATH holding git and sh, and nothing else.
+    let bin = env.repos_remote.join("bare-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for tool in ["git", "sh"] {
+        let found = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|d| d.join(tool))
+            .find(|p| p.is_file())
+            .unwrap();
+        std::os::unix::fs::symlink(found, bin.join(tool)).unwrap();
+    }
+
+    let (code, output) = run_hook_with(
+        &shim,
+        &repo,
+        &["origin", "https://example.invalid/r.git"],
+        &[("PATH", bin.as_os_str())],
+        b"",
+    );
+    assert_eq!(code, 2, "{}", output);
+    assert!(
+        output.contains("this repository uses Git LFS, but git-lfs is not installed"),
+        "{}",
+        output
+    );
+}
+
+/// `hook status` names hooks a gitscale before this one wrote, which run
+/// neither the repository's other hooks nor git-lfs, and says to reinstall.
+#[test]
+fn normal_057_status_flags_hooks_written_by_an_older_gitscale() {
+    let env = TestEnv::new("hook_status_outdated");
+    let repo = repo_with(&env, None);
+    let root = repo.to_str().unwrap();
+    install_local(&repo, &[]);
+    std::fs::write(
+        hooks_dir(&repo).join("post-checkout"),
+        "#!/bin/sh\n# installed by gitscale — regenerate with `gitscale hook install`, do not \
+         edit.\nALLOW='*'\nGITSCALE_HOOK=\"$HOOK\" \"$GITSCALE_BIN\" hook run \"$HOOK\" -C \
+         \"$ROOT\"\n",
+    )
+    .unwrap();
+
+    let out = cli_isolated(&isolated_home(&env), &["hook", "status", "-C", root]);
+    assert!(out.success, "stderr: {}", out.stderr);
+    assert!(
+        out.stdout
+            .lines()
+            .any(|l| l.contains("gitscale, written by an older version")
+                && l.contains("post-checkout")),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("Re-run `gitscale hook install`"),
+        "{}",
+        out.stdout
+    );
+}
+
+/// git runs a hook script with no `#!` line with the shell; so does the
+/// dispatcher, rather than failing on it.
+#[test]
+fn edge_058_a_hook_without_a_shebang_runs_with_sh() {
+    let env = TestEnv::new("hook_no_shebang");
+    let repo = repo_with(&env, None);
+    let own = hooks_dir(&repo).join("pre-commit");
+    std::fs::write(&own, "echo NO-SHEBANG\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let shim = install_local(&repo, &[]).join("pre-commit");
+
+    let (code, output) = run_hook(&shim, &repo, None);
+    assert_eq!(code, 0, "{}", output);
+    assert_eq!(output.trim(), "NO-SHEBANG");
+}
+
+// ---------------------------------------------------------------------------
+// Choosing the hooks
+// ---------------------------------------------------------------------------
+
+/// The hooks gitscale installed in `dir`, by name, in install order.
+fn installed(dir: &std::path::Path) -> Vec<&'static str> {
+    HOOKS
+        .into_iter()
+        .filter(|h| {
+            std::fs::read_to_string(dir.join(h)).is_ok_and(|text| {
+                text.lines()
+                    .any(|l| l.starts_with("# installed by gitscale"))
+            })
+        })
+        .collect()
+}
+
+/// `--hooks` names what is installed besides the placing hooks, with `lfs`
+/// for git-lfs's four. Re-installing without it keeps the selection; naming
+/// fewer takes the rest out, putting back the hook one had displaced.
+#[test]
+fn normal_059_hooks_selects_what_is_installed_and_a_reinstall_keeps_it() {
+    let env = TestEnv::new("hook_select");
+    let repo = repo_with(&env, None);
+    let root = repo.to_str().unwrap();
+    write_script(&hooks_dir(&repo).join("pre-push"), "echo MINE\n");
+    let install = |extra: &[&str]| {
+        let mut args = vec!["hook", "install", "--local", "-C", root];
+        args.extend_from_slice(extra);
+        let out = cli(&args);
+        assert!(out.success, "{}{}", out.stdout, out.stderr);
+        out.stdout
+    };
+
+    let said = install(&["--hooks", "pre-commit,lfs"]);
+    let chosen = vec![
+        "pre-commit",
+        "post-commit",
+        "post-checkout",
+        "post-merge",
+        "pre-push",
+    ];
+    assert_eq!(installed(&hooks_dir(&repo)), chosen, "{}", said);
+    assert!(
+        said.contains("installed pre-commit, post-commit, post-checkout, post-merge, pre-push"),
+        "{}",
+        said
+    );
+    assert!(hooks_dir(&repo).join("pre-push.local").is_file());
+
+    install(&[]);
+    assert_eq!(installed(&hooks_dir(&repo)), chosen);
+
+    let said = install(&["--hooks", "pre-commit"]);
+    assert_eq!(
+        installed(&hooks_dir(&repo)),
+        vec!["pre-commit", "post-checkout", "post-merge"],
+        "{}",
+        said
+    );
+    assert_eq!(
+        std::fs::read_to_string(hooks_dir(&repo).join("pre-push")).unwrap(),
+        "#!/bin/sh\necho MINE\n",
+        "the repository's own pre-push should be back"
+    );
+    assert!(said.contains("removed pre-push"), "{}", said);
+}
+
+/// A name git does not have — a typo, or a hook gitscale does not install —
+/// is refused before anything is written, with the names it takes.
+#[test]
+fn error_060_an_unknown_hook_name_is_refused_and_nothing_is_written() {
+    let env = TestEnv::new("hook_select_unknown");
+    let repo = repo_with(&env, None);
+    let out = cli(&[
+        "hook",
+        "install",
+        "--local",
+        "--hooks",
+        "pre-commit,pre-merge",
+        "-C",
+        repo.to_str().unwrap(),
+    ]);
+    assert!(!out.success, "{}", out.stdout);
+    assert!(
+        out.stderr.contains("unknown hook 'pre-merge' in --hooks")
+            && out.stderr.contains("pre-merge-commit"),
+        "{}",
+        out.stderr
+    );
+    assert!(installed(&hooks_dir(&repo)).is_empty());
+}
+
+/// Under a global install git runs no hook it does not find in gitscale's
+/// directory. The install says so — and that git-lfs, when it is installed,
+/// will not upload — and `hook status` says it again in each repository.
+#[test]
+fn normal_061_a_global_install_says_which_hooks_no_longer_run() {
+    let env = TestEnv::new("hook_select_global");
+    let repo = repo_with(&env, None);
+    let home = isolated_home(&env);
+    let (bin, _) = fake_lfs(&env.repos_remote);
+    let path = path_with(&bin);
+    let path = path.to_str().unwrap();
+    let install = |extra: &[&str]| {
+        let mut args = vec!["hook", "install", "--global", "--allow", "*"];
+        args.extend_from_slice(extra);
+        let out = cli_isolated_with(&home, &[("PATH", path)], &args);
+        assert!(out.success, "{}{}", out.stdout, out.stderr);
+        out.stdout
+    };
+
+    let said = install(&[]);
+    assert!(
+        said.contains("no other git hook runs in any repository"),
+        "{}",
+        said
+    );
+    assert!(
+        said.contains("git-lfs is installed, but its hooks are not: add --hooks lfs"),
+        "{}",
+        said
+    );
+    let status = cli_isolated(&home, &["hook", "status", "-C", repo.to_str().unwrap()]);
+    assert!(
+        status
+            .stdout
+            .contains("Hooks not installed here do not run in this repository at all"),
+        "{}",
+        status.stdout
+    );
+
+    let said = install(&["--hooks", "lfs"]);
+    assert!(!said.contains("git-lfs is installed, but"), "{}", said);
+    assert!(
+        said.contains("git-lfs runs through these hooks"),
+        "{}",
+        said
+    );
+
+    let said = install(&["--hooks", "all"]);
+    assert!(!said.contains("no other git hook runs"), "{}", said);
 }

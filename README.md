@@ -143,7 +143,9 @@ The problems GitScale is built for:
 - **A checkout that populates itself.** With GitScale installed as a git hook,
   `git clone`, `git checkout` and `git worktree add` materialise the whole
   workspace — no `--recursive` flag to remember, and an allowlist decides what
-  may run. See [hooks](docs/hooks.md).
+  may run. The other hooks you choose keep running — each repository's own,
+  git-lfs's, and the ones a repository commits in `.githooks/`, with no setup
+  per clone. See [hooks](docs/hooks.md).
 - **Downloads paid for once per workspace.** Every dependency is one bare
   clone inside the root's own `.git`, and every checkout of it a worktree: a
   second worktree of the root costs nothing over the wire, and deleting the root

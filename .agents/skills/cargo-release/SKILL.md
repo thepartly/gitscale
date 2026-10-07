@@ -53,10 +53,17 @@ All integration tests must pass before proceeding. If tests fail, fix the issues
 cargo check
 
 # Dry-run package to catch issues before publishing
-cargo package --allow-dirty
+cargo package --allow-dirty --target-dir target/package-verify
 ```
 
 Review any warnings. Fix before proceeding.
+
+Package and publish always get `--target-dir target/package-verify`. Their
+verify step builds the packaged copy of the sources, and in the shared
+`target/` it takes over the fingerprint of the working tree's build: every
+later `cargo build` and `cargo test` reports `Fresh gitscale` and runs the
+released code, ignoring edits to `src/`, until the version changes or
+`cargo clean -p gitscale`.
 
 ### 5. Commit the version bump
 
@@ -70,7 +77,7 @@ git commit -m "release: vX.Y.Z"
 ### 6. Publish
 
 ```bash
-cargo publish
+cargo publish --target-dir target/package-verify
 ```
 
 ### 7. Tag and push
@@ -92,13 +99,13 @@ cargo test
 cargo check
 
 # 3. Dry-run
-cargo package --allow-dirty
+cargo package --allow-dirty --target-dir target/package-verify
 
 # 4. Commit
 git add -A && git commit -m "release: vX.Y.Z"
 
 # 5. Publish
-cargo publish
+cargo publish --target-dir target/package-verify
 
 # 6. Tag & push
 git tag vX.Y.Z

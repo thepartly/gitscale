@@ -2,7 +2,7 @@
 
 Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Regenerate with `GITSCALE_UPDATE_CATALOG=1 cargo test --test it catalog::`. The naming rules are in [testing.md](testing.md).
 
-651 integration tests (284 normal, 205 edge, 144 error, 18 perf), 44 of them ignored; 170 unit tests.
+662 integration tests (291 normal, 208 edge, 145 error, 18 perf), 41 of them ignored; 170 unit tests.
 
 | Feature | normal | edge | error | perf | total |
 |---|---:|---:|---:|---:|---:|
@@ -18,7 +18,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | [exclude](#exclude) | 2 | 1 | 0 | 0 | 3 |
 | [forward](#forward) | 22 | 1 | 3 | 1 | 27 |
 | [hash](#hash) | 5 | 2 | 1 | 0 | 8 |
-| [hook](#hook) | 19 | 22 | 10 | 1 | 52 |
+| [hook](#hook) | 26 | 25 | 11 | 1 | 63 |
 | [links](#links) | 10 | 14 | 0 | 0 | 24 |
 | [ls](#ls) | 22 | 9 | 3 | 1 | 35 |
 | [man](#man) | 1 | 0 | 0 | 0 | 1 |
@@ -342,7 +342,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 
 | ID | Kind | Test | What it holds |
 |---|---|---|---|
-| hook-001 | normal | `normal_001_install_local_writes_both_hooks` |  |
+| hook-001 | normal | `normal_001_install_local_writes_the_placing_hooks` |  |
 | hook-002 | normal | `normal_002_install_displaces_and_chains_an_existing_hook` |  |
 | hook-003 | normal | `normal_003_uninstall_restores_the_displaced_hook` |  |
 | hook-004 | normal | `normal_004_shim_runs_the_chained_hook_and_honours_the_recursion_guard` |  |
@@ -352,7 +352,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | hook-008 | normal | `normal_008_status_reports_the_allowlist` |  |
 | hook-009 | edge | `edge_009_install_local_from_a_linked_worktree_writes_the_shared_hooks` | git runs every worktree's hooks from the common `.git/hooks`; a linked worktree's own git dir (`.git/worktrees/<name>`) is never consulted. |
 | hook-010 | edge | `edge_010_shim_is_silent_in_a_repo_without_a_gitscale_config` |  |
-| hook-011 | edge | `edge_011_shim_chains_a_hook_whose_path_holds_a_quote` | The shim names the chained hook by path, and a path may hold a quote. |
+| hook-011 | edge | `edge_011_shim_chains_a_hook_whose_path_holds_a_quote` | The repository's path may hold a quote: the shim passes its own path on, and `hook run` finds the displaced hook beside it. |
 | hook-012 | edge | `edge_012_shim_ignores_a_file_checkout` | `git checkout -- <path>` fires post-checkout too, with a third argument of 0. It moves no revision, and a build restoring a file must not have its sub-repositories reset and cleaned underneath it. |
 | hook-013 | edge | `edge_013_reinstall_keeps_the_existing_allowlist` | Upgrading gitscale means re-running install; that must not silently widen or narrow what the machine already allows. |
 | hook-014 | edge | `edge_014_status_recognises_a_repositorys_own_copy_of_the_shim` | A monorepo that commits its own copies of the shim — `.githooks/`, pointed at by a repo-local `core.hooksPath` — is running gitscale, and status must say so rather than call them foreign and advise installing over them. Uninstall, which acts only on shims gitscale wrote, leaves them alone. |
@@ -362,7 +362,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | hook-018 | error | `error_018_install_global_requires_an_allowlist` | A global install arms every clone on the machine, so it has to be told what it may run. Guessing a default here is the bug this exists to prevent. |
 | hook-019 | error | `error_019_install_refuses_a_pattern_that_would_break_the_shim` |  |
 | hook-020 | error | `error_020_run_refuses_when_the_shim_passed_no_allowlist` | A shim written before the allowlist existed passes no patterns. Running wide open in that case would leave the hole in place across an upgrade. |
-| hook-021 | normal | `normal_021_global_install_keeps_each_repositorys_own_git_hooks_running` | **ignored: bug: a --global install never runs a repository's own .git/hooks** A global `core.hooksPath` replaces every repository's `.git/hooks`, so the docs promise that the installed hook still runs the repository's own hook first. A repository's own `post-checkout` — and its `pre-commit`, which gitscale never installs — must keep running once a global install is in place, or a secret scanner or git-lfs hook silently stops working. |
+| hook-021 | normal | `normal_021_global_install_keeps_each_repositorys_own_git_hooks_running` | A global `core.hooksPath` replaces every repository's `.git/hooks`, so the docs promise that the installed hook still runs the repository's own hook first. A repository's own `post-checkout` — and its `pre-commit`, which gitscale never installs — must keep running once a global install is in place, or a secret scanner or git-lfs hook silently stops working. |
 | hook-022 | normal | `normal_022_on_pull_error_decides_whether_a_failed_hook_placement_fails_the_checkout` | `on_pull_error` decides whether a failed hook-triggered placement fails the git operation: unset, CI fails fast and a developer machine only warns; set, it means what it says either way. Every failure leaves a breadcrumb. |
 | hook-023 | normal | `normal_023_status_reports_a_failed_hook_placement_until_one_succeeds` | The breadcrumb is what lets a later, more confusing failure be traced back: `hook status` shows the failed placement until a hook-triggered one succeeds, which removes it. |
 | hook-024 | normal | `normal_024_uninstall_global_removes_the_shims_and_unsets_core_hooks_path` | Uninstalling a global install takes back exactly what it set up: the shims in ~/.config/gitscale/hooks and the global `core.hooksPath` pointing at them — and nothing else in the user's git config. |
@@ -372,7 +372,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | hook-028 | edge | `edge_028_reinstall_keeps_chaining_to_the_displaced_hook` | Re-installing — what an upgrade of gitscale means — keeps the shim chained to the hook it displaced the first time. Losing the link would leave the repository's own hook in `<name>.local`, never run again. |
 | hook-029 | edge | `edge_029_uninstall_with_nothing_installed_says_so_and_changes_nothing` | Uninstalling where gitscale installed nothing says so and touches nothing: not somebody else's hook, and not a `core.hooksPath` it did not set. |
 | hook-030 | edge | `edge_030_uninstall_removes_the_shim_when_the_displaced_hook_is_gone` | The displaced hook may have been deleted by hand since the install. The uninstall still removes gitscale's own shim, and says it removed it rather than claiming a restore. |
-| hook-031 | edge | `edge_031_shim_reports_a_missing_binary_only_where_the_repo_opted_in` | A shim whose gitscale binary has gone says so — but only in a repository that opted in with a `.gitscale.toml`; every other repository stays silent. Either way the git operation is not failed for it. |
+| hook-031 | edge | `edge_031_a_shim_without_its_binary_says_so_and_runs_the_repositorys_own_hook` | A shim whose gitscale binary has gone says so on every hook, in every repository — the repository's other hooks went with it — and still runs the repository's own hook. The git operation is not failed for it. |
 | hook-032 | edge | `edge_032_shim_skips_a_chained_hook_that_is_not_executable` | git itself skips a hook file that is not executable; the shim does the same with a displaced one, rather than failing the checkout on it. |
 | hook-033 | edge | `edge_033_status_shows_a_global_hooks_path_that_hides_a_local_install` | A `--local` install writes `.git/hooks`, which git ignores once a global `core.hooksPath` is set. The install does not say so (see the decisions in the review); `hook status` is what shows it: the hooks directory git really uses, and no gitscale hook in it. Pins current behaviour. |
 | hook-034 | edge | `edge_034_status_reports_the_system_and_global_hooks_paths` | `hook status` reads the system and global settings from their own files — what a test can point `GIT_CONFIG_SYSTEM` at, since `git config --system` ignores `GIT_CONFIG_NOSYSTEM`. Read-only: nothing here installs at `--system` scope. |
@@ -380,20 +380,31 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | hook-036 | edge | `edge_036_run_in_a_repo_without_a_config_does_nothing` | `hook run` re-checks the opt-in the shim makes: a repository with no `.gitscale.toml` at its root gets no placement and no output. |
 | hook-037 | edge | `edge_037_allow_patterns_reach_gitscale_verbatim_and_never_run` | The patterns are written into a shell script. Shell syntax in one — `$(…)`, backticks, `;` — must reach gitscale as the literal pattern and never run. |
 | hook-038 | edge | `edge_038_a_refused_post_sync_leaves_a_breadcrumb_and_follows_the_policy` | A `post_sync` the allowlist refuses is a failed hook placement like any other: it leaves a breadcrumb, and `on_pull_error` decides — off CI the checkout goes on, in CI it fails. The command never runs either way. |
-| hook-039 | edge | `edge_039_install_beside_a_repositorys_own_copy_runs_gitscale_once` | **ignored: bug: install displaces a repository's own gitscale copy and chains to it, so every checkout is placed twice** A monorepo may commit its own copy of the shim and point `core.hooksPath` at it; `hook status` already recognises such a copy. A `--local` install there must not end up running gitscale twice on every checkout — once from the displaced copy and again from the new shim. |
+| hook-039 | edge | `edge_039_install_beside_a_repositorys_own_copy_runs_gitscale_once` | A monorepo may commit its own copy of the shim and point `core.hooksPath` at it; `hook status` already recognises such a copy. A `--local` install there displaces the copy and must not end up running gitscale twice on every checkout — once from the displaced copy and again from the new shim. |
 | hook-040a | error | `error_040a_install_global_refuses_a_foreign_core_hooks_path` | A global `core.hooksPath` gitscale did not set belongs to somebody — a team's shared hooks, say. Installing over it would silently disable them, so the install refuses, and leaves the config and the hooks as they were. |
 | hook-040b | error | `error_040b_install_global_with_force_replaces_a_foreign_core_hooks_path` | With `--force` the install replaces the foreign `core.hooksPath`, leaving the directory it named alone. A later uninstall unsets `core.hooksPath` rather than restoring the old value — current behaviour, pinned here and listed for the owner to decide. |
 | hook-041a | error | `error_041a_install_refuses_to_overwrite_a_displaced_hook` | A hook already displaced to `<name>.local` is somebody's: a second foreign hook would overwrite it. The install refuses, and writes nothing. |
 | hook-041b | error | `error_041b_install_with_force_displaces_over_an_older_displaced_hook` | With `--force` the hook in place is displaced over the older `.local`, which is lost — what `--force` is documented to do. |
-| hook-042 | error | `error_042_a_refused_install_leaves_every_hook_untouched` | **ignored: bug: a .local collision on post-merge is found after post-checkout was already displaced and rewritten** A refused install leaves every hook as it found it — including the ones it would have handled before reaching the one that made it refuse. |
+| hook-042 | error | `error_042_a_refused_install_leaves_every_hook_untouched` | A refused install leaves every hook as it found it — including the ones it would have handled before reaching the one that made it refuse. |
 | hook-043 | error | `error_043_status_never_prints_credentials_from_the_origin` | An `origin` can carry credentials — older GitLab runners check out with the job token in the URL. `hook status` names the repository by host and path and never prints them. |
-| hook-044 | perf | `perf_044_a_hooked_clone_runs_gitscale_exactly_once` | One clone runs gitscale once. The placement it starts checks out every declared repository with git, which fires the same global hook in each — and each carries a `.gitscale.toml` here, so only the recursion guard stops that from recursing. |
+| hook-044 | perf | `perf_044_a_hooked_clone_places_the_workspace_exactly_once` | One clone places the workspace once. The placement it starts checks out every declared repository with git, which fires the same global hook in each — and each carries a `.gitscale.toml` here, so only the recursion guard stops that from recursing. |
 | hook-045 | normal | `normal_045_a_git_pull_in_a_child_places_its_siblings_fetching_on_miss` | A pull in a child that changes what it asks for places its siblings — fetching the tag their store lacks — and leaves the child where the pull put it. |
 | hook-046 | normal | `normal_046_a_child_switched_to_its_topic_is_writable_and_elsewhere_warned` | Switched with plain git to its slot's topic branch, a child is made writable, as `git topic join` makes it; switched anywhere else it stays, with a warning that the next placement moves it back. |
 | hook-047 | edge | `edge_047_a_child_without_a_config_or_not_recursive_places_the_workspace` | A child with no config of its own, and one the root declares with `recursive = false`, place the workspace like any other. |
 | hook-048 | edge | `edge_048_nothing_happens_mid_rebase_or_at_a_bisect_step` | In the middle of a rebase, a merge or a bisect, the child is not where it will end: the hook does nothing. |
 | hook-049 | normal | `normal_049_the_allowlist_is_matched_on_the_roots_remote` | The allowlist is matched against the workspace root's remote — whose `post_sync` runs — not the child's. |
 | hook-050 | normal | `normal_050_the_installed_shim_fires_in_a_child` | End to end: the installed shim recognises a child by its common dir and hands it to `hook run --child`, so `git switch` to the topic in a child makes it writable. |
+| hook-051 | normal | `normal_051_the_shim_hands_everything_to_hook_run` | The shim decides nothing: it hands `hook run` the hook's name, its own path, its scope, git's arguments and the allowlist. |
+| hook-052 | normal | `normal_052_git_lfs_runs_once_in_a_repository_that_uses_it` | git-lfs runs once in a repository that uses it — the hook git-lfs wrote there is recognised and not run a second time — and never in one that does not. |
+| hook-053 | normal | `normal_053_each_stage_of_pre_push_gets_the_refs_on_stdin` | `pre-push` reads the refs being pushed on stdin. The repository's own hook, git-lfs and `.githooks/` each get the whole of it. |
+| hook-054 | normal | `normal_054_githooks_run_only_for_an_allowed_repository` | A repository's committed `.githooks/` runs only when the allowlist the hook was installed with names it; otherwise the hook says so and git's operation goes on. |
+| hook-055 | edge | `edge_055_a_failure_stops_a_pre_hook_but_not_a_post_hook` | A failing stage of a hook that can stop git's operation stops the rest, and its status is the hook's. After the fact, every stage still runs, and the first failure is reported. |
+| hook-056 | edge | `edge_056_a_repository_using_lfs_without_git_lfs_cannot_push` | A repository that uses Git LFS, on a machine without git-lfs: pushing would leave the large files behind, so `pre-push` fails and says why, as git-lfs's own hook does. |
+| hook-057 | normal | `normal_057_status_flags_hooks_written_by_an_older_gitscale` | `hook status` names hooks a gitscale before this one wrote, which run neither the repository's other hooks nor git-lfs, and says to reinstall. |
+| hook-058 | edge | `edge_058_a_hook_without_a_shebang_runs_with_sh` | git runs a hook script with no `#!` line with the shell; so does the dispatcher, rather than failing on it. |
+| hook-059 | normal | `normal_059_hooks_selects_what_is_installed_and_a_reinstall_keeps_it` | `--hooks` names what is installed besides the placing hooks, with `lfs` for git-lfs's four. Re-installing without it keeps the selection; naming fewer takes the rest out, putting back the hook one had displaced. |
+| hook-060 | error | `error_060_an_unknown_hook_name_is_refused_and_nothing_is_written` | A name git does not have — a typo, or a hook gitscale does not install — is refused before anything is written, with the names it takes. |
+| hook-061 | normal | `normal_061_a_global_install_says_which_hooks_no_longer_run` | Under a global install git runs no hook it does not find in gitscale's directory. The install says so — and that git-lfs, when it is installed, will not upload — and `hook status` says it again in each repository. |
 
 ### links
 
