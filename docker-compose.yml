@@ -12,6 +12,7 @@ services:
       - "5000:5000"
     networks:
       - default
+      
       - devbox
 
 networks:

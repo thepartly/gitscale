@@ -1842,7 +1842,21 @@ fn normal_068_reuse_releases_the_image_of_the_same_sources() {
     let hash = hash_tags(env.registry().tags(&image)).pop().unwrap();
 
     let tree = git_stdout(&bare, &["rev-parse", &format!("{}^{{tree}}", branch)]);
-    let squashed = git_stdout(&bare, &["commit-tree", &tree, "-p", "main", "-m", "squash"]);
+    let squashed = git_stdout(
+        &bare,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@test.com",
+            "commit-tree",
+            &tree,
+            "-p",
+            "main",
+            "-m",
+            "squash",
+        ],
+    );
     run_git_pub(&bare, &["update-ref", "refs/heads/main", &squashed]);
     env.registry().clear_log();
 
