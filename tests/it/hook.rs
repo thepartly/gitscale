@@ -1879,7 +1879,7 @@ fn normal_050_the_installed_shim_fires_in_a_child() {
 fn normal_052_git_lfs_runs_once_in_a_repository_that_uses_it() {
     let env = TestEnv::new("hook_lfs_once");
     let repo = repo_with(&env, None);
-    std::fs::create_dir_all(repo.join(".git/lfs")).unwrap();
+    std::fs::create_dir_all(repo.join(".git/lfs/objects")).unwrap();
     write_script(
         &hooks_dir(&repo).join("post-commit"),
         &lfs_stock_hook("post-commit"),
@@ -1906,7 +1906,7 @@ fn normal_052_git_lfs_runs_once_in_a_repository_that_uses_it() {
 fn normal_053_each_stage_of_pre_push_gets_the_refs_on_stdin() {
     let env = TestEnv::new("hook_pre_push_stdin");
     let repo = repo_with(&env, None);
-    std::fs::create_dir_all(repo.join(".git/lfs")).unwrap();
+    std::fs::create_dir_all(repo.join(".git/lfs/objects")).unwrap();
     let own = env.repos_remote.join("own.txt");
     let committed = env.repos_remote.join("committed.txt");
     write_script(
@@ -2012,7 +2012,7 @@ fn edge_055_a_failure_stops_a_pre_hook_but_not_a_post_hook() {
 fn edge_056_a_repository_using_lfs_without_git_lfs_cannot_push() {
     let env = TestEnv::new("hook_lfs_missing");
     let repo = repo_with(&env, None);
-    std::fs::create_dir_all(repo.join(".git/lfs")).unwrap();
+    std::fs::create_dir_all(repo.join(".git/lfs/objects")).unwrap();
     let shim = install_local(&repo, &[]).join("pre-push");
     // A PATH holding git and sh, and nothing else.
     let bin = env.repos_remote.join("bare-bin");
@@ -2038,6 +2038,37 @@ fn edge_056_a_repository_using_lfs_without_git_lfs_cannot_push() {
         "{}",
         output
     );
+}
+
+/// A `.git/lfs` holding no objects, as any git-lfs command leaves behind,
+/// does not make a repository an LFS one: on a machine without git-lfs,
+/// `post-checkout` still succeeds rather than failing every checkout.
+#[test]
+fn edge_062_an_lfs_directory_without_objects_does_not_need_git_lfs() {
+    let env = TestEnv::new("hook_lfs_stub");
+    let repo = repo_with(&env, None);
+    std::fs::create_dir_all(repo.join(".git/lfs/tmp")).unwrap();
+    let shim = install_local(&repo, &[]).join("post-checkout");
+    // A PATH holding git and sh, and nothing else.
+    let bin = env.repos_remote.join("bare-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for tool in ["git", "sh"] {
+        let found = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|d| d.join(tool))
+            .find(|p| p.is_file())
+            .unwrap();
+        std::os::unix::fs::symlink(found, bin.join(tool)).unwrap();
+    }
+
+    let (code, output) = run_hook_with(
+        &shim,
+        &repo,
+        &["0000000000000000000000000000000000000000", "HEAD", "1"],
+        &[("PATH", bin.as_os_str())],
+        b"",
+    );
+    assert_eq!(code, 0, "{}", output);
+    assert!(!output.contains("git-lfs is not installed"), "{}", output);
 }
 
 /// `hook status` names hooks a gitscale before this one wrote, which run

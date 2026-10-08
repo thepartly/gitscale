@@ -283,9 +283,10 @@ pointers to files the server never receives.
 
 git-lfs writes its hooks wherever `core.hooksPath` points, and refuses to
 replace GitScale's there. So with `--hooks lfs` GitScale runs git-lfs itself,
-as the second stage, in a repository that uses it — one with a `lfs` directory in its common
-git directory, which git-lfs creates the first time it stores a file there, or
-with git-lfs's own hook among the repository's. A hook git-lfs wrote is
+as the second stage, in a repository that uses it: one with an `lfs/objects`
+directory in its common git directory, which git-lfs creates the first time it
+stores a file there, or with git-lfs's own hook among the repository's. A bare
+`lfs` directory does not count: any git-lfs command leaves `lfs/tmp` behind. A hook git-lfs wrote is
 recognised and not run a second time.
 
 On a machine with GitScale's hooks installed, install them with `--hooks
