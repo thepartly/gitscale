@@ -535,7 +535,8 @@ to push: `to push: imports/b, . — git scale push`.
 ## Raising a dependency: `git upgrade <dir>`
 
 `git upgrade imports/d` — or `git upgrade .` inside it — raises D in the
-topic's configs:
+root's config and the topic's configs. It needs no topic: on the default
+branch it edits the root's config alone.
 
 1. The new revision is the **newest release of D's kind and current major**,
    semver or calendar, among the [releases](#promotion-git-upgrade) that hold
@@ -544,7 +545,8 @@ topic's configs:
    A pre-release is picked only when the current pin is already a pre-release
    — the rule npm and Cargo follow. Without access to D's sources, the newest
    version its registry has: releases are cut in order on D's release
-   branches, so the newest holds every one before it.
+   branches, so the newest holds every one before it. In CI, which keeps no
+   store, the newest version tag on D's remote, by name, for the same reason.
 2. **The configs on the topic are edited**: the root's, and those of the
    requesters joined to it. A requester off the topic is named, with the
    command that joins it, and left as it is.
@@ -570,7 +572,9 @@ next to merge: imports/b, imports/c
 The cascade then runs as for any change: B and C merge and are tagged, and
 `git upgrade` bumps the root's pins of them.
 
-`upgrade` in all its forms works on a developer machine; in CI it refuses.
+Promotion works on a developer machine only; in CI it refuses. A raise works
+in CI too, so a scheduled job can run `git upgrade <dir>` on the default
+branch, commit the root's config and open a merge request.
 
 ## Topics in CI
 

@@ -6,8 +6,11 @@
 //!   topic's configs that ask for less, its topic branch is deleted on its
 //!   remote, and the slot leaves the topic.
 //! * `upgrade <dir>...` — the newest release of each named dependency,
-//!   written into the topic's configs that ask for less. A requester not on
-//!   the topic is named, with the command that joins it.
+//!   written into the root's config and the topic's configs that ask for
+//!   less. A requester not on the topic is named, with the command that joins
+//!   it. It needs no topic, so a scheduled job can raise the root's pins; in
+//!   CI, which keeps no stores, the newest release is read from the remote's
+//!   version tags by name.
 //!
 //! Only the root and the checkouts on the topic are edited: joining is
 //! `git topic join`'s, and a topic begins only with `git topic start`. This is
@@ -62,23 +65,28 @@ pub fn run(
     let (config, config_root) = load_workspace(root)?;
     let here = Here::new(root, &config_root)?;
     let sources = Sources::new(&config_root, no_cache)?;
-    if sources.stores.is_none() {
-        bail!(
-            "upgrade edits configs in the checkouts of a developer machine; CI keeps none to \
-             edit"
-        );
-    }
     if opts.dirs.is_empty() && opts.major {
         bail!(
             "--major raises a named dependency: git upgrade --major <dir>. Promotion stays in \
              the major each pin is in"
         );
     }
-    let Some(branch) = crate::topic::root(&config, &config_root, true)
-        .topic()
-        .map(str::to_string)
-    else {
-        bail!("not on a topic: git topic start NAME");
+    let branch = if opts.dirs.is_empty() {
+        if sources.stores.is_none() {
+            bail!(
+                "promotion edits configs in the checkouts of a developer machine; CI keeps none \
+                 to edit. Raise named dependencies instead: git upgrade <dir>"
+            );
+        }
+        let Some(branch) = crate::topic::root(&config, &config_root, true)
+            .topic()
+            .map(str::to_string)
+        else {
+            bail!("not on a topic: git topic start NAME");
+        };
+        Some(branch)
+    } else {
+        None
     };
     let artefacts = Artefacts::new(&config, &config_root, sources.images());
     let resolution = crate::resolve::workspace(
@@ -89,8 +97,8 @@ pub fn run(
         Some(&artefacts),
         verbose,
     )?;
-    if opts.dirs.is_empty() {
-        promote_topic(
+    match branch {
+        Some(branch) => promote_topic(
             &config,
             &config_root,
             &sources,
@@ -99,19 +107,17 @@ pub fn run(
             &branch,
             opts,
             out,
-        )
-    } else {
-        let stores = sources.stores.as_ref().expect("checked above");
-        raise(
+        ),
+        None => raise(
             &config,
             &config_root,
             &here,
-            stores,
+            sources.stores.as_ref(),
             &artefacts,
             &resolution,
             opts,
             out,
-        )
+        ),
     }
 }
 
@@ -395,7 +401,7 @@ fn raise(
     config: &GitScaleConfig,
     config_root: &Path,
     here: &Here,
-    stores: &Stores,
+    stores: Option<&Stores>,
     artefacts: &Artefacts,
     resolution: &Resolution,
     opts: &Options,

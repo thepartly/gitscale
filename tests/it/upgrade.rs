@@ -637,8 +637,8 @@ fn edge_019_a_raise_with_nothing_to_raise_says_why_and_changes_nothing() {
 // ---------------------------------------------------------------------------
 
 /// Each misuse of `upgrade` is refused with what to do instead, and leaves
-/// the config and the root's branch as they were. Off a topic both forms
-/// refuse: only `git topic start` begins one.
+/// the config and the root's branch as they were. Off a topic promotion
+/// refuses: only `git topic start` begins one. A raise needs no topic.
 #[test]
 fn error_020_misused_options_are_refused_and_change_nothing() {
     let env = TestEnv::new("upgrade_option_errors");
@@ -657,10 +657,6 @@ fn error_020_misused_options_are_refused_and_change_nothing() {
     };
     refused(&["upgrade", "--major"], "--major raises a named dependency");
     refused(&["upgrade"], "not on a topic: git topic start NAME");
-    refused(
-        &["upgrade", "imports/d"],
-        "not on a topic: git topic start NAME",
-    );
     refused(
         &["upgrade", "--resolved"],
         "unexpected argument '--resolved'",
@@ -681,25 +677,57 @@ fn error_020_misused_options_are_refused_and_change_nothing() {
     );
 }
 
-/// `upgrade` edits the configs of a developer machine's checkouts; in CI,
-/// which keeps none, it refuses.
+/// Promotion edits the configs of a developer machine's checkouts; in CI,
+/// which keeps none, it refuses and says what does work there.
 #[test]
-fn error_021_upgrade_refuses_in_ci() {
-    let env = TestEnv::new("upgrade_ci_raise");
+fn error_021_promotion_refuses_in_ci() {
+    let env = TestEnv::new("upgrade_ci_promote");
     let (b, d) = diamond(&env);
     let config = repos(&[
         ("imports/b", &b, ", revision = \"v1.0.0\""),
         ("imports/d", &d, ", revision = \"v1.2.0\""),
     ]);
     env.write_config(&config);
-    let out = env.run_with_env(&[("CI", "true")], &["upgrade", "imports/d"]);
+    let out = env.run_with_env(&[("CI", "true")], &["upgrade"]);
     assert!(!out.success, "{}", out.stdout);
     assert!(
-        out.stderr.contains("CI keeps none to edit"),
+        out.stderr.contains("CI keeps none to edit") && out.stderr.contains("git upgrade <dir>"),
         "{}",
         out.stderr
     );
     assert_eq!(config_text(&env.playground), config);
+}
+
+/// In CI, with no store and no topic, `upgrade <dir>` raises the root's pin
+/// to the newest release among the remote's version tags, by name: in its
+/// major, skipping pre-releases, the way a scheduled job keeps pins current.
+#[test]
+fn normal_032_a_raise_in_ci_reads_the_remotes_tags_and_needs_no_topic() {
+    let env = TestEnv::new("upgrade_ci_raise");
+    let core = tagged(
+        &env,
+        "core",
+        &[
+            ("v1-2026.10.01", ""),
+            ("v1-2026.10.05-2", ""),
+            ("v1-2026.10.06-rc1", ""),
+            ("v2-2026.10.07", ""),
+        ],
+    );
+    let config = repos(&[("imports/core", &core, ", revision = \"v1-2026.10.01\"")]);
+    env.write_config(&config);
+    let out = env.run_with_env(&[("CI", "true")], &["upgrade", "imports/core"]);
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    assert!(
+        out.stdout
+            .contains("imports/core   v1-2026.10.01 → v1-2026.10.05-2"),
+        "{}",
+        out.stdout
+    );
+    assert_eq!(
+        config_text(&env.playground),
+        config.replace("v1-2026.10.01", "v1-2026.10.05-2")
+    );
 }
 
 /// A promotion that would delete a remote branch holding work its release

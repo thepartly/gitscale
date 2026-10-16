@@ -162,8 +162,10 @@ impl Target {
 /// [`candidates`] in the root's store for its repository, fetched. Without
 /// access to its sources, the newest of its registry's version tags: each is
 /// cut after the last on the branches releases are cut on, so it holds them.
+/// Without a store (CI keeps none), the newest of its remote's version tags,
+/// by name, on the same reasoning: one ref advertisement, no objects.
 pub fn target(
-    stores: &Stores,
+    stores: Option<&Stores>,
     artefacts: &Artefacts,
     slot: &Slot,
     cross_major: bool,
@@ -177,9 +179,13 @@ pub fn target(
     let found = if slot.sourceless {
         let released = artefacts.released(&slot.url)?;
         by_name(released.keys().map(String::as_str), &pinned, cross_major)
-    } else {
+    } else if let Some(stores) = stores {
         let store = stores.update(&crate::ci::remote_url(&slot.url))?;
         candidates(&store, slot, &pin, &pinned, cross_major)?
+    } else {
+        let refs = crate::git::ls_remote_refs(&crate::ci::remote_url(&slot.url))?;
+        let tags: Vec<&str> = refs.iter().map(|(_, name)| name.as_str()).collect();
+        by_name(tags, &pinned, cross_major)
     };
     let newest = found.into_iter().next();
     Ok(match newest {

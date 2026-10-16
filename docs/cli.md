@@ -388,13 +388,13 @@ git upgrade [GLOBAL] [--major] [--commit] [--dry-run] [DIR...]
 | `--commit` | Commit each edited `.gitscale.toml`, that file alone |
 | `--dry-run` | Print the plan and change nothing |
 
-On a topic only. With no directories: promote the topic's slots whose change a
+With no directories, on a topic only: promote the topic's slots whose change a
 release now holds — writing that release into the topic's configs, deleting
 their topic branches on their remotes, taking them off the topic. With
-directories: raise each to its newest release — a tag holding its pin, on a
-release branch where the repository names them — in the topic's configs that
-ask for it; a requester off the topic is named with the `git topic join` that
-brings it in. Edits keep comments and key order. With `--commit`, the last line
+directories, on a topic or not: raise each to its newest release — a tag
+holding its pin, on a release branch where the repository names them — in the
+root's config and the topic's configs that ask for it; a requester off the
+topic is named with the `git topic join` that brings it in. Edits keep comments and key order. With `--commit`, the last line
 names the repositories that now have commits to push — a promotion edits other
 topic checkouts' configs too:
 
@@ -402,7 +402,9 @@ topic checkouts' configs too:
 to push: imports/b, . — git scale push
 ```
 
-Refuses in CI. See [promotion](topics.md#promotion-git-upgrade) and
+Promotion refuses in CI. A raise works there, reading the newest version tag
+from the remote by name, since CI keeps no store — so a scheduled job can keep
+a workspace's pins current. See [promotion](topics.md#promotion-git-upgrade) and
 [raising](topics.md#raising-a-dependency-git-upgrade-dir).
 
 ```
