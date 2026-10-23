@@ -394,6 +394,78 @@ fn ensure_store(path: &Path, url: &str) -> Result<()> {
     Ok(())
 }
 
+/// A store of `url`'s history alone, made for one command where no stores
+/// are kept (CI): commits, branches and tags, no trees or files — those
+/// come on demand from `url`, as a partial clone's do. Removed on drop.
+pub struct HistoryStore {
+    path: PathBuf,
+}
+
+impl HistoryStore {
+    pub fn fetch(url: &str) -> Result<HistoryStore> {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "gitscale-history-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&path);
+        let store = HistoryStore { path };
+        let path = store.path.to_string_lossy().to_string();
+        crate::git::run_git(
+            &[
+                "clone",
+                "--bare",
+                "--quiet",
+                "--filter=tree:0",
+                "--no-tags",
+                url,
+                &path,
+            ],
+            None,
+            true,
+        )
+        .with_context(|| format!("cannot fetch {}", url))?;
+        git_in(
+            &store.path,
+            &[
+                "config",
+                "remote.origin.fetch",
+                "+refs/heads/*:refs/remotes/origin/*",
+            ],
+            true,
+        )?;
+        git_in(
+            &store.path,
+            &[
+                "config",
+                "--add",
+                "remote.origin.fetch",
+                "+refs/tags/*:refs/tags/*",
+            ],
+            true,
+        )?;
+        git_in(&store.path, &["fetch", "--quiet", "origin"], true)
+            .with_context(|| format!("cannot fetch {}", url))?;
+        let _ = git_in(
+            &store.path,
+            &["remote", "set-head", "origin", "--auto"],
+            false,
+        );
+        Ok(store)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for HistoryStore {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
 /// Run git inside a store.
 fn git_in(store: &Path, args: &[&str], check: bool) -> Result<std::process::Output> {
     let dir = store.to_string_lossy().to_string();

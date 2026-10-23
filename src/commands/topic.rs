@@ -646,7 +646,9 @@ fn dependants<'a>(
     } else {
         for dir in dirs {
             let slot = here.slot(resolution, dir)?;
-            match crate::promote::target(stores, artefacts, slot, false)?.release(&slot.directory) {
+            match crate::promote::target(Some(stores), artefacts, slot, false)?
+                .release(&slot.directory)
+            {
                 Ok((_, newest)) => found.extend(
                     requesters(slot, &|revision| {
                         crate::promote::below(revision, newest) == Some(true)

@@ -162,8 +162,10 @@ impl Target {
 /// [`candidates`] in the root's store for its repository, fetched. Without
 /// access to its sources, the newest of its registry's version tags: each is
 /// cut after the last on the branches releases are cut on, so it holds them.
+/// Without a store (CI keeps none), the same rule in a store of its history
+/// alone, fetched for the command: commits and refs, no files.
 pub fn target(
-    stores: &Stores,
+    stores: Option<&Stores>,
     artefacts: &Artefacts,
     slot: &Slot,
     cross_major: bool,
@@ -177,9 +179,12 @@ pub fn target(
     let found = if slot.sourceless {
         let released = artefacts.released(&slot.url)?;
         by_name(released.keys().map(String::as_str), &pinned, cross_major)
-    } else {
+    } else if let Some(stores) = stores {
         let store = stores.update(&crate::ci::remote_url(&slot.url))?;
         candidates(&store, slot, &pin, &pinned, cross_major)?
+    } else {
+        let store = crate::store::HistoryStore::fetch(&crate::ci::remote_url(&slot.url))?;
+        candidates(store.path(), slot, &pin, &pinned, cross_major)?
     };
     let newest = found.into_iter().next();
     Ok(match newest {
