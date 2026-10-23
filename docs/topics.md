@@ -546,7 +546,8 @@ branch it edits the root's config alone.
    — the rule npm and Cargo follow. Without access to D's sources, the newest
    version its registry has: releases are cut in order on D's release
    branches, so the newest holds every one before it. In CI, which keeps no
-   store, the newest version tag on D's remote, by name, for the same reason.
+   store, the same rule runs in one fetched for the command: D's commits,
+   branches and tags, no files.
 2. **The configs on the topic are edited**: the root's, and those of the
    requesters joined to it. A requester off the topic is named, with the
    command that joins it, and left as it is.

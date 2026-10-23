@@ -699,10 +699,10 @@ fn error_021_promotion_refuses_in_ci() {
 }
 
 /// In CI, with no store and no topic, `upgrade <dir>` raises the root's pin
-/// to the newest release among the remote's version tags, by name: in its
-/// major, skipping pre-releases, the way a scheduled job keeps pins current.
+/// to its newest release: in its major, skipping pre-releases, the way a
+/// scheduled job keeps pins current.
 #[test]
-fn normal_032_a_raise_in_ci_reads_the_remotes_tags_and_needs_no_topic() {
+fn normal_032_a_raise_in_ci_needs_no_topic() {
     let env = TestEnv::new("upgrade_ci_raise");
     let core = tagged(
         &env,
@@ -1067,6 +1067,53 @@ fn normal_031_promotion_waits_for_the_image_of_a_repository_that_publishes_one()
     ok(&out);
     assert!(
         out.stdout.contains("imports/core  would promote → v1.1.0"),
+        "{}",
+        out.stdout
+    );
+}
+
+/// In CI a raise takes releases by the same rule as a developer machine:
+/// tags only, never a branch named like a version, and only tags reachable
+/// from a branch the repository pins that hold the pin.
+#[test]
+fn normal_033_a_raise_in_ci_takes_releases_as_a_developer_machine_does() {
+    let f = fixture("upgrade_ci_release_rule", "");
+    let ws = f.clone_root("ws");
+    run_git_pub(&ws, &["checkout", "-q", "--detach"]);
+    run_git_pub(&f.core, &["branch", "v1.9.0", "v1.0.0"]);
+    f.core_commit("v1.9.0", "branch.txt", "a branch named like a version");
+    run_git_pub(&f.core, &["branch", "hotfix", "v1.0.0"]);
+    let hotfix = f.core_commit("hotfix", "fix.txt", "a hotfix");
+    run_git_pub(&f.core, &["tag", "v1.1.0", &hotfix]);
+
+    let out = ci_job(
+        &ws,
+        &f.env.cache,
+        "main",
+        &["upgrade", "--dry-run", "imports/core"],
+    );
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    assert!(
+        out.stdout
+            .contains("imports/core is already at its newest release, v1.0.0"),
+        "{}",
+        out.stdout
+    );
+
+    f.core_commit(
+        "main",
+        ".gitscale.toml",
+        "[branches]\npinned = [\"main\", \"hotfix\"]\n",
+    );
+    let out = ci_job(
+        &ws,
+        &f.env.cache,
+        "main",
+        &["upgrade", "--dry-run", "imports/core"],
+    );
+    assert!(out.success, "{}{}", out.stdout, out.stderr);
+    assert!(
+        out.stdout.contains("imports/core   v1.0.0 → v1.1.0"),
         "{}",
         out.stdout
     );

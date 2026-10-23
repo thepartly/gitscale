@@ -2,7 +2,7 @@
 
 Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Regenerate with `GITSCALE_UPDATE_CATALOG=1 cargo test --test it catalog::`. The naming rules are in [testing.md](testing.md).
 
-663 integration tests (292 normal, 208 edge, 145 error, 18 perf), 41 of them ignored; 170 unit tests.
+664 integration tests (293 normal, 208 edge, 145 error, 18 perf), 41 of them ignored; 170 unit tests.
 
 | Feature | normal | edge | error | perf | total |
 |---|---:|---:|---:|---:|---:|
@@ -34,7 +34,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | [stores](#stores) | 3 | 10 | 2 | 1 | 16 |
 | [sync](#sync) | 5 | 7 | 0 | 1 | 13 |
 | [topic](#topic) | 37 | 17 | 12 | 0 | 66 |
-| [upgrade](#upgrade) | 13 | 9 | 5 | 0 | 27 |
+| [upgrade](#upgrade) | 14 | 9 | 5 | 0 | 28 |
 | [workspace](#workspace) | 2 | 1 | 1 | 0 | 4 |
 
 ## Integration tests
@@ -841,7 +841,8 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | upgrade-029 | error | `error_029_pinned_branches_matching_no_branch_say_so` | Pinned branches that name no branch of the repository are an error that says which repository — not an empty list of candidates that would read as "no release". |
 | upgrade-030 | edge | `edge_030_a_pin_no_release_holds_says_so` | A pin no release holds — cut on a branch the repository does not pin — says so, rather than `no tag`. |
 | upgrade-031 | normal | `normal_031_promotion_waits_for_the_image_of_a_repository_that_publishes_one` | A repository that publishes artefacts is released when its tag's image is there too — whatever form this workspace takes it in. Until then the promotion waits, saying so. |
-| upgrade-032 | normal | `normal_032_a_raise_in_ci_reads_the_remotes_tags_and_needs_no_topic` | In CI, with no store and no topic, `upgrade <dir>` raises the root's pin to the newest release among the remote's version tags, by name: in its major, skipping pre-releases, the way a scheduled job keeps pins current. |
+| upgrade-032 | normal | `normal_032_a_raise_in_ci_needs_no_topic` | In CI, with no store and no topic, `upgrade <dir>` raises the root's pin to its newest release: in its major, skipping pre-releases, the way a scheduled job keeps pins current. |
+| upgrade-033 | normal | `normal_033_a_raise_in_ci_takes_releases_as_a_developer_machine_does` | In CI a raise takes releases by the same rule as a developer machine: tags only, never a branch named like a version, and only tags reachable from a branch the repository pins that hold the pin. |
 
 ### workspace
 

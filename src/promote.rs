@@ -162,8 +162,8 @@ impl Target {
 /// [`candidates`] in the root's store for its repository, fetched. Without
 /// access to its sources, the newest of its registry's version tags: each is
 /// cut after the last on the branches releases are cut on, so it holds them.
-/// Without a store (CI keeps none), the newest of its remote's version tags,
-/// by name, on the same reasoning: one ref advertisement, no objects.
+/// Without a store (CI keeps none), the same rule in a store of its history
+/// alone, fetched for the command: commits and refs, no files.
 pub fn target(
     stores: Option<&Stores>,
     artefacts: &Artefacts,
@@ -183,9 +183,8 @@ pub fn target(
         let store = stores.update(&crate::ci::remote_url(&slot.url))?;
         candidates(&store, slot, &pin, &pinned, cross_major)?
     } else {
-        let refs = crate::git::ls_remote_refs(&crate::ci::remote_url(&slot.url))?;
-        let tags: Vec<&str> = refs.iter().map(|(_, name)| name.as_str()).collect();
-        by_name(tags, &pinned, cross_major)
+        let store = crate::store::HistoryStore::fetch(&crate::ci::remote_url(&slot.url))?;
+        candidates(store.path(), slot, &pin, &pinned, cross_major)?
     };
     let newest = found.into_iter().next();
     Ok(match newest {

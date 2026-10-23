@@ -9,8 +9,8 @@
 //!   written into the root's config and the topic's configs that ask for
 //!   less. A requester not on the topic is named, with the command that joins
 //!   it. It needs no topic, so a scheduled job can raise the root's pins; in
-//!   CI, which keeps no stores, the newest release is read from the remote's
-//!   version tags by name.
+//!   CI, which keeps no stores, the same rule runs in a store of the
+//!   repository's history alone.
 //!
 //! Only the root and the checkouts on the topic are edited: joining is
 //! `git topic join`'s, and a topic begins only with `git topic start`. This is

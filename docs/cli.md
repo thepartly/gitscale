@@ -402,9 +402,9 @@ topic checkouts' configs too:
 to push: imports/b, . — git scale push
 ```
 
-Promotion refuses in CI. A raise works there, reading the newest version tag
-from the remote by name, since CI keeps no store — so a scheduled job can keep
-a workspace's pins current. See [promotion](topics.md#promotion-git-upgrade) and
+Promotion refuses in CI. A raise works there by the same rule, in a store of
+the repository's history alone fetched for the command, since CI keeps none —
+so a scheduled job can keep a workspace's pins current. See [promotion](topics.md#promotion-git-upgrade) and
 [raising](topics.md#raising-a-dependency-git-upgrade-dir).
 
 ```
