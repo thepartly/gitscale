@@ -503,7 +503,8 @@ git scale unrequire imports/utils
 
 ```
 git scale prefer [GLOBAL] [DIR...]
-git scale prefer [GLOBAL] [--source|--artefact] [--lazy|--eager|--committed] <DIR>...
+git scale prefer [GLOBAL] [--source|--artefact] [--lazy|--eager] <DIR>...
+git scale prefer [GLOBAL] --unset <DIR>...
 ```
 
 | Option | Meaning |
@@ -512,13 +513,13 @@ git scale prefer [GLOBAL] [--source|--artefact] [--lazy|--eager|--committed] <DI
 | `--artefact` | The published image of its release, in place of the sources |
 | `--lazy` | Left out until the topic, `git topic join DIR` or `git scale sync DIR` asks for it; a checkout on disk goes at once when that loses nothing |
 | `--eager` | Placed, although its configs say `lazy = true` |
-| `--committed` | Drop `--lazy` or `--eager`: the configs' `lazy` decides again |
+| `--unset` | Remove every preference this workspace recorded for them, form and presence, as `git config --unset` does: the way back for both. Takes no other option |
 
 Without an option: the preferences of the `DIR`s, or every preference with the
 checkouts it applies to, form and presence both. With one form, one presence,
-or one of each, and at least one `DIR`: the preference for each checkout's
-repository, every major of it, in every worktree of the root. It only records,
-`--lazy` removing a clean checkout aside: the next placement applies it, and
+or one of each — or `--unset` alone — and at least one `DIR`: the preference
+for each checkout's repository, every major of it, in every worktree of the
+root. It only records, a clean checkout made lazy going at once aside: the next placement applies it, and
 `git scale ls` shows `source → artefact` meanwhile. See
 [choosing how a checkout arrives](artefacts.md#choosing-how-a-checkout-arrives).
 

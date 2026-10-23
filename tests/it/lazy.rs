@@ -340,7 +340,7 @@ fn normal_011_prefer_lazy_leaves_an_entry_out() {
     );
 }
 
-/// `prefer --eager` places a lazy entry on a plain sync, and `--committed`
+/// `prefer --eager` places a lazy entry on a plain sync, and `--unset`
 /// hands it back to the config, which makes it lazy — and removes it — again.
 #[test]
 fn normal_012_prefer_eager_overrides_a_committed_lazy() {
@@ -352,10 +352,48 @@ fn normal_012_prefer_eager_overrides_a_committed_lazy() {
     assert!(dest.join("data.txt").is_file());
     assert!(ls_row(&ws, "imports/fixtures").contains(" ok"));
 
-    let out = gs(&ws, &["prefer", "--committed", "imports/fixtures"]);
+    let out = gs(&ws, &["prefer", "--unset", "imports/fixtures"]);
     ok(&out);
     assert!(!dest.exists(), "{}", out.stdout);
     assert!(ls_row(&ws, "imports/fixtures").contains(" lazy"));
+}
+
+/// `prefer --unset` removes both kinds of preference — form and presence —
+/// and takes no other preference beside it.
+#[test]
+fn normal_025_prefer_unset_removes_form_and_presence() {
+    let env = TestEnv::new("lazy_prefer_unset");
+    let app = env.artefact_repo("app", &[("app.bin", "main build")]);
+    let ws = artefact_workspace(&env, &app, gitscale::prefer::Form::Artefact);
+    ok(&gs(&ws, &["prefer", "--eager", "meta/app"]));
+    let out = gs(&ws, &["prefer", "meta/app"]);
+    ok(&out);
+    assert!(
+        out.stdout.contains("meta/app   artefact, eager"),
+        "{}",
+        out.stdout
+    );
+
+    ok(&gs(&ws, &["prefer", "--unset", "meta/app"]));
+    let out = gs(&ws, &["prefer"]);
+    ok(&out);
+    assert!(
+        out.stdout.contains("Every checkout takes its sources."),
+        "{}",
+        out.stdout
+    );
+
+    let out = gs(&ws, &["prefer", "--unset", "--lazy", "meta/app"]);
+    assert!(!out.success, "{}", out.stdout);
+    let out = gs(&ws, &["prefer", "--unset", "--artefact", "meta/app"]);
+    assert!(!out.success, "{}", out.stdout);
+    let out = gs(&ws, &["prefer", "--unset"]);
+    assert!(!out.success);
+    assert!(
+        out.stderr.contains("git scale prefer --unset <DIR>"),
+        "{}",
+        out.stderr
+    );
 }
 
 /// Made lazy while it holds uncommitted work, a checkout stays, and says why.

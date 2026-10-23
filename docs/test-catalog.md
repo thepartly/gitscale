@@ -2,7 +2,7 @@
 
 Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Regenerate with `GITSCALE_UPDATE_CATALOG=1 cargo test --test it catalog::`. The naming rules are in [testing.md](testing.md).
 
-683 integration tests (301 normal, 219 edge, 145 error, 18 perf), 41 of them ignored; 172 unit tests.
+684 integration tests (302 normal, 219 edge, 145 error, 18 perf), 41 of them ignored; 172 unit tests.
 
 | Feature | normal | edge | error | perf | total |
 |---|---:|---:|---:|---:|---:|
@@ -19,7 +19,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | [forward](#forward) | 22 | 1 | 3 | 1 | 27 |
 | [hash](#hash) | 5 | 2 | 1 | 0 | 8 |
 | [hook](#hook) | 26 | 25 | 11 | 1 | 63 |
-| [lazy](#lazy) | 10 | 11 | 0 | 0 | 21 |
+| [lazy](#lazy) | 11 | 11 | 0 | 0 | 22 |
 | [links](#links) | 10 | 14 | 0 | 0 | 24 |
 | [ls](#ls) | 22 | 9 | 3 | 1 | 35 |
 | [man](#man) | 1 | 0 | 0 | 0 | 1 |
@@ -419,7 +419,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | lazy-006 | normal | `normal_006_a_joined_lazy_entry_comes_back_with_its_topic` | A worktree of the topic made again — after the first was deleted by hand — places the lazy entry the topic joined: its store has the branch. |
 | lazy-008 | edge | `edge_008_a_remote_topic_branch_places_an_absent_lazy_entry` | A topic branch its remote has brings an absent lazy entry in, on its branch — on a developer machine and in CI alike — while a workspace off the topic still leaves it out. |
 | lazy-011 | normal | `normal_011_prefer_lazy_leaves_an_entry_out` | `prefer --lazy` leaves an entry its config does not call lazy out, and removes its checkout at once when that loses nothing; `ls` says the workspace chose it, and `prefer` lists both axes. |
-| lazy-012 | normal | `normal_012_prefer_eager_overrides_a_committed_lazy` | `prefer --eager` places a lazy entry on a plain sync, and `--committed` hands it back to the config, which makes it lazy — and removes it — again. |
+| lazy-012 | normal | `normal_012_prefer_eager_overrides_a_committed_lazy` | `prefer --eager` places a lazy entry on a plain sync, and `--unset` hands it back to the config, which makes it lazy — and removes it — again. |
 | lazy-013 | edge | `edge_013_prefer_lazy_keeps_a_modified_checkout` | Made lazy while it holds uncommitted work, a checkout stays, and says why. |
 | lazy-014 | normal | `normal_014_leave_and_finish_take_a_lazy_entry_away` | A lazy entry joined from nothing and taken off the topic, by `leave` or by `finish`, goes back to nothing; its commits stay in its store. |
 | lazy-015 | edge | `edge_015_an_unreachable_lazy_remote_fails_check_in_ci` | In CI, on a topic, a lazy repository's remote that cannot be asked fails `check` rather than reading as "no branch", which would let a change in it go unseen. |
@@ -432,6 +432,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | lazy-022 | edge | `edge_022_join_works_with_a_store_older_than_the_pins` | Joining a lazy repository works with stores fetched before the root's pins moved: a pin to a tag pushed since is fetched, not an error. |
 | lazy-023 | edge | `edge_023_prefer_lazy_keeps_a_checkout_it_cannot_read` | A checkout whose git status cannot be read is kept: nothing says its files are safe to delete. |
 | lazy-024 | edge | `edge_024_a_sibling_with_a_longer_name_does_not_wake_it` | Only a checkout of another major, `<name>_v<major>`, keeps a lazy repository placed: a directory that merely starts with its name does not. |
+| lazy-025 | normal | `normal_025_prefer_unset_removes_form_and_presence` | `prefer --unset` removes both kinds of preference — form and presence — and takes no other preference beside it. |
 
 ### links
 

@@ -317,7 +317,8 @@ be placed under its repository's own name, as an implicit checkout is. A depende
 way, so a consumer does not inherit what it never uses.
 
 `lazy` is the configs' default. A workspace keeps its own answer with `git
-scale prefer --lazy` or `--eager` — see
+scale prefer --lazy` or `--eager`, and `git scale prefer --unset` hands the
+choice back to the configs — see
 [choosing how a checkout arrives](artefacts.md#choosing-how-a-checkout-arrives).
 `git scale require --lazy` writes the flag.
 

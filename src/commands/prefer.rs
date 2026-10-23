@@ -20,6 +20,16 @@ pub struct Change {
     pub presence: Option<Option<Presence>>,
 }
 
+impl Change {
+    /// `--unset`: no preference of either kind, as `git config --unset`
+    /// leaves no value. Sources are the default form, so recording them
+    /// removes the form preference.
+    pub const UNSET: Change = Change {
+        form: Some(Form::Source),
+        presence: Some(None),
+    };
+}
+
 /// A checkout `prefer` was named: placed, or lazy and left out.
 struct Named {
     directory: String,
@@ -73,9 +83,10 @@ pub fn run(
     }
     if named.is_empty() {
         let flag = match (change.form, change.presence) {
+            _ if change == Change::UNSET => "unset".to_string(),
             (Some(form), _) => form.to_string(),
             (None, Some(Some(presence))) => presence.to_string(),
-            _ => "committed".to_string(),
+            _ => "unset".to_string(),
         };
         bail!(
             "--{} names the checkouts it is for: git scale prefer --{} <DIR>...",

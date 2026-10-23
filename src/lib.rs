@@ -240,9 +240,10 @@ enum Commands {
         /// Placed, although their configs say lazy = true
         #[arg(long, group = "presence")]
         eager: bool,
-        /// Drop --lazy or --eager: what the configs say decides again
-        #[arg(long, group = "presence")]
-        committed: bool,
+        /// Remove every preference recorded for them, form and presence:
+        /// what the configs say decides again
+        #[arg(long, conflicts_with_all = ["source", "artefact", "lazy", "eager"])]
+        unset: bool,
         dirs: Vec<String>,
     },
     /// The merge gate: fail while any checkout comes from a topic branch
@@ -847,22 +848,25 @@ fn run_command(cli: Cli, io: Io, out: &mut dyn Write, err: &mut dyn Write) -> Re
             artefact,
             lazy,
             eager,
-            committed,
+            unset,
             dirs,
         } => {
             use crate::prefer::{Form, Presence};
-            let change = commands::prefer::Change {
-                form: match (source, artefact) {
-                    (true, _) => Some(Form::Source),
-                    (_, true) => Some(Form::Artefact),
-                    _ => None,
-                },
-                presence: match (lazy, eager, committed) {
-                    (true, ..) => Some(Some(Presence::Lazy)),
-                    (_, true, _) => Some(Some(Presence::Eager)),
-                    (.., true) => Some(None),
-                    _ => None,
-                },
+            let change = if unset {
+                commands::prefer::Change::UNSET
+            } else {
+                commands::prefer::Change {
+                    form: match (source, artefact) {
+                        (true, _) => Some(Form::Source),
+                        (_, true) => Some(Form::Artefact),
+                        _ => None,
+                    },
+                    presence: match (lazy, eager) {
+                        (true, _) => Some(Some(Presence::Lazy)),
+                        (_, true) => Some(Some(Presence::Eager)),
+                        _ => None,
+                    },
+                }
             };
             commands::prefer::run(root, change, &dirs, no_cache, out)
         }

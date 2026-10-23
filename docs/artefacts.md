@@ -55,7 +55,8 @@ it.
 
 ```
 git scale prefer [DIR...]
-git scale prefer [--source|--artefact] [--lazy|--eager|--committed] <DIR>...
+git scale prefer [--source|--artefact] [--lazy|--eager] <DIR>...
+git scale prefer --unset <DIR>...
 ```
 
 ```sh
@@ -73,7 +74,7 @@ for it.
 ```sh
 git scale prefer --lazy imports/data      # left out, unless another repository needs it
 git scale prefer --eager imports/fixtures # placed, although its config says lazy = true
-git scale prefer --committed imports/fixtures   # back to what the configs say
+git scale prefer --unset imports/fixtures       # no preference at all: back to what the configs say
 git scale prefer --lazy --artefact imports/snapshots   # nothing, then its image when named
 ```
 
@@ -116,6 +117,12 @@ sources holding no uncommitted change and no commit a remote lacks — when it i
 not on the topic; one holding work is kept and said to be. `prefer` with no
 option lists both parts: `source, lazy` for a preference of this workspace's,
 `source, lazy (committed)` for the configs' own.
+
+`--unset` is the way back for both parts: it removes every preference the
+workspace recorded for the repositories named, as `git config --unset` removes
+a value, so the configs decide again — and a repository they call lazy goes,
+as with `--lazy`. It takes no other option. `--source` still drops the form
+preference alone.
 
 Every request for a repository is one request, whatever form a workspace
 takes it in, and it is one checkout per major. A checkout taken as an artefact

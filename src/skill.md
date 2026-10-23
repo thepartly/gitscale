@@ -32,7 +32,7 @@ Docs: https://github.com/thepartly/gitscale/blob/v{{version}}/docs/ — offline:
 | `git upgrade [--commit]` | Pin newly tagged layers into the topic's configs; their topic branches are deleted on their remotes | topics.md |
 | `git upgrade <dir>... [--major]` | Raise a dependency to its newest release in the topic's configs; requesters off the topic are named | topics.md |
 | `git scale check` | CI gate: fails while any child comes from a branch | topics.md |
-| `git scale prefer --artefact <dir>...` | Take children as the images of their releases here; `--source` to go back. `--lazy` / `--eager` keep a child out or in whatever its config's `lazy` says, `--committed` goes back to it. `git scale pull` applies it | artefacts.md |
+| `git scale prefer --artefact <dir>...` | Take children as the images of their releases here; `--source` to go back. `--lazy` / `--eager` keep a child out or in whatever its config's `lazy` says; `--unset` drops every preference for it, form and presence. `git scale pull` applies it | artefacts.md |
 | `git scale hash [<dir>...]` | The source hash: the tag a repository's image carries | artefacts.md |
 | `git scale artefact show` | Each child taken as an artefact: its release, whether it is published, what is installed | artefacts.md |
 | `gitscale artefact publish [--reuse] [<release>]` | In a producer's pipeline, after its build: publish the image of the sources checked out under their source hash; with a release name, tag the image with it; the pipeline tags the commit after. `--reuse` releases a squash merge without rebuilding | artefacts.md |
