@@ -143,6 +143,7 @@ impl Ctx<'_> {
                 force: false,
                 leave: None,
                 heading: "",
+                named: &[],
             },
             self.verbose,
             self.no_cache,
@@ -533,13 +534,33 @@ fn join_or_leave(
         }
     };
     let artefacts = Artefacts::new(&config, &config_root, sources.images());
-    let resolution = crate::resolve::workspace(
+    // A lazy repository named to join is placed first, at its pin: named to
+    // resolution. Which ones are lazy and left out, this machine can say,
+    // fetching only a store that lacks what a pin names.
+    let mut woken: Vec<String> = Vec::new();
+    if how == How::Join {
+        let local = crate::resolve::workspace_with(
+            &config,
+            &config_root,
+            Network::OnMiss,
+            &sources,
+            None,
+            false,
+        )?;
+        for dir in dirs {
+            if let Some(entry) = crate::resolve::asleep(&here, &local, dir) {
+                woken.push(entry.repo_url.clone());
+            }
+        }
+    }
+    let resolution = crate::resolve::workspace_naming(
         &config,
         &config_root,
         true,
         &sources,
         Some(&artefacts),
         ctx.verbose,
+        &woken,
     )?;
     let placer = Placer {
         config_root: &config_root,
@@ -577,7 +598,14 @@ fn join_or_leave(
             if leave {
                 leave_one(&config_root, &resolution, &placer, slot)
             } else {
-                join_one(&config, &config_root, &placer, &branch, slot)
+                let was_asleep = woken
+                    .iter()
+                    .any(|url| crate::urls::normalize(url) == crate::urls::normalize(&slot.url));
+                let joined = join_one(&config, &config_root, &placer, &branch, slot)?;
+                if was_asleep {
+                    crate::checkout::mark_woken(&config_root.join(&slot.directory))?;
+                }
+                Ok(joined)
             }
         });
         match done {
@@ -809,11 +837,52 @@ fn leave_one(
                 .ok_or_else(|| anyhow::anyhow!("{} has no pin to go back to", name))?,
         ),
     };
-    crate::checkout::stop_branch(&dest, &on.branch, &pin, &resolution.planted_in(name), false)
+    let planted = resolution.planted_in(name);
+    crate::checkout::stop_branch(&dest, &on.branch, &pin, &planted, false)
         .with_context(|| format!("{} stays on {}", name, on.branch))?;
+    // Lazy, and joined from nothing: back to nothing.
+    if slot.is_lazy() && crate::checkout::was_woken(&dest) {
+        let stores = placer.sources.stores.as_ref();
+        if let crate::checkout::Dropped::Removed =
+            crate::checkout::drop_lazy(config_root, name, &slot.url, &planted, stores)?
+        {
+            return Ok(format!("{} left {}: removed, lazy", name, on.branch));
+        }
+    }
     // Back to the form it is preferred in — for an artefact, its image.
     let placed = placer.place(&slot.off_topic(&revision, &pin))?;
     Ok(format!("{} left {}: {}", name, on.branch, placed))
+}
+
+/// After `finish` in a plain clone: each lazy checkout that joined the
+/// topic from nothing goes back to nothing, when that loses nothing.
+/// Placement keeps whatever is on disk.
+fn drop_woken(root: &Path, sources: &Sources, out: &mut dyn Write) -> Result<()> {
+    let config = load_config(&root.join(CONFIG_FILENAME))?;
+    let resolution = crate::resolve::workspace(&config, root, false, sources, None, false)?;
+    for slot in &resolution.slots {
+        let dest = root.join(&slot.directory);
+        if slot.topic.is_some() || !slot.is_lazy() || !crate::checkout::was_woken(&dest) {
+            continue;
+        }
+        let planted = resolution.planted_in(&slot.directory);
+        match crate::checkout::drop_lazy(
+            root,
+            &slot.directory,
+            &slot.url,
+            &planted,
+            sources.stores.as_ref(),
+        )? {
+            crate::checkout::Dropped::Removed => {
+                writeln!(out, "  remove  {} (lazy)", slot.directory)?
+            }
+            crate::checkout::Dropped::Kept(why) => {
+                writeln!(out, "  kept  {} (lazy, but {})", slot.directory, why)?
+            }
+            crate::checkout::Dropped::Absent => {}
+        }
+    }
+    Ok(())
 }
 
 /// Whether the remote at `url` has a branch `branch`.
@@ -1964,6 +2033,7 @@ fn finish(
             }
             writeln!(out, "switched to {}", default)?;
             ctx.place(at, out, err)?;
+            drop_woken(at, &sources, out)?;
         }
         (None, None) => {}
     }

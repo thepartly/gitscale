@@ -89,13 +89,33 @@ pub fn run(
         None
     };
     let artefacts = Artefacts::new(&config, &config_root, sources.images());
-    let resolution = crate::resolve::workspace(
+    // A lazy dependency left out is raised all the same: a raise needs its
+    // requests and its releases, not a checkout.
+    let mut named = Vec::new();
+    if !opts.dirs.is_empty() {
+        let offline = crate::resolve::workspace_with_naming(
+            &config,
+            &config_root,
+            crate::resolve::Network::OnMiss,
+            &sources,
+            None,
+            false,
+            &[],
+        )?;
+        for dir in opts.dirs {
+            if let Some(entry) = crate::resolve::asleep(&here, &offline, dir) {
+                named.push(entry.repo_url.clone());
+            }
+        }
+    }
+    let resolution = crate::resolve::workspace_naming(
         &config,
         &config_root,
         true,
         &sources,
         Some(&artefacts),
         verbose,
+        &named,
     )?;
     match branch {
         Some(branch) => promote_topic(

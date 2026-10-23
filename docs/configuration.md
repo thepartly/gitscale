@@ -89,6 +89,7 @@ the config.
 | `recursive` | bool | `true` | Read this repository's own `.gitscale.toml`: resolve its transitive dependencies, and clean it by its own `[clean]` rules. With `false`, that config is not read at all, and [`clean`](clean.md#per-repo-clean) cleans the repository without its keep-list |
 | `override` | bool | `false` | Exactly this revision, and nothing higher: wins over every request from a repository below this one, and must agree with the rest. Needs a `revision`. See [overrides](recursive-dependencies.md#overrides) |
 | `singleton` | bool | unset | `true`: this repository may be checked out only once, whatever majors are asked for. `false`: relaxes a `true` from repositories below this one. See [singleton](recursive-dependencies.md#singleton) |
+| `lazy` | bool | `false` | Checked out only once it is named — `git scale sync DIR` or `git topic join DIR` — or the topic has a branch of it, and kept from then on while it is on disk. A request from any other repository that is not lazy makes it an ordinary entry. A workspace's `git scale prefer --eager` overrides it, and `--lazy` makes an entry of the root's lazy, never one another repository needs. See [only when needed](dependencies.md#only-when-needed-lazy) |
 
 The directory key must be relative and free of `..`, and must not be empty.
 Two entries for one repository need revisions to tell which major each is for.

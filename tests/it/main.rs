@@ -22,6 +22,7 @@ mod exclude;
 mod forward;
 mod hash;
 mod hook;
+mod lazy;
 mod links;
 mod ls;
 mod man;

@@ -2,7 +2,7 @@
 
 Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Regenerate with `GITSCALE_UPDATE_CATALOG=1 cargo test --test it catalog::`. The naming rules are in [testing.md](testing.md).
 
-670 integration tests (295 normal, 212 edge, 145 error, 18 perf), 41 of them ignored; 170 unit tests.
+694 integration tests (308 normal, 223 edge, 145 error, 18 perf), 41 of them ignored; 172 unit tests.
 
 | Feature | normal | edge | error | perf | total |
 |---|---:|---:|---:|---:|---:|
@@ -19,6 +19,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | [forward](#forward) | 22 | 1 | 3 | 1 | 27 |
 | [hash](#hash) | 5 | 2 | 1 | 0 | 8 |
 | [hook](#hook) | 26 | 25 | 11 | 1 | 63 |
+| [lazy](#lazy) | 13 | 11 | 0 | 0 | 24 |
 | [links](#links) | 10 | 14 | 0 | 0 | 24 |
 | [ls](#ls) | 22 | 9 | 3 | 1 | 35 |
 | [man](#man) | 1 | 0 | 0 | 0 | 1 |
@@ -406,6 +407,35 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | hook-059 | normal | `normal_059_hooks_selects_what_is_installed_and_a_reinstall_keeps_it` | `--hooks` names what is installed besides the placing hooks, with `lfs` for git-lfs's four. Re-installing without it keeps the selection; naming fewer takes the rest out, putting back the hook one had displaced. |
 | hook-060 | error | `error_060_an_unknown_hook_name_is_refused_and_nothing_is_written` | A name git does not have — a typo, or a hook gitscale does not install — is refused before anything is written, with the names it takes. |
 | hook-061 | normal | `normal_061_a_global_install_says_which_hooks_no_longer_run` | Under a global install git runs no hook it does not find in gitscale's directory. The install says so — and that git-lfs, when it is installed, will not upload — and `hook status` says it again in each repository. |
+
+### lazy
+
+| ID | Kind | Test | What it holds |
+|---|---|---|---|
+| lazy-001 | normal | `normal_001_sync_leaves_an_absent_lazy_entry_out` | A sync leaves an absent lazy entry out, without even fetching it, and `ls` shows it as `lazy` rather than `missed`. |
+| lazy-002 | normal | `normal_002_naming_it_places_it_and_then_it_is_kept` | Named, it is checked out; from then on a plain sync keeps it on its pin, and deleting the directory makes it lazy again. |
+| lazy-003 | normal | `normal_003_a_dependencys_lazy_entry_is_left_out` | A lazy entry of a dependency's own config, which the root does not declare, is left out as well: the root does not inherit it. |
+| lazy-004 | normal | `normal_004_require_lazy_writes_the_flag_and_fetches_nothing` | `require --lazy` writes the flag, and checks nothing out. |
+| lazy-005 | normal | `normal_005_join_places_a_lazy_entry_on_the_topic` | `git topic join` places an absent lazy entry at its pin and puts it on the topic, writable. |
+| lazy-006 | normal | `normal_006_a_joined_lazy_entry_comes_back_with_its_topic` | A worktree of the topic made again — after the first was deleted by hand — places the lazy entry the topic joined: its store has the branch. |
+| lazy-008 | edge | `edge_008_a_remote_topic_branch_places_an_absent_lazy_entry` | A topic branch its remote has brings an absent lazy entry in, on its branch — on a developer machine and in CI alike — while a workspace off the topic still leaves it out. |
+| lazy-011 | normal | `normal_011_prefer_lazy_leaves_an_entry_out` | `prefer --lazy` leaves an entry its config does not call lazy out, and removes its checkout at once when that loses nothing; `ls` says the workspace chose it, and `prefer` lists both axes. |
+| lazy-012 | normal | `normal_012_prefer_eager_overrides_a_committed_lazy` | `prefer --eager` places a lazy entry on a plain sync, and `--unset` hands it back to the config, which makes it lazy — and removes it — again. |
+| lazy-013 | edge | `edge_013_prefer_lazy_keeps_a_modified_checkout` | Made lazy while it holds uncommitted work, a checkout stays, and says why. |
+| lazy-014 | normal | `normal_014_leave_and_finish_take_a_lazy_entry_away` | A lazy entry joined from nothing and taken off the topic, by `leave` or by `finish`, goes back to nothing; its commits stay in its store. |
+| lazy-015 | edge | `edge_015_an_unreachable_lazy_remote_fails_check_in_ci` | In CI, on a topic, a lazy repository's remote that cannot be asked fails `check` rather than reading as "no branch", which would let a change in it go unseen. |
+| lazy-016 | edge | `edge_016_a_lazy_repository_two_requesters_name_differently` | Two repositories asking for one lazy repository under different names: it would be placed under the repository's own name, which is where `ls` shows it and where `sync` places it — and once placed it stays. |
+| lazy-017 | edge | `edge_017_a_majors_topic_branch_wakes_a_lazy_repository` | A major's branch of the topic, `<topic>@v<major>`, on the remote wakes a lazy repository as the topic's own does; until a placement puts it on disk, `ls --fetch` says it is missed, not lazy. |
+| lazy-018 | edge | `edge_018_prefer_lazy_yields_to_a_repository_that_needs_it` | `prefer --lazy` leaves a repository another one needs placed: that repository's request without `lazy` wins, and `prefer` and `ls` say so. |
+| lazy-019 | normal | `normal_019_a_lazy_artefact_is_installed_when_named` | Lazy and taken as its artefact: `prefer --lazy` takes the image away, a plain `sync` leaves it out, and `sync DIR` installs the image again. |
+| lazy-020 | edge | `edge_020_leave_keeps_a_lazy_checkout_that_was_there_before` | A lazy checkout already on disk before it joined stays when it leaves: only one `join` brought from nothing goes back to nothing. |
+| lazy-021 | edge | `edge_021_an_unreachable_lazy_remote_is_a_warning_locally` | On a developer machine, a lazy remote that cannot be asked is a warning: the repository is left out and the command carries on. `check` still fails, as it does in CI. |
+| lazy-022 | edge | `edge_022_join_works_with_a_store_older_than_the_pins` | Joining a lazy repository works with stores fetched before the root's pins moved: a pin to a tag pushed since is fetched, not an error. |
+| lazy-023 | edge | `edge_023_prefer_lazy_keeps_a_checkout_it_cannot_read` | A checkout whose git status cannot be read is kept: nothing says its files are safe to delete. |
+| lazy-024 | edge | `edge_024_a_sibling_with_a_longer_name_does_not_wake_it` | Only a checkout of another major, `<name>_v<major>`, keeps a lazy repository placed: a directory that merely starts with its name does not. |
+| lazy-025 | normal | `normal_025_prefer_unset_removes_form_and_presence` | `prefer --unset` removes both kinds of preference — form and presence — and takes no other preference beside it. |
+| lazy-026 | normal | `normal_026_named_in_ci_it_stays_for_the_rest_of_the_job` | In CI, `sync DIR` places a lazy repository, and the job's later commands keep it; a later job reusing the build directory leaves it out again. |
+| lazy-027 | normal | `normal_027_upgrade_raises_a_lazy_dependency_left_out` | `git upgrade <dir>` raises a lazy dependency that is not placed: the raise needs its requests and its releases, not a checkout. |
 
 ### links
 
@@ -1003,6 +1033,8 @@ In `#[cfg(test)]` modules beside the code, by source file.
 ### src/prefer.rs
 
 - `source_is_the_default_and_removes_a_preference`
+- `a_file_from_before_presence_reads`
+- `presence_reads_back_beside_the_form`
 - `it_reads_back_what_it_writes`
 
 ### src/progress.rs

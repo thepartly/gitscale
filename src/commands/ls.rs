@@ -229,7 +229,28 @@ pub fn run(
 
     let topic = topic_view(&config, &config_root, &sources, &resolution);
     let warnings = warnings(&config_root);
-    let rows: Vec<(&RepoStatus, &Slot)> = statuses.iter().zip(&resolution.slots).collect();
+    // Lazy dependencies resolution left out are rows too: nothing on disk,
+    // and `lazy` rather than `missed`, since that is how they are meant to be.
+    let prefs = crate::prefer::Prefs::load(&config_root)?;
+    let asleep: Vec<(RepoStatus, Slot)> = resolution
+        .asleep
+        .iter()
+        .map(|entry| {
+            let expected = Expected {
+                branch: None,
+                commit: None,
+            };
+            (
+                get_repo_status(entry, &config_root, &expected),
+                unresolved_slot(entry, None, &prefs),
+            )
+        })
+        .collect();
+    let rows: Vec<(&RepoStatus, &Slot)> = statuses
+        .iter()
+        .zip(&resolution.slots)
+        .chain(asleep.iter().map(|(s, slot)| (s, slot)))
+        .collect();
     if output_format == "json" {
         // A checkout whose hash cannot be taken has none: uncommitted
         // changes, which no pipeline built, or a dependency that does not
@@ -249,6 +270,7 @@ pub fn run(
                     .ok()
                     .map(|h| h.hash)
             })
+            .chain(asleep.iter().map(|_| None))
             .collect();
         print_json(&rows, &hashes, &orphans, &topic, &warnings, out)?;
     } else {
@@ -419,27 +441,41 @@ fn unresolved(config: &crate::config::GitScaleConfig, reason: &str) -> Resolutio
         slots: config
             .repos
             .iter()
-            .map(|e| Slot {
-                directory: e.directory.clone(),
-                url: e.repo_url.clone(),
-                preferred: None,
-                sourceless: false,
-                recursive: e.recursive,
-                class: crate::version::Class::Any,
-                declared: Some(e.revision.clone()),
-                implicit: false,
-                chosen: None,
-                unresolved: Some(reason.to_string()),
-                unread: None,
-                requests: Vec::new(),
-                majors: 1,
-                commit: None,
-                branch: None,
-                topic: None,
-                pinned_by: None,
-            })
+            .map(|e| unresolved_slot(e, Some(reason.to_string()), &Default::default()))
             .collect(),
         links: Vec::new(),
+        asleep: Vec::new(),
+    }
+}
+
+/// A slot for a row resolution did not decide: an entry as declared.
+fn unresolved_slot(
+    e: &crate::config::RepoEntry,
+    reason: Option<String>,
+    prefs: &crate::prefer::Prefs,
+) -> Slot {
+    Slot {
+        directory: e.directory.clone(),
+        url: e.repo_url.clone(),
+        preferred: prefs.get(&e.repo_url),
+        sourceless: false,
+        recursive: e.recursive,
+        class: crate::version::Class::Any,
+        declared: Some(e.revision.clone()),
+        implicit: false,
+        chosen: None,
+        asleep: reason.is_none(),
+        unresolved: reason,
+        unread: None,
+        requests: Vec::new(),
+        majors: 1,
+        commit: None,
+        branch: None,
+        topic: None,
+        pinned_by: None,
+        lazy: e.lazy,
+        presence: prefs.presence(&e.repo_url),
+        required_by: None,
     }
 }
 
@@ -475,6 +511,9 @@ fn notes(slot: &Slot, topic: &TopicView) -> Vec<String> {
     }
     if let Some(by) = &slot.pinned_by {
         notes.push(format!("pinned by {}", by));
+    }
+    if let (Some(crate::prefer::Presence::Lazy), Some(by)) = (slot.presence, &slot.required_by) {
+        notes.push(format!("preferred lazy, but {} requires it", by));
     }
     if let Some(reason) = &slot.unresolved {
         notes.push(
@@ -536,9 +575,13 @@ fn notes(slot: &Slot, topic: &TopicView) -> Vec<String> {
 fn row_flags(s: &RepoStatus, slot: &Slot) -> String {
     let flags = get_status_flags(s);
     // Nothing there yet: `missed` says all there is, and the revision is the
-    // one `clone` will resolve.
+    // one `clone` will resolve. A lazy dependency is not there by design.
     if flags == "missed" {
-        return flags;
+        return if slot.asleep {
+            "lazy".to_string()
+        } else {
+            flags
+        };
     }
     let mut warnings = Vec::new();
     if is_unresolved(slot) {
@@ -721,6 +764,9 @@ fn status_icon(flags: &str) -> &'static str {
     if flags.contains("symlink") {
         return "⤷";
     }
+    if flags == "lazy" {
+        return "○";
+    }
     if flags.contains("missed") {
         return "✘";
     }
@@ -772,6 +818,9 @@ fn status_color(flags: &str) -> &'static str {
 
     if flags.contains("symlink") {
         return "36"; // cyan
+    }
+    if flags == "lazy" {
+        return "90"; // grey: nothing wrong
     }
     if flags.contains("missed") {
         return "31"; // red
@@ -962,7 +1011,7 @@ fn print_table(
     // Print rows with colors
     for (row, color) in &rows {
         let flags = &row[6];
-        let icon_bold = !flags.contains("missed");
+        let icon_bold = !flags.contains("missed") && flags != "lazy";
 
         let mut cells: Vec<String> = row
             .iter()
@@ -1152,6 +1201,10 @@ fn add_resolution(
             .filter(|now| *now != slot.form())
             .map(|_| slot.form().to_string()),
         "implicit": slot.implicit,
+        "lazy": slot.laziness().0,
+        "lazy_reason": slot.laziness().1,
+        "asleep": slot.asleep,
+        "required_by": slot.required_by,
         "resolution": resolution,
         "reason": chosen.map(|c| c.reason.label()),
         "unresolved": slot.unresolved,

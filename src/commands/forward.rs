@@ -302,6 +302,7 @@ pub fn run(
                     force: opts.force_sync,
                     leave: None,
                     heading: "",
+                    named: &[],
                 },
                 verbose,
                 no_cache,

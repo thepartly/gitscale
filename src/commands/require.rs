@@ -41,6 +41,7 @@ pub fn require(
     dir: &str,
     url: &str,
     revision: &str,
+    lazy: bool,
     verbose: bool,
     no_cache: bool,
     interactive: bool,
@@ -65,6 +66,7 @@ pub fn require(
         directory: directory.clone(),
         repo_url: url.to_string(),
         revision: revision.to_string(),
+        lazy,
         ..Default::default()
     };
     crate::config::add_entry(&path, &entry)?;
@@ -80,7 +82,8 @@ pub fn require(
     } else {
         format!(" @ {}", revision)
     };
-    writeln!(out, "Required {} → {}{}", directory, url, at)?;
+    let lazily = if lazy { ", lazy" } else { "" };
+    writeln!(out, "Required {} → {}{}{}", directory, url, at, lazily)?;
     place(
         &config,
         &root,
@@ -90,6 +93,7 @@ pub fn require(
             force: false,
             leave: None,
             heading: "Pulling latest changes...",
+            named: &[],
         },
         verbose,
         no_cache,
@@ -130,6 +134,7 @@ pub fn unrequire(
             force: false,
             leave: None,
             heading: "Pulling latest changes...",
+            named: &[],
         },
         verbose,
         no_cache,

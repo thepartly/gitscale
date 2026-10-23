@@ -1,6 +1,5 @@
 ---
 source: tests/it/ls.rs
-assertion_line: 78
 expression: parsed
 ---
 [
@@ -9,6 +8,7 @@ expression: parsed
     "as": "source",
     "as_next": null,
     "as_reason": "default",
+    "asleep": false,
     "behind": 0,
     "class": "any",
     "clean": true,
@@ -20,6 +20,8 @@ expression: parsed
     "expected_ref": "main",
     "foreign": false,
     "implicit": false,
+    "lazy": false,
+    "lazy_reason": null,
     "notes": [],
     "pinned_by": null,
     "reason": "only",
@@ -38,6 +40,7 @@ expression: parsed
         "selected": true
       }
     ],
+    "required_by": null,
     "resolution": "only",
     "resolved_commit": "[commit]",
     "resolved_ref": "main",

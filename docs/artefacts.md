@@ -55,7 +55,8 @@ it.
 
 ```
 git scale prefer [DIR...]
-git scale prefer --source|--artefact <DIR>...
+git scale prefer [--source|--artefact] [--lazy|--eager] <DIR>...
+git scale prefer --unset <DIR>...
 ```
 
 ```sh
@@ -63,6 +64,18 @@ git scale prefer --artefact imports/billing-sdk imports/users-sdk
 git scale prefer                     # every preference, with the checkout it applies to
 git scale prefer --source imports/users-sdk   # back to the sources
 git scale pull                       # the next placement applies them
+```
+
+A preference has two parts, each set on its own: the **form** a checkout
+takes — its sources or its artefact — and its **presence**: whether a
+[lazy](dependencies.md#only-when-needed-lazy) one is there while nothing asks
+for it.
+
+```sh
+git scale prefer --lazy imports/data      # left out, unless another repository needs it
+git scale prefer --eager imports/fixtures # placed, although its config says lazy = true
+git scale prefer --unset imports/fixtures       # no preference at all: back to what the configs say
+git scale prefer --lazy --artefact imports/snapshots   # nothing, then its image when named
 ```
 
 A preference is the repository's — every major of it, wherever it is checked
@@ -73,14 +86,43 @@ ls` shows the change to come meanwhile: `source → artefact`. A checkout holdin
 work is kept by that placement, as every placement keeps one. CI behaves the
 same: a job takes sources unless it runs `git scale prefer` first.
 
-Which form a checkout gets, the first that applies:
+Whether a checkout is there, the first that applies:
+
+1. **On the topic** — joined here, or a branch of the topic followed from its
+   remote, locally and in CI alike — **or named** by the command placing it
+   (`git scale sync DIR`, `git topic join DIR`): there. A lazy one on disk
+   outside CI is there too, until it is deleted, or `prefer --lazy`, `git
+   topic leave` or `finish` removes it.
+2. **Its presence preference**: `--eager` places it; `--lazy` leaves it out
+   unless another repository's config asks for it without `lazy`, which then
+   keeps it, and `prefer` and `ls` name that repository.
+3. **`lazy = true` on every request for it**: left out.
+4. **There.**
+
+Which form a checkout that is there gets, the first that applies:
 
 1. **On the topic** — joined here, or a branch of the topic followed: its
    sources. See [an artefact on a topic](#an-artefact-on-a-topic).
 2. **Its sources cannot be read:** its artefact — see
    [no access](#no-access-to-the-sources).
-3. **Its preference.**
+3. **Its form preference.**
 4. **Its sources.**
+
+So `lazy = true` with `--artefact` is nothing until `git scale sync DIR`
+installs its release's image, and `git topic join DIR` always gives its
+sources. Both parts live in the same `prefer.toml`, the presence under a
+`[presence]` table of its own; a file from before it existed reads as having
+none. `--lazy` also removes a checkout at once — an artefact's image, or
+sources holding no uncommitted change and no commit a remote lacks — when it is
+not on the topic; one holding work is kept and said to be. `prefer` with no
+option lists both parts: `source, lazy` for a preference of this workspace's,
+`source, lazy (committed)` for the configs' own.
+
+`--unset` is the way back for both parts: it removes every preference the
+workspace recorded for the repositories named, as `git config --unset` removes
+a value, so the configs decide again — and a repository they call lazy goes,
+as with `--lazy`. It takes no other option. `--source` still drops the form
+preference alone.
 
 Every request for a repository is one request, whatever form a workspace
 takes it in, and it is one checkout per major. A checkout taken as an artefact
