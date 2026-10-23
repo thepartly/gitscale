@@ -105,9 +105,18 @@ fn resolve_with(
     let resolved = Engine::new(config, root_url.as_deref(), &stores, &checkouts)
         .with_topic(topic.topic().map(str::to_string))
         .with_prefs(crate::prefer::Prefs::load(config_root)?)
-        .with_named(named.iter().cloned())
+        .with_named(named_here(config_root, named))
         .resolve()?;
     with_preferences(resolved, config_root)
+}
+
+/// The lazy repositories to place although nothing else asks for them:
+/// those this command names, and in CI those an earlier command of the same
+/// job named.
+fn named_here(config_root: &Path, named: &[String]) -> Vec<String> {
+    let mut all = named.to_vec();
+    all.extend(crate::ledger::named_in_job(config_root));
+    all
 }
 
 /// The lazy dependency, left out of `resolution`, that the directory argument
@@ -220,7 +229,7 @@ pub fn workspace_with_naming(
                 let resolved = Engine::new(config, root_url.as_deref(), &stores, &checkouts)
                     .with_topic(topic.topic().map(str::to_string))
                     .with_prefs(prefs.clone())
-                    .with_named(named.iter().cloned())
+                    .with_named(named_here(config_root, named))
                     .resolve();
                 // A revision a store did not have fails a round: one more,
                 // with that store fetched, may resolve. What is still

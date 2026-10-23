@@ -731,6 +731,81 @@ fn edge_024_a_sibling_with_a_longer_name_does_not_wake_it() {
     assert!(ws.join("imports/fixtures/data.txt").is_file());
 }
 
+/// In CI, `sync DIR` places a lazy repository, and the job's later commands
+/// keep it; a later job reusing the build directory leaves it out again.
+#[test]
+fn normal_026_named_in_ci_it_stays_for_the_rest_of_the_job() {
+    let (f, _) = lazy_fixture("lazy_ci_named");
+    let job = f.env.repos_remote.join("job");
+    run_git_pub(
+        &f.env.repos_remote,
+        &[
+            "clone",
+            "-q",
+            f.root.to_str().unwrap(),
+            job.to_str().unwrap(),
+        ],
+    );
+    run_git_pub(&job, &["checkout", "-q", "--detach"]);
+    let first = [("CI_JOB_ID", "101")];
+    let out = ci_job_with(
+        &job,
+        &f.env.cache,
+        "main",
+        &first,
+        &["sync", "imports/fixtures"],
+    );
+    ok(&out);
+    let dest = job.join("imports/fixtures");
+    assert!(dest.join("data.txt").is_file());
+
+    let out = ci_job_with(&job, &f.env.cache, "main", &first, &["sync"]);
+    ok(&out);
+    assert!(!out.stdout.contains("no longer needed"), "{}", out.stdout);
+    assert!(dest.join("data.txt").is_file());
+
+    let next = [("CI_JOB_ID", "102")];
+    ok(&ci_job_with(&job, &f.env.cache, "main", &next, &["sync"]));
+    assert!(!dest.exists());
+}
+
+/// `git upgrade <dir>` raises a lazy dependency that is not placed: the
+/// raise needs its requests and its releases, not a checkout.
+#[test]
+fn normal_027_upgrade_raises_a_lazy_dependency_left_out() {
+    let env = TestEnv::new("lazy_raise");
+    let fixtures = env.create_bare_repo("fixtures", "main", &[("data.txt", "d1")]);
+    run_git_pub(&fixtures, &["tag", "v1.0.0", "main"]);
+    let config = format!(
+        "[repos]\n\"imports/fixtures\" = {{ url = \"{}\", revision = \"v1.0.0\", lazy = true }}\n",
+        fixtures.display()
+    );
+    let root = env.create_bare_repo(
+        "root",
+        "main",
+        &[("README.md", "root"), (".gitscale.toml", &config)],
+    );
+    let newer = env.push_commit(&fixtures, "main", "data.txt", "d2");
+    run_git_pub(&fixtures, &["tag", "v1.1.0", &newer]);
+    let f = Fixture {
+        env,
+        core: fixtures.clone(),
+        root,
+    };
+    let ws = f.clone_root("ws");
+    ok(&gs(&ws, &["topic", "start", "bump"]));
+    let out = gs(&ws, &["upgrade", "imports/fixtures"]);
+    ok(&out);
+    assert!(
+        out.stdout.contains("imports/fixtures   v1.0.0 → v1.1.0"),
+        "{}",
+        out.stdout
+    );
+    let text = std::fs::read_to_string(ws.join(".gitscale.toml")).unwrap();
+    assert!(text.contains("revision = \"v1.1.0\""), "{}", text);
+    assert!(!ws.join("imports/fixtures").exists());
+}
+
 fn make_writable_tree(dir: &Path) {
     use std::os::unix::fs::PermissionsExt;
     for entry in walk(dir) {

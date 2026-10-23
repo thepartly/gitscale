@@ -198,6 +198,9 @@ pub fn place(
 
     keep(create_symlinks(&resolution.links, config_root));
     keep(crate::ledger::record(config_root, &resolution.entries()));
+    if crate::git::is_ci() && !opts.named.is_empty() {
+        keep(crate::ledger::record_named_in_job(config_root, opts.named));
+    }
     keep(relink(
         &resolution,
         opts.dirs,
@@ -220,6 +223,7 @@ pub fn place(
         keep(crate::commands::clean::scrub(
             config,
             config_root,
+            &resolution,
             &dirs,
             interactive,
             out,

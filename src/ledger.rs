@@ -37,12 +37,16 @@ struct Ledger {
 }
 
 fn path(config_root: &Path) -> PathBuf {
+    file(config_root, FILE)
+}
+
+fn file(config_root: &Path, name: &str) -> PathBuf {
     let in_git = if crate::git::is_repo_root(config_root) {
-        crate::git::git_path(config_root, &format!("gitscale/{}", FILE))
+        crate::git::git_path(config_root, &format!("gitscale/{}", name))
     } else {
         None
     };
-    in_git.unwrap_or_else(|| config_root.join(".gitscale").join(FILE))
+    in_git.unwrap_or_else(|| config_root.join(".gitscale").join(name))
 }
 
 fn load(config_root: &Path) -> Ledger {
@@ -144,4 +148,50 @@ pub fn prune(config_root: &Path) -> Result<()> {
         save(config_root, &ledger)?;
     }
     Ok(())
+}
+
+/// The lazy repositories a command of one CI job named, by URL.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct NamedInJob {
+    job: String,
+    urls: std::collections::BTreeSet<String>,
+}
+
+const NAMED: &str = "named-in-job.json";
+
+/// In CI, the lazy repositories an earlier command of this same job named,
+/// by URL: a later command keeps them placed. A build directory reused from
+/// another job carries none over, since that job's checkouts are nothing
+/// this one asked for. Empty outside CI, and where the platform names no job.
+pub fn named_in_job(config_root: &Path) -> Vec<String> {
+    let Some(job) = crate::ci::job_id() else {
+        return Vec::new();
+    };
+    fs::read(file(config_root, NAMED))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<NamedInJob>(&bytes).ok())
+        .filter(|named| named.job == job)
+        .map(|named| named.urls.into_iter().collect())
+        .unwrap_or_default()
+}
+
+/// Record, in CI, that this job named the lazy repositories at `urls`.
+pub fn record_named_in_job(config_root: &Path, urls: &[String]) -> Result<()> {
+    let Some(job) = crate::ci::job_id() else {
+        return Ok(());
+    };
+    let mut named = NamedInJob {
+        job: job.clone(),
+        urls: named_in_job(config_root).into_iter().collect(),
+    };
+    named
+        .urls
+        .extend(urls.iter().map(|u| crate::urls::normalize(u)));
+    let path = file(config_root, NAMED);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+    }
+    fs::write(&path, serde_json::to_vec_pretty(&named)?)
+        .with_context(|| format!("cannot write {}", path.display()))
 }

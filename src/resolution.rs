@@ -2144,10 +2144,6 @@ fn fingerprint(round: &Round) -> BTreeMap<SlotKey, Fingerprint> {
         .collect()
 }
 
-/// The branch of the topic `topic` a checkout uses: the topic itself for the
-/// highest major its repository is checked out at, `<topic>@v<major>` for the
-/// others — two worktrees of one store cannot share a branch, and a name is
-/// what CI matches on.
 /// Whether `suffix` is what [`Class::suffix`] adds to a checkout of an older
 /// major: `_v<major>` or `_v0.<minor>`.
 pub fn is_major_suffix(suffix: &str) -> bool {
@@ -2177,6 +2173,10 @@ fn hoisted_name<'r>(requests: impl Iterator<Item = &'r Req>) -> String {
     }
 }
 
+/// The branch of the topic `topic` a checkout uses: the topic itself for the
+/// highest major its repository is checked out at, `<topic>@v<major>` for the
+/// others — two worktrees of one store cannot share a branch, and a name is
+/// what CI matches on.
 pub fn branch_for(topic: &str, highest: bool, class: Class) -> String {
     if highest || class == Class::Any {
         topic.to_string()

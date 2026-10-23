@@ -2,7 +2,7 @@
 
 Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Regenerate with `GITSCALE_UPDATE_CATALOG=1 cargo test --test it catalog::`. The naming rules are in [testing.md](testing.md).
 
-684 integration tests (302 normal, 219 edge, 145 error, 18 perf), 41 of them ignored; 172 unit tests.
+686 integration tests (304 normal, 219 edge, 145 error, 18 perf), 41 of them ignored; 172 unit tests.
 
 | Feature | normal | edge | error | perf | total |
 |---|---:|---:|---:|---:|---:|
@@ -19,7 +19,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | [forward](#forward) | 22 | 1 | 3 | 1 | 27 |
 | [hash](#hash) | 5 | 2 | 1 | 0 | 8 |
 | [hook](#hook) | 26 | 25 | 11 | 1 | 63 |
-| [lazy](#lazy) | 11 | 11 | 0 | 0 | 22 |
+| [lazy](#lazy) | 13 | 11 | 0 | 0 | 24 |
 | [links](#links) | 10 | 14 | 0 | 0 | 24 |
 | [ls](#ls) | 22 | 9 | 3 | 1 | 35 |
 | [man](#man) | 1 | 0 | 0 | 0 | 1 |
@@ -433,6 +433,8 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | lazy-023 | edge | `edge_023_prefer_lazy_keeps_a_checkout_it_cannot_read` | A checkout whose git status cannot be read is kept: nothing says its files are safe to delete. |
 | lazy-024 | edge | `edge_024_a_sibling_with_a_longer_name_does_not_wake_it` | Only a checkout of another major, `<name>_v<major>`, keeps a lazy repository placed: a directory that merely starts with its name does not. |
 | lazy-025 | normal | `normal_025_prefer_unset_removes_form_and_presence` | `prefer --unset` removes both kinds of preference — form and presence — and takes no other preference beside it. |
+| lazy-026 | normal | `normal_026_named_in_ci_it_stays_for_the_rest_of_the_job` | In CI, `sync DIR` places a lazy repository, and the job's later commands keep it; a later job reusing the build directory leaves it out again. |
+| lazy-027 | normal | `normal_027_upgrade_raises_a_lazy_dependency_left_out` | `git upgrade <dir>` raises a lazy dependency that is not placed: the raise needs its requests and its releases, not a checkout. |
 
 ### links
 

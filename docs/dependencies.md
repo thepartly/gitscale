@@ -293,7 +293,9 @@ placement after `git topic start` and `switch`, CI — until one of these holds:
   prefer --lazy` removes it when that loses nothing, and so do `git topic
   leave` and `git topic finish` for one that `join` brought from nothing. A
   CI build directory never counts: what an earlier job left is no reason to
-  place it. So a workspace can hold a lazy checkout a pipeline does not, and
+  place it. One named earlier in the same job does — `CI_JOB_ID` on GitLab,
+  the run, attempt and job on GitHub — so `git scale sync imports/fixtures`
+  in a job's first step holds for its later commands. So a workspace can hold a lazy checkout a pipeline does not, and
   `prefer --eager` places one it leaves out: a lazy dependency is for work
   that does not need it, and anything the build needs is asked for without
   `lazy`.
@@ -320,7 +322,9 @@ way, so a consumer does not inherit what it never uses.
 scale prefer --lazy` or `--eager`, and `git scale prefer --unset` hands the
 choice back to the configs — see
 [choosing how a checkout arrives](artefacts.md#choosing-how-a-checkout-arrives).
-`git scale require --lazy` writes the flag.
+`git scale require --lazy` writes the flag. `git upgrade imports/fixtures`
+raises a lazy dependency that is not placed: a raise needs its requests and
+its releases, not a checkout.
 
 ## History and depth
 
