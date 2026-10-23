@@ -38,5 +38,6 @@ mod skill;
 mod stores;
 mod sync;
 mod topic;
+mod topic_state;
 mod upgrade;
 mod workspace;

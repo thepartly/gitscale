@@ -2,7 +2,7 @@
 
 Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Regenerate with `GITSCALE_UPDATE_CATALOG=1 cargo test --test it catalog::`. The naming rules are in [testing.md](testing.md).
 
-686 integration tests (304 normal, 219 edge, 145 error, 18 perf), 41 of them ignored; 172 unit tests.
+694 integration tests (308 normal, 223 edge, 145 error, 18 perf), 41 of them ignored; 172 unit tests.
 
 | Feature | normal | edge | error | perf | total |
 |---|---:|---:|---:|---:|---:|
@@ -35,7 +35,8 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | [stores](#stores) | 3 | 10 | 2 | 1 | 16 |
 | [sync](#sync) | 5 | 7 | 0 | 1 | 13 |
 | [topic](#topic) | 37 | 17 | 12 | 0 | 66 |
-| [upgrade](#upgrade) | 12 | 9 | 5 | 0 | 26 |
+| [topic_state](#topic_state) | 2 | 4 | 0 | 0 | 6 |
+| [upgrade](#upgrade) | 14 | 9 | 5 | 0 | 28 |
 | [workspace](#workspace) | 2 | 1 | 1 | 0 | 4 |
 
 ## Integration tests
@@ -841,6 +842,17 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | topic-065 | normal | `normal_065_a_merge_commit_counts_as_merged` | A root merged with a merge commit, rather than a squash, has every one of its commits in the default branch's history: it is merged, as a topic just started — on the same commit as the default branch — is not. |
 | topic-066 | normal | `normal_066_finish_deletes_merged_remote_branches_and_keeps_the_rest` | `finish` deletes the topic's remote branches the default branches already hold, after its local work, and keeps the rest, naming how to drop them — `--force` too. A remote that refuses the deletion is a warning: what it keeps is held by its default branch, and the finish succeeds. |
 
+### topic_state
+
+| ID | Kind | Test | What it holds |
+|---|---|---|---|
+| topic_state-001 | normal | `normal_001_a_workspace_task_is_merged_when_its_joined_repositories_are` | A workspace task over two repositories, one following its default branch with no revision and one pinned to `main`: `not pushed`, then `pushed`, then — once both are squash-merged and their branches deleted — `merged`, and `finish` removes the worktree without `--force`. |
+| topic_state-002 | normal | `normal_002_finish_takes_a_merged_child_that_follows_a_branch_back_to_it` | In a plain clone, a child that follows `main` and is merged there goes back to its pin when the topic finishes: on `main` again, detached. |
+| topic_state-003 | edge | `edge_003_a_child_pinned_to_a_release_waits_for_upgrade` | A child pinned to a release, squash-merged and its branch deleted, is not merged until `git upgrade` promotes it: `list` does not say `merged`, `status` says it waits and that nothing is left to push, and `finish` refuses it. |
+| topic_state-004 | edge | `edge_004_a_child_following_another_branch_is_judged_against_it` | A child pinned to `develop`, not its default branch, is merged once `develop` holds its change: `list` says `merged`, and `finish` loses nothing by dropping its branch, though `main` lacks the change. |
+| topic_state-005 | edge | `edge_005_a_root_merged_with_a_merge_commit_is_merged` | A root whose own commits were merged with a merge commit — so that, as after a fast-forward, the default branch has all of them — is merged though a checkout joined to it has no change. |
+| topic_state-006 | edge | `edge_006_two_majors_are_two_joined_checkouts` | Two majors of one repository on the topic, `feat` and `feat@v1`, are two joined checkouts, each judged on its own branch. |
+
 ### upgrade
 
 | ID | Kind | Test | What it holds |
@@ -859,8 +871,8 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | upgrade-017 | edge | `edge_017_a_requester_on_a_branch_is_reported_and_left_alone` | A requester asking for a branch is reported and left alone. |
 | upgrade-018 | edge | `edge_018_root_overrides_hold_what_a_raise_would_change` | Overrides stop a raise where they stand: a dependency the root overrides is not raised at all, and a requester the root overrides cannot be joined, so its pin is reported and left — while the root's own entry is still raised. |
 | upgrade-019 | edge | `edge_019_a_raise_with_nothing_to_raise_says_why_and_changes_nothing` | Nothing to raise is said, not done: a pin already at its newest release, and an entry pinned to a branch. |
-| upgrade-020 | error | `error_020_misused_options_are_refused_and_change_nothing` | Each misuse of `upgrade` is refused with what to do instead, and leaves the config and the root's branch as they were. Off a topic both forms refuse: only `git topic start` begins one. |
-| upgrade-021 | error | `error_021_upgrade_refuses_in_ci` | `upgrade` edits the configs of a developer machine's checkouts; in CI, which keeps none, it refuses. |
+| upgrade-020 | error | `error_020_misused_options_are_refused_and_change_nothing` | Each misuse of `upgrade` is refused with what to do instead, and leaves the config and the root's branch as they were. Off a topic promotion refuses: only `git topic start` begins one. A raise needs no topic. |
+| upgrade-021 | error | `error_021_promotion_refuses_in_ci` | Promotion edits the configs of a developer machine's checkouts; in CI, which keeps none, it refuses and says what does work there. |
 | upgrade-022 | normal | `normal_022_a_calendar_raise_stays_in_its_major_and_major_crosses_it` | A calendar raise stays in its major; `--major` crosses to the next. |
 | upgrade-023 | error | `error_023_promotion_fails_while_the_remote_branch_holds_unreleased_work` | A promotion that would delete a remote branch holding work its release lacks fails before anything changes: the branch, the config and the checkout's place on the topic all stay. |
 | upgrade-024 | error | `error_024_a_refused_deletion_changes_no_config_and_a_second_run_completes` | A remote that refuses the deletion fails the promotion with no config edited; once the deletion can go through, running it again completes. |
@@ -871,6 +883,8 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | upgrade-029 | error | `error_029_pinned_branches_matching_no_branch_say_so` | Pinned branches that name no branch of the repository are an error that says which repository — not an empty list of candidates that would read as "no release". |
 | upgrade-030 | edge | `edge_030_a_pin_no_release_holds_says_so` | A pin no release holds — cut on a branch the repository does not pin — says so, rather than `no tag`. |
 | upgrade-031 | normal | `normal_031_promotion_waits_for_the_image_of_a_repository_that_publishes_one` | A repository that publishes artefacts is released when its tag's image is there too — whatever form this workspace takes it in. Until then the promotion waits, saying so. |
+| upgrade-032 | normal | `normal_032_a_raise_in_ci_needs_no_topic` | In CI, with no store and no topic, `upgrade <dir>` raises the root's pin to its newest release: in its major, skipping pre-releases, the way a scheduled job keeps pins current. |
+| upgrade-033 | normal | `normal_033_a_raise_in_ci_takes_releases_as_a_developer_machine_does` | In CI a raise takes releases by the same rule as a developer machine: tags only, never a branch named like a version, and only tags reachable from a branch the repository pins that hold the pin. |
 
 ### workspace
 

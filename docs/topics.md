@@ -79,7 +79,7 @@ merges, and `git topic finish` ends the topic.
 | `git topic start --from <branch> <name>` | From another branch; from a topic, the checkouts joined to it come along |
 | `git topic switch <name>` | Go to an existing branch of the root: one of yours, a colleague's on the remote — tracking it — or a pinned one (`main`) |
 | `git topic` | Print the topic of the checkout the current directory is in; nothing, exit 1, off a topic — at a terminal, it says on stderr where you are instead |
-| `git topic list` | Every topic — each local branch the root does not pin, and the branch of each of its worktrees, `main` included — with its worktree, its joined checkouts, and `new` (nothing on it yet), `N not pushed`, `pushed` or `merged`; `-` for a pinned branch |
+| `git topic list` | Every topic — each local branch the root does not pin, and the branch of each of its worktrees, `main` included — with its worktree, its joined checkouts, and `new` (nothing on it yet), `N not pushed`, `pushed` or `merged`; `-` for a pinned branch. A root with no commits of its own takes its state from its joined checkouts — see [finishing](#a-root-with-no-commits-of-its-own) |
 | `git topic finish [<name>]` | End a merged topic; `--force` abandons one |
 
 After `start` and `switch`, the checkouts are placed: every one whose store or
@@ -110,7 +110,12 @@ git push -u origin "$(git topic)"
    count. Not merged: `NAME is not merged into main; --force to drop it`.
 2. **Checkouts still on the topic** refuse it, naming each:
    `imports/core is still on the topic: git upgrade, or git topic leave
-   imports/core`.
+   imports/core`. A checkout whose pin follows a branch — it names one, or
+   gives no revision — goes back to its pin once that branch holds its
+   change by content, and refuses until then: `imports/docs is still on the
+   topic, not merged: merge it, or git topic leave imports/docs`. Its store is
+   fetched first; a fetch that fails is a warning, and what it last fetched
+   decides.
 3. **Uncommitted changes** refuse it, `--force` or not — in the root, in each
    checkout going back to its pin, and in every checkout of a worktree being
    removed: `uncommitted changes in imports/core: commit or stash them (git
@@ -118,8 +123,9 @@ git push -u origin "$(git topic)"
    -fd)`.
 4. **Commits no remote has** refuse it: on a branch of the topic,
    commits no remote branch or tag holds, whose changes the default branch
-   lacks — `feat@v7 in imports/core has 1 commit no remote has`, then `push
-   them first, or --force to drop them`.
+   lacks — for a checkout whose pin follows a branch, that branch lacks —
+   `feat@v7 in imports/core has 1 commit no remote has`, then `push them
+   first, or --force to drop them`.
 
 `--force` abandons a topic: it skips 1, 2 and 4, and the checkouts still on
 the topic go back to their pins.
@@ -132,8 +138,9 @@ and `NAME@vN`. A branch dropped with commits no remote had is named with the
 commit it was at, as `git branch -D` does.
 
 Then the topic's branches on the remotes: the root's, and those of the
-checkouts joined to it. Each one its default branch already holds — by the
-content test, so a squash, a rebase or a merge commit counts — is deleted,
+checkouts joined to it. Each one its default branch already holds — or, for
+a checkout whose pin follows a branch, that branch — by the content test, so
+a squash, a rebase or a merge commit counts — is deleted,
 only while it is still at the tip checked, so a push made since survives. A
 store is fetched first, so a merge since its last fetch counts. Each one the
 default branch does not hold stays, named with the command that drops it. A
@@ -155,6 +162,18 @@ branches stay. A topic finished with `--force`, unmerged, comes back from its
 remote branches, which stay: `git topic switch PROJ-12` tracks the root's, and
 each checkout follows its own. A merged one has nothing to come back to: its
 change is on the default branch.
+
+### A root with no commits of its own
+
+A workspace repository that only declares the others has nothing of its own
+to merge: a task in it changes the repositories it joins. When the root's
+topic branch has no commits beyond the default branch and checkouts are
+joined to it, `list` and `status` take its state from them. It is `merged`
+once every joined checkout is merged or has no change, and at least one had a
+change. A checkout is merged when the branch its pin follows holds its
+change by content; one pinned to a release is merged only by `git upgrade`,
+which takes it off the topic. A merged checkout has nothing left to push,
+even after the hosting service deleted its branch.
 
 ### Branch prefix
 
@@ -433,11 +452,14 @@ then merge: imports/core
 - `BRANCH`: the slot's topic branch — per-major slots differ.
 - `AHEAD`: commits on the branch its pin does not have; for the root, commits
   the default branch does not have.
-- `PUSHED`: `yes` when the remote has every commit; `-` when there is nothing
-  to push.
-- `STATE`: for a checkout, its [promotion state](#promotion-git-upgrade); for
-  the root, `waits on REPOS` while a joined checkout with a change is not
-  promoted, else `ready to merge`, and `merged into main` once it is.
+- `PUSHED`: `yes` when the remote has every commit, or the branch the pin
+  follows holds them by content; `-` when there is nothing to push.
+- `STATE`: for a checkout, its [promotion state](#promotion-git-upgrade), or
+  `merged into BRANCH` once the branch its pin follows holds its change; for
+  the root, `waits on REPOS` while a joined checkout with a change is neither
+  promoted nor merged, else `ready to merge`, and `merged into main` once it
+  is — for a root with no commits of its own, once its [joined checkouts
+  are](#a-root-with-no-commits-of-its-own).
 - **Footer:** `next:` the commands to run now — `git upgrade --commit` once a
   checkout is released, `git scale push` when something is not pushed, `git
   topic finish` once the root is merged and no checkout is still on the topic
@@ -543,7 +565,8 @@ to push: `to push: imports/b, . — git scale push`.
 ## Raising a dependency: `git upgrade <dir>`
 
 `git upgrade imports/d` — or `git upgrade .` inside it — raises D in the
-topic's configs:
+root's config and the topic's configs. It needs no topic: on the default
+branch it edits the root's config alone.
 
 1. The new revision is the **newest release of D's kind and current major**,
    semver or calendar, among the [releases](#promotion-git-upgrade) that hold
@@ -552,7 +575,9 @@ topic's configs:
    A pre-release is picked only when the current pin is already a pre-release
    — the rule npm and Cargo follow. Without access to D's sources, the newest
    version its registry has: releases are cut in order on D's release
-   branches, so the newest holds every one before it.
+   branches, so the newest holds every one before it. In CI, which keeps no
+   store, the same rule runs in one fetched for the command: D's commits,
+   branches and tags, no files.
 2. **The configs on the topic are edited**: the root's, and those of the
    requesters joined to it. A requester off the topic is named, with the
    command that joins it, and left as it is.
@@ -578,7 +603,9 @@ next to merge: imports/b, imports/c
 The cascade then runs as for any change: B and C merge and are tagged, and
 `git upgrade` bumps the root's pins of them.
 
-`upgrade` in all its forms works on a developer machine; in CI it refuses.
+Promotion works on a developer machine only; in CI it refuses. A raise works
+in CI too, so a scheduled job can run `git upgrade <dir>` on the default
+branch, commit the root's config and open a merge request.
 
 ## Topics in CI
 
