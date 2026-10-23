@@ -126,11 +126,23 @@ pub fn status_row(dir: &Path, repo: &str) -> String {
 
 /// gitscale as a GitLab job on the root's branch `branch` would run it.
 pub fn ci_job(dir: &Path, cache: &Path, branch: &str, args: &[&str]) -> super::CliOutput {
+    ci_job_with(dir, cache, branch, &[], args)
+}
+
+/// [`ci_job`], with more of the job's variables: `CI_JOB_ID`, say.
+pub fn ci_job_with(
+    dir: &Path,
+    cache: &Path,
+    branch: &str,
+    vars: &[(&str, &str)],
+    args: &[&str],
+) -> super::CliOutput {
     let commit = git(dir, &["rev-parse", "HEAD"]);
     let mut full: Vec<&str> = vec!["-C", dir.to_str().unwrap()];
     full.extend_from_slice(args);
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_gitscale"))
         .args(&full)
+        .envs(vars.iter().copied())
         .env("CI", "true")
         .env("GITLAB_CI", "true")
         .env("CI_COMMIT_SHA", &commit)

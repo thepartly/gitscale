@@ -2,7 +2,7 @@
 
 Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Regenerate with `GITSCALE_UPDATE_CATALOG=1 cargo test --test it catalog::`. The naming rules are in [testing.md](testing.md).
 
-663 integration tests (291 normal, 209 edge, 145 error, 18 perf), 41 of them ignored; 170 unit tests.
+695 integration tests (308 normal, 224 edge, 145 error, 18 perf), 41 of them ignored; 172 unit tests.
 
 | Feature | normal | edge | error | perf | total |
 |---|---:|---:|---:|---:|---:|
@@ -19,6 +19,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | [forward](#forward) | 22 | 1 | 3 | 1 | 27 |
 | [hash](#hash) | 5 | 2 | 1 | 0 | 8 |
 | [hook](#hook) | 26 | 26 | 11 | 1 | 64 |
+| [lazy](#lazy) | 13 | 11 | 0 | 0 | 24 |
 | [links](#links) | 10 | 14 | 0 | 0 | 24 |
 | [ls](#ls) | 22 | 9 | 3 | 1 | 35 |
 | [man](#man) | 1 | 0 | 0 | 0 | 1 |
@@ -34,7 +35,8 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | [stores](#stores) | 3 | 10 | 2 | 1 | 16 |
 | [sync](#sync) | 5 | 7 | 0 | 1 | 13 |
 | [topic](#topic) | 37 | 17 | 12 | 0 | 66 |
-| [upgrade](#upgrade) | 12 | 9 | 5 | 0 | 26 |
+| [topic_state](#topic_state) | 2 | 4 | 0 | 0 | 6 |
+| [upgrade](#upgrade) | 14 | 9 | 5 | 0 | 28 |
 | [workspace](#workspace) | 2 | 1 | 1 | 0 | 4 |
 
 ## Integration tests
@@ -406,6 +408,35 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | hook-060 | error | `error_060_an_unknown_hook_name_is_refused_and_nothing_is_written` | A name git does not have — a typo, or a hook gitscale does not install — is refused before anything is written, with the names it takes. |
 | hook-061 | normal | `normal_061_a_global_install_says_which_hooks_no_longer_run` | Under a global install git runs no hook it does not find in gitscale's directory. The install says so — and that git-lfs, when it is installed, will not upload — and `hook status` says it again in each repository. |
 | hook-062 | edge | `edge_062_an_lfs_directory_without_objects_does_not_need_git_lfs` | A `.git/lfs` holding no objects, as any git-lfs command leaves behind, does not make a repository an LFS one: on a machine without git-lfs, `post-checkout` still succeeds rather than failing every checkout. |
+
+### lazy
+
+| ID | Kind | Test | What it holds |
+|---|---|---|---|
+| lazy-001 | normal | `normal_001_sync_leaves_an_absent_lazy_entry_out` | A sync leaves an absent lazy entry out, without even fetching it, and `ls` shows it as `lazy` rather than `missed`. |
+| lazy-002 | normal | `normal_002_naming_it_places_it_and_then_it_is_kept` | Named, it is checked out; from then on a plain sync keeps it on its pin, and deleting the directory makes it lazy again. |
+| lazy-003 | normal | `normal_003_a_dependencys_lazy_entry_is_left_out` | A lazy entry of a dependency's own config, which the root does not declare, is left out as well: the root does not inherit it. |
+| lazy-004 | normal | `normal_004_require_lazy_writes_the_flag_and_fetches_nothing` | `require --lazy` writes the flag, and checks nothing out. |
+| lazy-005 | normal | `normal_005_join_places_a_lazy_entry_on_the_topic` | `git topic join` places an absent lazy entry at its pin and puts it on the topic, writable. |
+| lazy-006 | normal | `normal_006_a_joined_lazy_entry_comes_back_with_its_topic` | A worktree of the topic made again — after the first was deleted by hand — places the lazy entry the topic joined: its store has the branch. |
+| lazy-008 | edge | `edge_008_a_remote_topic_branch_places_an_absent_lazy_entry` | A topic branch its remote has brings an absent lazy entry in, on its branch — on a developer machine and in CI alike — while a workspace off the topic still leaves it out. |
+| lazy-011 | normal | `normal_011_prefer_lazy_leaves_an_entry_out` | `prefer --lazy` leaves an entry its config does not call lazy out, and removes its checkout at once when that loses nothing; `ls` says the workspace chose it, and `prefer` lists both axes. |
+| lazy-012 | normal | `normal_012_prefer_eager_overrides_a_committed_lazy` | `prefer --eager` places a lazy entry on a plain sync, and `--unset` hands it back to the config, which makes it lazy — and removes it — again. |
+| lazy-013 | edge | `edge_013_prefer_lazy_keeps_a_modified_checkout` | Made lazy while it holds uncommitted work, a checkout stays, and says why. |
+| lazy-014 | normal | `normal_014_leave_and_finish_take_a_lazy_entry_away` | A lazy entry joined from nothing and taken off the topic, by `leave` or by `finish`, goes back to nothing; its commits stay in its store. |
+| lazy-015 | edge | `edge_015_an_unreachable_lazy_remote_fails_check_in_ci` | In CI, on a topic, a lazy repository's remote that cannot be asked fails `check` rather than reading as "no branch", which would let a change in it go unseen. |
+| lazy-016 | edge | `edge_016_a_lazy_repository_two_requesters_name_differently` | Two repositories asking for one lazy repository under different names: it would be placed under the repository's own name, which is where `ls` shows it and where `sync` places it — and once placed it stays. |
+| lazy-017 | edge | `edge_017_a_majors_topic_branch_wakes_a_lazy_repository` | A major's branch of the topic, `<topic>@v<major>`, on the remote wakes a lazy repository as the topic's own does; until a placement puts it on disk, `ls --fetch` says it is missed, not lazy. |
+| lazy-018 | edge | `edge_018_prefer_lazy_yields_to_a_repository_that_needs_it` | `prefer --lazy` leaves a repository another one needs placed: that repository's request without `lazy` wins, and `prefer` and `ls` say so. |
+| lazy-019 | normal | `normal_019_a_lazy_artefact_is_installed_when_named` | Lazy and taken as its artefact: `prefer --lazy` takes the image away, a plain `sync` leaves it out, and `sync DIR` installs the image again. |
+| lazy-020 | edge | `edge_020_leave_keeps_a_lazy_checkout_that_was_there_before` | A lazy checkout already on disk before it joined stays when it leaves: only one `join` brought from nothing goes back to nothing. |
+| lazy-021 | edge | `edge_021_an_unreachable_lazy_remote_is_a_warning_locally` | On a developer machine, a lazy remote that cannot be asked is a warning: the repository is left out and the command carries on. `check` still fails, as it does in CI. |
+| lazy-022 | edge | `edge_022_join_works_with_a_store_older_than_the_pins` | Joining a lazy repository works with stores fetched before the root's pins moved: a pin to a tag pushed since is fetched, not an error. |
+| lazy-023 | edge | `edge_023_prefer_lazy_keeps_a_checkout_it_cannot_read` | A checkout whose git status cannot be read is kept: nothing says its files are safe to delete. |
+| lazy-024 | edge | `edge_024_a_sibling_with_a_longer_name_does_not_wake_it` | Only a checkout of another major, `<name>_v<major>`, keeps a lazy repository placed: a directory that merely starts with its name does not. |
+| lazy-025 | normal | `normal_025_prefer_unset_removes_form_and_presence` | `prefer --unset` removes both kinds of preference — form and presence — and takes no other preference beside it. |
+| lazy-026 | normal | `normal_026_named_in_ci_it_stays_for_the_rest_of_the_job` | In CI, `sync DIR` places a lazy repository, and the job's later commands keep it; a later job reusing the build directory leaves it out again. |
+| lazy-027 | normal | `normal_027_upgrade_raises_a_lazy_dependency_left_out` | `git upgrade <dir>` raises a lazy dependency that is not placed: the raise needs its requests and its releases, not a checkout. |
 
 ### links
 
@@ -812,6 +843,17 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | topic-065 | normal | `normal_065_a_merge_commit_counts_as_merged` | A root merged with a merge commit, rather than a squash, has every one of its commits in the default branch's history: it is merged, as a topic just started — on the same commit as the default branch — is not. |
 | topic-066 | normal | `normal_066_finish_deletes_merged_remote_branches_and_keeps_the_rest` | `finish` deletes the topic's remote branches the default branches already hold, after its local work, and keeps the rest, naming how to drop them — `--force` too. A remote that refuses the deletion is a warning: what it keeps is held by its default branch, and the finish succeeds. |
 
+### topic_state
+
+| ID | Kind | Test | What it holds |
+|---|---|---|---|
+| topic_state-001 | normal | `normal_001_a_workspace_task_is_merged_when_its_joined_repositories_are` | A workspace task over two repositories, one following its default branch with no revision and one pinned to `main`: `not pushed`, then `pushed`, then — once both are squash-merged and their branches deleted — `merged`, and `finish` removes the worktree without `--force`. |
+| topic_state-002 | normal | `normal_002_finish_takes_a_merged_child_that_follows_a_branch_back_to_it` | In a plain clone, a child that follows `main` and is merged there goes back to its pin when the topic finishes: on `main` again, detached. |
+| topic_state-003 | edge | `edge_003_a_child_pinned_to_a_release_waits_for_upgrade` | A child pinned to a release, squash-merged and its branch deleted, is not merged until `git upgrade` promotes it: `list` does not say `merged`, `status` says it waits and that nothing is left to push, and `finish` refuses it. |
+| topic_state-004 | edge | `edge_004_a_child_following_another_branch_is_judged_against_it` | A child pinned to `develop`, not its default branch, is merged once `develop` holds its change: `list` says `merged`, and `finish` loses nothing by dropping its branch, though `main` lacks the change. |
+| topic_state-005 | edge | `edge_005_a_root_merged_with_a_merge_commit_is_merged` | A root whose own commits were merged with a merge commit — so that, as after a fast-forward, the default branch has all of them — is merged though a checkout joined to it has no change. |
+| topic_state-006 | edge | `edge_006_two_majors_are_two_joined_checkouts` | Two majors of one repository on the topic, `feat` and `feat@v1`, are two joined checkouts, each judged on its own branch. |
+
 ### upgrade
 
 | ID | Kind | Test | What it holds |
@@ -830,8 +872,8 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | upgrade-017 | edge | `edge_017_a_requester_on_a_branch_is_reported_and_left_alone` | A requester asking for a branch is reported and left alone. |
 | upgrade-018 | edge | `edge_018_root_overrides_hold_what_a_raise_would_change` | Overrides stop a raise where they stand: a dependency the root overrides is not raised at all, and a requester the root overrides cannot be joined, so its pin is reported and left — while the root's own entry is still raised. |
 | upgrade-019 | edge | `edge_019_a_raise_with_nothing_to_raise_says_why_and_changes_nothing` | Nothing to raise is said, not done: a pin already at its newest release, and an entry pinned to a branch. |
-| upgrade-020 | error | `error_020_misused_options_are_refused_and_change_nothing` | Each misuse of `upgrade` is refused with what to do instead, and leaves the config and the root's branch as they were. Off a topic both forms refuse: only `git topic start` begins one. |
-| upgrade-021 | error | `error_021_upgrade_refuses_in_ci` | `upgrade` edits the configs of a developer machine's checkouts; in CI, which keeps none, it refuses. |
+| upgrade-020 | error | `error_020_misused_options_are_refused_and_change_nothing` | Each misuse of `upgrade` is refused with what to do instead, and leaves the config and the root's branch as they were. Off a topic promotion refuses: only `git topic start` begins one. A raise needs no topic. |
+| upgrade-021 | error | `error_021_promotion_refuses_in_ci` | Promotion edits the configs of a developer machine's checkouts; in CI, which keeps none, it refuses and says what does work there. |
 | upgrade-022 | normal | `normal_022_a_calendar_raise_stays_in_its_major_and_major_crosses_it` | A calendar raise stays in its major; `--major` crosses to the next. |
 | upgrade-023 | error | `error_023_promotion_fails_while_the_remote_branch_holds_unreleased_work` | A promotion that would delete a remote branch holding work its release lacks fails before anything changes: the branch, the config and the checkout's place on the topic all stay. |
 | upgrade-024 | error | `error_024_a_refused_deletion_changes_no_config_and_a_second_run_completes` | A remote that refuses the deletion fails the promotion with no config edited; once the deletion can go through, running it again completes. |
@@ -842,6 +884,8 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | upgrade-029 | error | `error_029_pinned_branches_matching_no_branch_say_so` | Pinned branches that name no branch of the repository are an error that says which repository — not an empty list of candidates that would read as "no release". |
 | upgrade-030 | edge | `edge_030_a_pin_no_release_holds_says_so` | A pin no release holds — cut on a branch the repository does not pin — says so, rather than `no tag`. |
 | upgrade-031 | normal | `normal_031_promotion_waits_for_the_image_of_a_repository_that_publishes_one` | A repository that publishes artefacts is released when its tag's image is there too — whatever form this workspace takes it in. Until then the promotion waits, saying so. |
+| upgrade-032 | normal | `normal_032_a_raise_in_ci_needs_no_topic` | In CI, with no store and no topic, `upgrade <dir>` raises the root's pin to its newest release: in its major, skipping pre-releases, the way a scheduled job keeps pins current. |
+| upgrade-033 | normal | `normal_033_a_raise_in_ci_takes_releases_as_a_developer_machine_does` | In CI a raise takes releases by the same rule as a developer machine: tags only, never a branch named like a version, and only tags reachable from a branch the repository pins that hold the pin. |
 
 ### workspace
 
@@ -990,6 +1034,8 @@ In `#[cfg(test)]` modules beside the code, by source file.
 ### src/prefer.rs
 
 - `source_is_the_default_and_removes_a_preference`
+- `a_file_from_before_presence_reads`
+- `presence_reads_back_beside_the_form`
 - `it_reads_back_what_it_writes`
 
 ### src/progress.rs

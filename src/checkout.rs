@@ -524,3 +524,80 @@ pub fn stop_branch(
     crate::git::run_git(&["branch", "--quiet", "-D", branch], Some(dest), true)?;
     Ok(())
 }
+
+/// Where a checkout's own git directory records that it joined a topic from
+/// nothing: a lazy repository `git topic join` placed. It goes with the
+/// checkout.
+const WOKEN: &str = "gitscale-woken";
+
+/// Record that the checkout at `dest` joined the topic from nothing.
+pub fn mark_woken(dest: &Path) -> Result<()> {
+    let marker = crate::git::git_path(dest, WOKEN)
+        .ok_or_else(|| anyhow::anyhow!("{} is not a git checkout", dest.display()))?;
+    std::fs::write(&marker, "").with_context(|| format!("cannot write {}", marker.display()))
+}
+
+/// Whether the checkout at `dest` joined the topic from nothing, so leaving
+/// it goes back to nothing.
+pub fn was_woken(dest: &Path) -> bool {
+    crate::git::is_checkout(dest)
+        && crate::git::git_path(dest, WOKEN).is_some_and(|marker| marker.is_file())
+}
+
+/// What became of a lazy checkout asked to go.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Dropped {
+    Removed,
+    /// Kept, and why: the work it holds.
+    Kept(String),
+    /// Nothing there, or a link.
+    Absent,
+}
+
+/// Take away the checkout of the lazy repository at `url`, at `directory`,
+/// when that loses nothing: uncommitted changes, other than the `planted`
+/// links, or commits no remote has keep a source checkout. An artefact's
+/// image holds nothing of its own and goes.
+pub fn drop_lazy(
+    config_root: &Path,
+    directory: &str,
+    url: &str,
+    planted: &[String],
+    stores: Option<&crate::store::Stores>,
+) -> Result<Dropped> {
+    let dest = config_root.join(directory);
+    if dest.is_symlink() || dest.symlink_metadata().is_err() {
+        return Ok(Dropped::Absent);
+    }
+    if !crate::git::is_checkout(&dest) {
+        if crate::artefact::installed(config_root, directory).is_none() {
+            return Ok(Dropped::Absent);
+        }
+        crate::artefact::uninstall(config_root, directory)?;
+        crate::ledger::forget(config_root, directory)?;
+        return Ok(Dropped::Removed);
+    }
+    // A status git cannot read says nothing is safe to delete.
+    if crate::git::porcelain(&dest).is_none() {
+        return Ok(Dropped::Kept("its git status cannot be read".to_string()));
+    }
+    if let Some(work) = crate::git::local_work(&dest, planted) {
+        return Ok(Dropped::Kept(work));
+    }
+    crate::git::restore_writable(&dest)?;
+    match stores {
+        Some(stores) => {
+            let store = stores.repo_path(&crate::ci::remote_url(url));
+            let dest_str = dest.to_string_lossy().to_string();
+            crate::git::run_git(
+                &["worktree", "remove", "--force", &dest_str],
+                Some(&store),
+                true,
+            )?;
+        }
+        None => std::fs::remove_dir_all(&dest)
+            .with_context(|| format!("cannot remove {}", dest.display()))?,
+    }
+    crate::ledger::forget(config_root, directory)?;
+    Ok(Dropped::Removed)
+}

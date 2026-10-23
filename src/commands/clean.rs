@@ -107,17 +107,17 @@ pub fn run(
 }
 
 /// What CI follows every placement with: `clean -fdx` of each checkout
-/// placed.
+/// placed, against the placement's own resolution, which holds what it
+/// placed — lazy repositories it was told to place included.
 pub fn scrub(
     config: &crate::config::GitScaleConfig,
     config_root: &Path,
+    resolution: &crate::resolution::Resolution,
     dirs: &[String],
     interactive: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
-    let sources = Sources::new(config_root, false)?;
-    let resolution = crate::resolve::workspace(config, config_root, false, &sources, None, false)?;
     let opts = Options {
         delete: true,
         directories: true,
@@ -129,7 +129,7 @@ pub fn scrub(
     clean(
         config,
         config_root,
-        &resolution,
+        resolution,
         dirs,
         &opts,
         interactive,

@@ -24,6 +24,10 @@ pub struct RepoEntry {
     /// `singleton = true` or `false`: whether this repository may be checked
     /// out once per compatibility class (`false`, the default) or only once.
     pub singleton: Option<bool>,
+    /// `lazy = true`: placed only once it is on disk, named, or joined to
+    /// the topic; until then resolution leaves it out. See
+    /// [`crate::resolution`].
+    pub lazy: bool,
 }
 
 impl Default for RepoEntry {
@@ -35,6 +39,7 @@ impl Default for RepoEntry {
             recursive: true,
             is_override: false,
             singleton: None,
+            lazy: false,
         }
     }
 }
@@ -268,6 +273,7 @@ struct RawRepo {
     #[serde(rename = "override")]
     is_override: Option<bool>,
     singleton: Option<bool>,
+    lazy: Option<bool>,
 }
 
 pub fn find_config(start: Option<&Path>) -> Result<PathBuf> {
@@ -799,6 +805,7 @@ fn parse_repos(
             recursive,
             is_override,
             singleton: spec.singleton,
+            lazy: spec.lazy.unwrap_or(false),
         });
     }
     check_unambiguous(&entries, config_path)?;
@@ -939,6 +946,9 @@ pub fn add_entry(path: &Path, entry: &RepoEntry) -> Result<()> {
     value.insert("url", entry.repo_url.as_str().into());
     if !entry.revision.is_empty() {
         value.insert("revision", entry.revision.as_str().into());
+    }
+    if entry.lazy {
+        value.insert("lazy", true.into());
     }
     if !doc.contains_key("repos") {
         doc.insert("repos", toml_edit::Item::Table(toml_edit::Table::new()));

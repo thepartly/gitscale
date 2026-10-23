@@ -61,6 +61,23 @@ fn detect() -> Option<CiAuth> {
     CiAuth::from_vars(&|name| std::env::var(name).ok())
 }
 
+/// This CI job, as its platform names it: GitLab's `CI_JOB_ID`, or
+/// GitHub's run, attempt and job together. `None` outside CI and on a
+/// platform that names neither.
+pub fn job_id() -> Option<String> {
+    let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    if !crate::git::is_ci() {
+        return None;
+    }
+    if let Some(id) = var("CI_JOB_ID") {
+        return Some(format!("gitlab:{}", id));
+    }
+    let run = var("GITHUB_RUN_ID")?;
+    let attempt = var("GITHUB_RUN_ATTEMPT").unwrap_or_default();
+    let job = var("GITHUB_JOB").unwrap_or_default();
+    Some(format!("github:{}:{}:{}", run, attempt, job))
+}
+
 /// The URL to actually talk to for `repo_url`: an HTTPS URL on the CI server
 /// when CI credentials cover it, otherwise the configured URL unchanged.
 pub fn remote_url(repo_url: &str) -> String {
