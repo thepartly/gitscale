@@ -2,7 +2,7 @@
 
 Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Regenerate with `GITSCALE_UPDATE_CATALOG=1 cargo test --test it catalog::`. The naming rules are in [testing.md](testing.md).
 
-694 integration tests (308 normal, 223 edge, 145 error, 18 perf), 41 of them ignored; 172 unit tests.
+695 integration tests (308 normal, 224 edge, 145 error, 18 perf), 41 of them ignored; 172 unit tests.
 
 | Feature | normal | edge | error | perf | total |
 |---|---:|---:|---:|---:|---:|
@@ -18,7 +18,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | [exclude](#exclude) | 2 | 1 | 0 | 0 | 3 |
 | [forward](#forward) | 22 | 1 | 3 | 1 | 27 |
 | [hash](#hash) | 5 | 2 | 1 | 0 | 8 |
-| [hook](#hook) | 26 | 25 | 11 | 1 | 63 |
+| [hook](#hook) | 26 | 26 | 11 | 1 | 64 |
 | [lazy](#lazy) | 13 | 11 | 0 | 0 | 24 |
 | [links](#links) | 10 | 14 | 0 | 0 | 24 |
 | [ls](#ls) | 22 | 9 | 3 | 1 | 35 |
@@ -407,6 +407,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | hook-059 | normal | `normal_059_hooks_selects_what_is_installed_and_a_reinstall_keeps_it` | `--hooks` names what is installed besides the placing hooks, with `lfs` for git-lfs's four. Re-installing without it keeps the selection; naming fewer takes the rest out, putting back the hook one had displaced. |
 | hook-060 | error | `error_060_an_unknown_hook_name_is_refused_and_nothing_is_written` | A name git does not have — a typo, or a hook gitscale does not install — is refused before anything is written, with the names it takes. |
 | hook-061 | normal | `normal_061_a_global_install_says_which_hooks_no_longer_run` | Under a global install git runs no hook it does not find in gitscale's directory. The install says so — and that git-lfs, when it is installed, will not upload — and `hook status` says it again in each repository. |
+| hook-062 | edge | `edge_062_an_lfs_directory_without_objects_does_not_need_git_lfs` | A `.git/lfs` holding no objects, as any git-lfs command leaves behind, does not make a repository an LFS one: on a machine without git-lfs, `post-checkout` still succeeds rather than failing every checkout. |
 
 ### lazy
 

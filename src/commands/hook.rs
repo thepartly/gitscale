@@ -1152,9 +1152,10 @@ fn dispatch(
         }
     }
 
-    // 2. git-lfs. A repository uses it once git-lfs has a store in it, or a
-    // hook git-lfs installed there says so.
-    if LFS_HOOKS.contains(&hook) && (lfs_hook || site.common.join("lfs").is_dir()) {
+    // 2. git-lfs. A repository uses it once git-lfs has stored an object in
+    // it, or a hook git-lfs installed there says so. A bare `lfs/` is not
+    // enough: any git-lfs command leaves `lfs/tmp` behind.
+    if LFS_HOOKS.contains(&hook) && (lfs_hook || site.common.join("lfs/objects").is_dir()) {
         let code = if lfs_binary().is_some() {
             let mut cmd = Command::new("git");
             cmd.arg("lfs").arg(hook).args(args);
