@@ -1314,6 +1314,7 @@ fn place(
                 force: false,
                 leave: leave.as_deref(),
                 heading: "Pulling latest changes...",
+                named: &[],
             },
             verbose,
             no_cache,

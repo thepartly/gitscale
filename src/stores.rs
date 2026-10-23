@@ -21,7 +21,7 @@
 //! offline and fetches only the stores that lacked something: see
 //! [`OnMiss`].
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -82,6 +82,12 @@ pub struct GitStores<'a> {
     sourceless: Mutex<BTreeSet<String>>,
     /// Repositories this workspace takes as artefacts, by normalized URL.
     artefact: BTreeSet<String>,
+    /// Whether each lazy repository's remote has a branch of a topic, by
+    /// normalized URL and topic, or why it could not be asked.
+    remote_topics: Mutex<HashMap<(String, String), std::result::Result<bool, String>>>,
+    /// A lazy remote that cannot be asked is an error, not a warning: in CI,
+    /// and for the merge gate, where a change unseen would be shipped.
+    strict: bool,
 }
 
 impl<'a> GitStores<'a> {
@@ -110,7 +116,15 @@ impl<'a> GitStores<'a> {
                         .collect()
                 })
                 .unwrap_or_default(),
+            remote_topics: Mutex::new(HashMap::new()),
+            strict: crate::git::is_ci(),
         }
+    }
+
+    /// Fail on a lazy remote that cannot be asked, as CI always does.
+    pub fn strict(mut self) -> Self {
+        self.strict = true;
+        self
     }
 
     /// Read offline, fetching only what `on_miss` marks.
@@ -504,6 +518,89 @@ impl Repos for GitStores<'_> {
         crate::git::resolve_ref(&path, &format!("refs/heads/{}^{{commit}}", branch))
     }
 
+    fn local_topic(&self, url: &str, topic: &str) -> bool {
+        if self.store(url) != Store::Repo {
+            return false;
+        }
+        let path = self.repo_path(url);
+        is_store(&path)
+            && crate::git::query(
+                &path,
+                &[
+                    "for-each-ref",
+                    "--count=1",
+                    "--format=%(refname)",
+                    &format!("refs/heads/{}", topic),
+                    &format!("refs/heads/{}@v*", topic),
+                ],
+            )
+            .is_some_and(|listed| !listed.trim().is_empty())
+    }
+
+    fn remote_topic(&self, url: &str, topic: &str) -> Result<bool> {
+        // Offline, what its store last saw, when it has one: a lazy
+        // repository may have none, and then nothing says it has the branch.
+        // So too for a placement fetching only on a miss, as the git hooks'
+        // is: asking every lazy remote would cost each `git switch` a round
+        // trip, and `git scale sync` and CI ask.
+        if !self.online {
+            let path = self.path(url);
+            let stored = match self.store(url) {
+                Store::Repo => is_store(&path),
+                Store::Light => path.join(REFS_FILE).is_file(),
+            };
+            let versioned = format!("{}@v", topic);
+            return Ok(stored
+                && self.refs(url).is_ok_and(|refs| {
+                    refs.branches
+                        .keys()
+                        .any(|b| b == topic || b.starts_with(&versioned))
+                }));
+        }
+        let key = (crate::urls::normalize(url), topic.to_string());
+        let known = self.remote_topics.lock().unwrap().get(&key).cloned();
+        let answer = match known {
+            Some(answer) => answer,
+            None => {
+                let answer = remote_has_topic(url, topic).map_err(|e| format!("{:#}", e));
+                if let (Err(e), false) = (&answer, self.strict) {
+                    eprintln!(
+                        "  lazy  {}: cannot ask for branch {}: {}; left out — CI and git scale \
+                         check fail on this",
+                        url,
+                        topic,
+                        e.trim()
+                    );
+                }
+                self.remote_topics
+                    .lock()
+                    .unwrap()
+                    .insert(key, answer.clone());
+                answer
+            }
+        };
+        match answer {
+            Ok(found) => Ok(found),
+            // On a developer machine, one remote out of reach must not stop
+            // every topic command: it is left out, as offline.
+            Err(_) if !self.strict => Ok(false),
+            Err(e) => Err(anyhow!("cannot ask {} for branch {}: {}", url, topic, e)),
+        }
+    }
+
+    fn prepare_topic(&self, urls: &[String], topic: &str) {
+        if !self.online || urls.len() < 2 {
+            return;
+        }
+        std::thread::scope(|scope| {
+            for url in urls {
+                scope.spawn(move || {
+                    let _ = self.remote_topic(url, topic);
+                });
+            }
+        });
+    }
+
     fn prepare(&self, wanted: &[String]) {
         // Refs of every repository, fetched side by side: the network wait
         // is what resolution costs, and it is per repository.
@@ -737,4 +834,37 @@ impl Checkouts for WorkspaceCheckouts {
         }
         crate::git::resolve_ref(&dest, "HEAD")
     }
+
+    fn present(&self, directory: &str) -> bool {
+        self.root.join(directory).symlink_metadata().is_ok()
+    }
+
+    fn present_major(&self, parent: &str, name: &str) -> bool {
+        std::fs::read_dir(self.root.join(parent)).is_ok_and(|entries| {
+            entries.flatten().any(|e| {
+                let file = e.file_name().to_string_lossy().into_owned();
+                file.strip_prefix(name)
+                    .is_some_and(crate::resolution::is_major_suffix)
+            })
+        })
+    }
+}
+
+/// Whether the remote at `url` has a branch of `topic`, the topic's own or a
+/// major's `<topic>@v<major>`: one ref advertisement. An error when the
+/// remote cannot be asked.
+fn remote_has_topic(url: &str, topic: &str) -> Result<bool> {
+    let url = crate::ci::remote_url(url);
+    let listed = crate::git::run_git(
+        &[
+            "ls-remote",
+            "--heads",
+            &url,
+            &format!("refs/heads/{}", topic),
+            &format!("refs/heads/{}@v*", topic),
+        ],
+        None,
+        true,
+    )?;
+    Ok(!String::from_utf8_lossy(&listed.stdout).trim().is_empty())
 }

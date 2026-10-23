@@ -36,6 +36,7 @@ git explain                     # how each shared checkout got its revision
 !   apps/web         -      source     feat/x    feat/x     dirty
 ✔   imports/core     -      source     8c1d0e2   main       ok
 ✘   imports/new      -      source     —         main       missed
+○   imports/fixtures -      source     —         v3         lazy
 ≠   imports/proto    -      source     41be7a0   main       ref-mismatch
 ⤷   imports/shared   ../s   source     8c1d0e2   main       symlink
 ✔   meta/frontend    -      artefact   v2.1.0    v2.1.0     ok
@@ -66,13 +67,14 @@ followed by a row for each
 
 ## Status flags
 
-`missed` and `symlink` are reported alone. Everything else combines, in this
-order.
+`missed`, `lazy` and `symlink` are reported alone. Everything else combines,
+in this order.
 
 | Flag | Meaning |
 |---|---|
 | `ok` | Clean, and on the expected revision |
 | `missed` | No checkout yet: the directory does not exist, or holds no repository — the next [placement](stores.md#placement) checks it out |
+| `lazy` | A [lazy dependency](dependencies.md#only-when-needed-lazy) left out, as intended: `git scale sync DIR` or `git topic join DIR` brings it in, `git scale prefer --eager DIR` keeps it. One the topic brought in, not checked out yet, is `missed` |
 | `symlink` | Resolved as a symlink to a root-level checkout (a deduped [recursive dependency](recursive-dependencies.md)) |
 | `unlinked` | A dependency inside this repo that should be a symlink is a real clone instead — see [unlinked checkouts](recursive-dependencies.md#unlinked-checkouts). The next [placement](stores.md#placement) relinks it |
 | `unlinked, modified` | …and that clone has uncommitted changes or unpushed commits, so relinking would lose work. `git scale sync --force` overrides |
@@ -209,6 +211,7 @@ most serious one.
 | `✔` | green | `ok` |
 | `⤷` | cyan | `symlink` |
 | `✘` | red | `missed` |
+| `○` | grey | `lazy` |
 | `⊘` | yellow / bright red | `orphan` / `orphan, broken` |
 | `~` | yellow / bright red | `unlinked` / `unlinked` with anything else |
 | `!` | bright red / yellow | `dirty`, `foreign`, `missing`, `changed` / `untracked-links` on its own |
@@ -299,6 +302,10 @@ How resolution got there is in the same object, as structure only:
   "as_reason": "default",
   "as_next": null,
   "implicit": false,
+  "lazy": false,
+  "lazy_reason": null,
+  "asleep": false,
+  "required_by": null,
   "resolution": "raised",
   "reason": "semver",
   "unresolved": null,
@@ -324,6 +331,10 @@ How resolution got there is in the same object, as structure only:
 | `as` | How the checkout arrives on disk now: `source` or `artefact` |
 | `as_reason` | Why that form: `topic` (on the topic), `no-access` (its sources cannot be read), `preferred` or `default` |
 | `as_next` | The form the next placement gives, when it differs; else `null` |
+| `lazy` | It is [lazy](dependencies.md#only-when-needed-lazy): left out while nothing asks for it |
+| `lazy_reason` | `preferred` (this workspace's `prefer --lazy` or `--eager`), `committed` (every request says `lazy = true`), or `null` |
+| `asleep` | Lazy and left out: resolution placed nothing for it. Such a row has `exists: false` and is listed after the rest |
+| `required_by` | The repository whose config asks for it without `lazy`, keeping it placed although this workspace prefers it lazy; else `null` |
 | `resolution` | `only`, `root` (the root's own request won), `raised`, `highest` (the root asked for nothing), `override`, `follow` (no revision asked for) or `unresolved` |
 | `reason` | `only`, `semver`, `calver`, `position`, `equal` or `override` |
 | `unread` | Why the checkout's own dependencies could not be read, when they could not |

@@ -344,7 +344,7 @@ git topic finish [GLOBAL] [--force] [NAME]
 | Command | Does |
 |---|---|
 | `git topic` | Print the topic branch of the checkout the current directory is in; off a topic, nothing, exit 1 — and, at a terminal, why on stderr: `main is pinned, not a topic: git topic start NAME, or git topic switch NAME`. Offline |
-| `join <DIR>...` | Put checkouts on the topic, from the commit each is at, writable — see [join and leave](topics.md#git-topic-join--leave) |
+| `join <DIR>...` | Put checkouts on the topic, from the commit each is at, writable; a lazy one not on disk is checked out at its pin first — see [join and leave](topics.md#git-topic-join--leave) |
 | `join --dependants [DIR...]` | Join the checkouts that ask for each `DIR` below its newest release; with none, those asking for the topic's changes, one level up |
 | `leave <DIR>...` | Take them back to their pins, their topic branches deleted |
 | `start <NAME>` | Begin a topic from the remote's default branch, or `--from BRANCH` — see [starting, switching and finishing](topics.md#starting-switching-and-finishing-topics) |
@@ -425,8 +425,10 @@ git scale sync [GLOBAL] [--force] [DIR...]
 each checkout where resolution says, relink, prune unused images, and run
 [`post_sync`](hooks.md#post_sync). Anything holding work is reported and kept
 without `--force`, and the command exits 1. With directories, only those
-checkouts are placed and relinked; `.` at the root is the whole workspace.
-Nothing is pushed. The [hook](hooks.md#git-hooks) and CI run `sync`; typed, it
+checkouts are placed and relinked; `.` at the root is the whole workspace. A
+[lazy dependency](dependencies.md#only-when-needed-lazy) is placed when named,
+in the form it would take, or once it is on disk or the topic has a branch of
+it. Nothing is pushed. The [hook](hooks.md#git-hooks) and CI run `sync`; typed, it
 is rarely needed — `git scale pull` brings everything up to date.
 
 ## `git scale clean`
@@ -473,7 +475,7 @@ period dropped. Refuses in CI. See [compacting](clean.md#compacting-git-scale-gc
 ## `git scale require` / `unrequire`
 
 ```
-git scale require [GLOBAL] <DIR> <URL> [REVISION]
+git scale require [GLOBAL] [--lazy] <DIR> <URL> [REVISION]
 git scale unrequire [GLOBAL] <DIR>
 ```
 
@@ -482,6 +484,7 @@ git scale unrequire [GLOBAL] <DIR>
 | `DIR` | Where the checkout goes, from the current directory |
 | `URL` | The repository URL |
 | `REVISION` | Branch, tag or commit SHA. Left out, no revision is written |
+| `--lazy` | Write `lazy = true`: nothing is checked out until the entry is named — see [only when needed](dependencies.md#only-when-needed-lazy) |
 
 Edit the root's `.gitscale.toml` in place — comments, key order and tables
 GitScale does not know about are kept — then place the workspace, online.
@@ -500,18 +503,22 @@ git scale unrequire imports/utils
 
 ```
 git scale prefer [GLOBAL] [DIR...]
-git scale prefer [GLOBAL] --source|--artefact <DIR>...
+git scale prefer [GLOBAL] [--source|--artefact] [--lazy|--eager|--committed] <DIR>...
 ```
 
 | Option | Meaning |
 |---|---|
-| `--source` | Its sources: the default, so this removes the preference |
+| `--source` | Its sources: the default, so this removes the form preference |
 | `--artefact` | The published image of its release, in place of the sources |
+| `--lazy` | Left out until the topic, `git topic join DIR` or `git scale sync DIR` asks for it; a checkout on disk goes at once when that loses nothing |
+| `--eager` | Placed, although its configs say `lazy = true` |
+| `--committed` | Drop `--lazy` or `--eager`: the configs' `lazy` decides again |
 
-Without a form: the preferences of the `DIR`s, or every preference with the
-checkouts it applies to. With one — exactly one, and at least one `DIR` — the
-preference for each checkout's repository, every major of it, in every
-worktree of the root. It only records: the next placement applies it, and
+Without an option: the preferences of the `DIR`s, or every preference with the
+checkouts it applies to, form and presence both. With one form, one presence,
+or one of each, and at least one `DIR`: the preference for each checkout's
+repository, every major of it, in every worktree of the root. It only records,
+`--lazy` removing a clean checkout aside: the next placement applies it, and
 `git scale ls` shows `source → artefact` meanwhile. See
 [choosing how a checkout arrives](artefacts.md#choosing-how-a-checkout-arrives).
 

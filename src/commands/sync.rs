@@ -31,6 +31,9 @@ pub struct Placement<'a> {
     pub leave: Option<&'a str>,
     /// The line before the result lines; none when empty.
     pub heading: &'a str,
+    /// Lazy repositories, by URL, placed although nothing else asks for
+    /// them: the command named them.
+    pub named: &'a [String],
 }
 
 /// `git scale sync [--force] [DIR...]`.
@@ -47,6 +50,7 @@ pub fn run(
 ) -> Result<()> {
     let (config, config_root) = crate::config::load_workspace(start)?;
     let mut named = Vec::new();
+    let mut woken = Vec::new();
     if !dirs.is_empty() {
         let here = crate::paths::Here::new(start, &config_root)?;
         let sources = Sources::new(&config_root, no_cache)?;
@@ -54,6 +58,12 @@ pub fn run(
         let resolution =
             crate::resolve::workspace(&config, &config_root, false, &sources, None, false)?;
         for dir in dirs {
+            // A lazy dependency is placed once named.
+            if let Some(entry) = crate::resolve::asleep(&here, &resolution, dir) {
+                woken.push(entry.repo_url.clone());
+                named.push(entry.directory.clone());
+                continue;
+            }
             match here.name(&resolution, dir, true)? {
                 // The root's own placement is every checkout's.
                 crate::paths::Named::Root => {
@@ -73,6 +83,7 @@ pub fn run(
             force,
             leave: None,
             heading: "Pulling latest changes...",
+            named: &woken,
         },
         verbose,
         no_cache,
@@ -125,13 +136,14 @@ pub fn place(
     // Placed where a fresh clone would land: resolved against the remotes
     // as they are now, so a revision a dependency starts asking for in this
     // very placement is the one its checkout moves to.
-    let resolution = crate::resolve::workspace_with(
+    let resolution = crate::resolve::workspace_with_naming(
         config,
         config_root,
         opts.network.in_ci(),
         &sources,
         Some(&artefacts),
         verbose,
+        opts.named,
     )?;
     let selected = resolution.select(opts.dirs)?;
     let placer = Placer {

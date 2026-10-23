@@ -13,6 +13,7 @@
 - [Revision kinds](#revision-kinds)
 - [Holding a dependency down: `override`](#holding-a-dependency-down-override)
 - [One checkout only: `singleton`](#one-checkout-only-singleton)
+- [Only when needed: `lazy`](#only-when-needed-lazy)
 - [History and depth](#history-and-depth)
 - [Recursive dependencies](#recursive-dependencies)
 
@@ -39,6 +40,7 @@ entry takes:
 | `url` | yes | — | Git repository URL: HTTPS, SSH (`git@host:owner/repo.git` or `ssh://…`), or a local path |
 | `revision` | no | the remote's default branch | Branch, tag or commit SHA — see [pinning a revision](#pinning-a-revision) |
 | `recursive` | no | `true` | Whether to read this repo's own `.gitscale.toml` — see [recursive dependencies](recursive-dependencies.md) |
+| `lazy` | no | `false` | Checked out only once named — see [only when needed](#only-when-needed-lazy) |
 
 Directories must be relative and free of `..`; URLs and revisions may not start
 with `-` or use a `helper::` remote-helper prefix. The reasoning, and the full
@@ -268,6 +270,56 @@ majors are asked for; `singleton = false` on the root's entry relaxes a
 dependency's `true`. A repository can say it of itself with a top-level
 `singleton = true` in its own `.gitscale.toml`. See
 [singleton](recursive-dependencies.md#singleton).
+
+## Only when needed: `lazy`
+
+`lazy = true` declares a dependency that only some work needs: a repository of
+large test fixtures, or — in a workspace that declares every repository a team
+has — each of them.
+
+```toml
+"imports/fixtures" = { url = "git@github.com:org/fixtures.git", revision = "v3", lazy = true }
+```
+
+A lazy dependency is left out of every placement — `sync`, the git hooks, the
+placement after `git topic start` and `switch`, CI — until one of these holds:
+
+- **It is named**: `git scale sync imports/fixtures` checks it out at its pin,
+  in the form the workspace takes it in, and `git topic join imports/fixtures`
+  checks out its sources and puts it on the topic.
+- **It is on disk**, under the directory it would be placed in or a major's
+  beside it: from then on it is an ordinary checkout, kept at its pin or on
+  its topic branch. Deleting its directory makes it lazy again. `git scale
+  prefer --lazy` removes it when that loses nothing, and so do `git topic
+  leave` and `git topic finish` for one that `join` brought from nothing. A
+  CI build directory never counts: what an earlier job left is no reason to
+  place it. So a workspace can hold a lazy checkout a pipeline does not, and
+  `prefer --eager` places one it leaves out: a lazy dependency is for work
+  that does not need it, and anything the build needs is asked for without
+  `lazy`.
+- **The topic has a branch of it**: the root's store holds a local branch of
+  the topic, or a major's `<topic>@v<major>` — joined in another worktree of
+  the root, or before a worktree was deleted by hand — or its remote has one,
+  which is how CI and a colleague's workspace pick up a change made there.
+- **Another repository asks for it** without `lazy`: then it is an ordinary
+  dependency, whatever the workspace prefers.
+
+Until then nothing is fetched for it — on a topic, one ref advertisement asks
+its remote for the topic's branch, every lazy dependency's side by side — and
+`git scale ls` shows it as `○ lazy` rather than `✘ missed`. A remote that
+cannot be asked fails the command in CI and in `git scale check`, so the
+merge gate never passes over a change it did not see; on a developer machine
+it is a warning, and the repository stays out. Offline, and in the placement the git hooks
+run, what its store last fetched answers: the hooks never ask a lazy
+remote, so a branch made there since is picked up by the next `git scale
+sync`. Where two repositories ask for it under different names, it would
+be placed under its repository's own name, as an implicit checkout is. A dependency's own lazy entries are left out the same
+way, so a consumer does not inherit what it never uses.
+
+`lazy` is the configs' default. A workspace keeps its own answer with `git
+scale prefer --lazy` or `--eager` — see
+[choosing how a checkout arrives](artefacts.md#choosing-how-a-checkout-arrives).
+`git scale require --lazy` writes the flag.
 
 ## History and depth
 

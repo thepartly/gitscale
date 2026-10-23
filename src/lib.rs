@@ -215,12 +215,17 @@ enum Commands {
         dir: String,
         url: String,
         revision: Option<String>,
+        /// Write lazy = true: checked out only once named, by git scale
+        /// sync DIR or git topic join DIR
+        #[arg(long)]
+        lazy: bool,
     },
     /// Remove a dependency from the root's .gitscale.toml
     Unrequire { dir: String },
     /// How checkouts arrive: their sources, or the published artefact of
-    /// their release. Without a form, show the preferences. Only records:
-    /// the next placement applies it
+    /// their release; and whether a lazy one is there at all. Without a
+    /// form, show the preferences. Only records: the next placement applies
+    /// it
     Prefer {
         /// Their sources: the default, removing a preference
         #[arg(long, group = "form")]
@@ -228,6 +233,16 @@ enum Commands {
         /// The artefact of their release, in place of the sources
         #[arg(long, group = "form")]
         artefact: bool,
+        /// Left out until the topic, git topic join or git scale sync DIR
+        /// asks for them
+        #[arg(long, group = "presence")]
+        lazy: bool,
+        /// Placed, although their configs say lazy = true
+        #[arg(long, group = "presence")]
+        eager: bool,
+        /// Drop --lazy or --eager: what the configs say decides again
+        #[arg(long, group = "presence")]
+        committed: bool,
         dirs: Vec<String>,
     },
     /// The merge gate: fail while any checkout comes from a topic branch
@@ -806,11 +821,17 @@ fn run_command(cli: Cli, io: Io, out: &mut dyn Write, err: &mut dyn Write) -> Re
             err,
         ),
         Commands::Gc { keep_recent } => commands::clean::gc(root, keep_recent.as_deref(), out),
-        Commands::Require { dir, url, revision } => commands::require::require(
+        Commands::Require {
+            dir,
+            url,
+            revision,
+            lazy,
+        } => commands::require::require(
             root,
             &dir,
             &url,
             revision.as_deref().unwrap_or_default(),
+            lazy,
             verbose,
             no_cache,
             interactive,
@@ -824,15 +845,26 @@ fn run_command(cli: Cli, io: Io, out: &mut dyn Write, err: &mut dyn Write) -> Re
         Commands::Prefer {
             source,
             artefact,
+            lazy,
+            eager,
+            committed,
             dirs,
         } => {
-            use crate::prefer::Form;
-            let form = match (source, artefact) {
-                (true, _) => Some(Form::Source),
-                (_, true) => Some(Form::Artefact),
-                _ => None,
+            use crate::prefer::{Form, Presence};
+            let change = commands::prefer::Change {
+                form: match (source, artefact) {
+                    (true, _) => Some(Form::Source),
+                    (_, true) => Some(Form::Artefact),
+                    _ => None,
+                },
+                presence: match (lazy, eager, committed) {
+                    (true, ..) => Some(Some(Presence::Lazy)),
+                    (_, true, _) => Some(Some(Presence::Eager)),
+                    (.., true) => Some(None),
+                    _ => None,
+                },
             };
-            commands::prefer::run(root, form, &dirs, no_cache, out)
+            commands::prefer::run(root, change, &dirs, no_cache, out)
         }
         Commands::Hash {
             committed,

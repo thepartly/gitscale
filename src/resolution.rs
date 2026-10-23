@@ -36,7 +36,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::config::{parse_dependency_config, GitScaleConfig, RepoEntry, CONFIG_FILENAME};
-use crate::prefer::{Form, Reason as FormReason};
+use crate::prefer::{Form, Prefs, Presence, Reason as FormReason};
 use crate::resolve::SymlinkEntry;
 use crate::version::{self, Class, Version};
 
@@ -111,6 +111,22 @@ pub trait Repos {
     fn local_branch(&self, _url: &str, _branch: &str) -> Option<String> {
         None
     }
+    /// Whether the store has a branch of `topic` — the topic's own, or a
+    /// major's `<topic>@v<major>`. Optional.
+    fn local_topic(&self, url: &str, topic: &str) -> bool {
+        self.local_branch(url, topic).is_some()
+    }
+    /// Whether the remote has a branch of `topic`, the topic's own or a
+    /// major's, asked of a lazy repository, which may have no store to read
+    /// refs from: one ref advertisement, nothing fetched. Online, a remote
+    /// that cannot be asked is an error, as it is for any other repository:
+    /// a change in it must not go unseen. Optional.
+    fn remote_topic(&self, _url: &str, _topic: &str) -> Result<bool> {
+        Ok(false)
+    }
+    /// Ask [`Self::remote_topic`] of each of `urls`, side by side, so the
+    /// answers are at hand when they are asked one by one. Optional.
+    fn prepare_topic(&self, _urls: &[String], _topic: &str) {}
 }
 
 /// The checkouts already in the workspace.
@@ -121,6 +137,16 @@ pub trait Checkouts {
     fn config_if_at(&self, directory: &str, commit: &str) -> Option<Option<String>>;
     /// HEAD of the git checkout at `directory`.
     fn head(&self, directory: &str) -> Option<String>;
+    /// Whether anything is at `directory`: a checkout, an artefact's image,
+    /// or a link. What keeps a lazy dependency placed.
+    fn present(&self, directory: &str) -> bool {
+        self.head(directory).is_some()
+    }
+    /// Whether anything is in `parent` as a checkout of another major of
+    /// `name`: `<name>_v<major>` or `<name>_v0.<minor>`. Optional.
+    fn present_major(&self, _parent: &str, _name: &str) -> bool {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -307,6 +333,19 @@ pub struct Slot {
     /// The requester whose config pins the topic branch, keeping this slot
     /// at its pin although its remote has the branch.
     pub pinned_by: Option<String>,
+    /// Every request for it is `lazy`: placed because it is on disk, named,
+    /// or on the topic.
+    pub lazy: bool,
+    /// This workspace's presence preference for it, over `lazy`: see
+    /// [`crate::prefer`].
+    pub presence: Option<Presence>,
+    /// The first repository whose config asks for it without `lazy`: it is
+    /// placed whatever this workspace prefers, since that repository needs
+    /// it.
+    pub required_by: Option<String>,
+    /// Lazy and left out: a row for what resolution did not place, never
+    /// one of [`Resolution::slots`].
+    pub asleep: bool,
 }
 
 impl Slot {
@@ -342,6 +381,21 @@ impl Slot {
 
     pub fn form(&self) -> Form {
         self.arrival().0
+    }
+
+    /// Whether it is left out while nothing asks for it, and why: this
+    /// workspace's presence preference, else the configs' `lazy`.
+    pub fn laziness(&self) -> (bool, Option<&'static str>) {
+        match self.presence {
+            Some(Presence::Lazy) if self.required_by.is_some() => (false, None),
+            Some(p) => (p == Presence::Lazy, Some("preferred")),
+            None if self.lazy => (true, Some("committed")),
+            None => (false, None),
+        }
+    }
+
+    pub fn is_lazy(&self) -> bool {
+        self.laziness().0
     }
 
     /// What the slot is held at off the topic: the selected revision, or the
@@ -384,6 +438,9 @@ pub struct Resolution {
     pub slots: Vec<Slot>,
     /// The dedup links to plant inside checkouts.
     pub links: Vec<SymlinkEntry>,
+    /// Lazy dependencies left out: not on disk, not named, not on the
+    /// topic. Each as requested, at the directory it would be placed in.
+    pub asleep: Vec<RepoEntry>,
 }
 
 impl Resolution {
@@ -409,6 +466,13 @@ impl Resolution {
             let link = self.links.iter().find(|l| l.link_path == Path::new(name))?;
             self.slot(&link.target_path.to_string_lossy())
         })
+    }
+
+    /// The lazy dependency left out that `name` means, by the directory it
+    /// would be placed in or the one its requester declared it at.
+    pub fn find_asleep(&self, name: &str) -> Option<&RepoEntry> {
+        let name = name.trim_end_matches('/');
+        self.asleep.iter().find(|e| e.directory == name)
     }
 
     /// The slots of the repository at `url`, in any class.
@@ -598,6 +662,8 @@ impl SlotState {
 struct Round {
     slots: BTreeMap<SlotKey, SlotState>,
     dominators: Dominators,
+    /// Lazy requests left out of this round.
+    asleep: Vec<Req>,
 }
 
 /// `dom[n]`: every node all paths from the root to `n` pass through.
@@ -639,6 +705,14 @@ pub struct Engine<'a> {
     labels: RefCell<BTreeMap<String, String>>,
     /// The workspace's topic branch, when the root is on one.
     topic: Option<String>,
+    /// The workspace's preferences: which repositories it keeps lazy, or not.
+    prefs: Prefs,
+    /// Lazy repositories, by normalized URL, the command placing them named:
+    /// placed although not on disk yet.
+    named: BTreeSet<String>,
+    /// Whether each lazy repository is placed all the same, by normalized
+    /// URL, once asked.
+    woke: RefCell<BTreeMap<String, bool>>,
 }
 
 /// A config read at a commit, by repository, commit and checkout directory —
@@ -672,7 +746,28 @@ impl<'a> Engine<'a> {
             edges: RefCell::new(BTreeMap::new()),
             labels: RefCell::new(BTreeMap::new()),
             topic: None,
+            prefs: Prefs::default(),
+            named: BTreeSet::new(),
+            woke: RefCell::new(BTreeMap::new()),
         }
+    }
+
+    /// Resolve with these lazy repositories placed although nothing else
+    /// asks for them: a command named them.
+    pub fn with_named(mut self, urls: impl IntoIterator<Item = String>) -> Self {
+        self.named = urls
+            .into_iter()
+            .map(|url| crate::urls::normalize(&url))
+            .collect();
+        self
+    }
+
+    /// Resolve with the workspace's preferences: a repository it prefers
+    /// lazy is left out, and one it prefers eager is not, whatever the
+    /// configs say.
+    pub fn with_prefs(mut self, prefs: Prefs) -> Self {
+        self.prefs = prefs;
+        self
     }
 
     /// Resolve for a workspace on the topic `branch`: see [`crate::topic`].
@@ -692,9 +787,11 @@ impl<'a> Engine<'a> {
         for req in &roots {
             self.edge(&root_node, &req.url)?;
         }
+        let sleeping = self.sleeping(&roots)?;
         self.repos.prepare(
             &roots
                 .iter()
+                .filter(|r| !sleeping.contains(&r.url))
                 .map(|r| r.entry.repo_url.clone())
                 .collect::<Vec<_>>(),
         );
@@ -846,10 +943,16 @@ impl<'a> Engine<'a> {
                     );
                 }
                 self.edge(&key.url, &req.url)?;
-                wanted.push(entry.repo_url.clone());
                 requests.push(req);
             }
         }
+        let sleeping = self.sleeping(&requests)?;
+        wanted.extend(
+            requests
+                .iter()
+                .filter(|r| !sleeping.contains(&r.url))
+                .map(|r| r.entry.repo_url.clone()),
+        );
         self.repos.prepare(&wanted);
         Ok((requests, unexpanded))
     }
@@ -909,6 +1012,113 @@ impl<'a> Engine<'a> {
             .map_err(|e| format!("{:#}", e));
         self.configs.borrow_mut().insert(cache_key, stored);
         parsed
+    }
+
+    /// Whether the repository at normalized `url` is lazy, by these
+    /// requests for it: every request says `lazy`, unless the workspace
+    /// prefers otherwise. A workspace's `--lazy` overrides the root's own
+    /// request, never another repository's that needs it.
+    fn lazy<'r>(&self, url: &str, requests: impl Iterator<Item = &'r Req>) -> bool {
+        let mut requests = requests.filter(|r| !r.topic);
+        match self.prefs.presence(url) {
+            Some(Presence::Eager) => false,
+            Some(Presence::Lazy) => {
+                requests.all(|r| matches!(r.requester, Node::Root) || r.entry.lazy)
+            }
+            None => requests.all(|r| r.entry.lazy),
+        }
+    }
+
+    /// The lazy repositories among `requests` that stay left out, by
+    /// normalized URL. Their remotes are asked about the topic side by side
+    /// first.
+    fn sleeping(&self, requests: &[Req]) -> Result<BTreeSet<String>> {
+        let mut by_url: BTreeMap<&str, Vec<&Req>> = BTreeMap::new();
+        for req in requests {
+            by_url.entry(req.url.as_str()).or_default().push(req);
+        }
+        let lazy: Vec<(&str, Vec<&Req>)> = by_url
+            .into_iter()
+            .filter(|(url, reqs)| self.lazy(url, reqs.iter().copied()))
+            .collect();
+        if let Some(topic) = &self.topic {
+            let ask: Vec<String> = lazy
+                .iter()
+                .filter(|(url, reqs)| {
+                    !self.woke.borrow().contains_key(*url) && !self.nearby(url, reqs)
+                })
+                .map(|(_, reqs)| reqs[0].entry.repo_url.clone())
+                .collect();
+            self.repos.prepare_topic(&ask, topic);
+        }
+        let mut sleeping = BTreeSet::new();
+        for (url, reqs) in lazy {
+            if !self.awake(url, &reqs)? {
+                sleeping.insert(url.to_string());
+            }
+        }
+        Ok(sleeping)
+    }
+
+    /// Whether a lazy repository is placed all the same: a command named
+    /// it, something is at a directory it would be placed in, or the
+    /// workspace's topic has a branch of it — this workspace's own, joined
+    /// here or in another worktree of the root, or its remote's, which is
+    /// what CI follows too.
+    fn awake(&self, url: &str, reqs: &[&Req]) -> Result<bool> {
+        if let Some(known) = self.woke.borrow().get(url) {
+            return Ok(*known);
+        }
+        let woke = self.nearby(url, reqs)
+            || match &self.topic {
+                Some(topic) => {
+                    let repo_url = &reqs[0].entry.repo_url;
+                    self.repos.local_topic(repo_url, topic)
+                        || self.repos.remote_topic(repo_url, topic)?
+                }
+                None => false,
+            };
+        self.woke.borrow_mut().insert(url.to_string(), woke);
+        Ok(woke)
+    }
+
+    /// Named by the command, or on disk. A CI build directory is never a
+    /// reason: an earlier job's checkout holds nothing.
+    fn nearby(&self, url: &str, reqs: &[&Req]) -> bool {
+        if self.named.contains(url) {
+            return true;
+        }
+        if crate::git::is_ci() {
+            return false;
+        }
+        let directory = self.lazy_directory(url, reqs);
+        if self.checkouts.present(&directory) {
+            return true;
+        }
+        let path = Path::new(&directory);
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            return false;
+        };
+        self.checkouts
+            .present_major(&parent.to_string_lossy(), &name.to_string_lossy())
+    }
+
+    /// Where a lazy repository would be placed: where the root declares it,
+    /// else under the hoist directory, named as [`Self::place`] names the
+    /// checkout of its lowest major.
+    fn lazy_directory(&self, url: &str, reqs: &[&Req]) -> String {
+        if let Some(declared) = self
+            .config
+            .repos
+            .iter()
+            .find(|e| crate::urls::normalize(&e.repo_url) == url)
+        {
+            return declared.directory.clone();
+        }
+        Path::new(&self.config.resolve.hoist_dir)
+            .join(hoisted_name(reqs.iter().copied()))
+            .to_string_lossy()
+            .into_owned()
     }
 
     fn allowed(&self, url: &str) -> bool {
@@ -1015,7 +1225,13 @@ impl<'a> Engine<'a> {
     }
 
     /// Classify, group, select and place one round's requests.
-    fn round(&self, mut requests: Vec<Req>, previous: Option<&Round>) -> Result<Round> {
+    fn round(&self, requests: Vec<Req>, previous: Option<&Round>) -> Result<Round> {
+        // A lazy repository is left out, before anything is looked up,
+        // unless something wakes it.
+        let sleeping = self.sleeping(&requests)?;
+        let (mut requests, asleep): (Vec<Req>, Vec<Req>) = requests
+            .into_iter()
+            .partition(|r| !sleeping.contains(&r.url));
         for req in &mut requests {
             self.classify(req).map_err(|e| {
                 anyhow!(
@@ -1123,6 +1339,7 @@ impl<'a> Engine<'a> {
         let mut round = Round {
             slots: states,
             dominators,
+            asleep,
         };
         self.place(&mut round, previous)?;
         self.apply_topic(&mut round, previous);
@@ -1626,19 +1843,7 @@ impl<'a> Engine<'a> {
                 state.directory = entry.directory.clone();
                 continue;
             }
-            let names: BTreeSet<String> = state
-                .requests
-                .iter()
-                .filter_map(|r| {
-                    Path::new(&r.entry.directory)
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                })
-                .collect();
-            let mut name = match names.len() {
-                1 => names.into_iter().next().unwrap(),
-                _ => repo_name(&state.requests[0].entry.repo_url),
-            };
+            let mut name = hoisted_name(state.requests.iter());
             if !lowest {
                 name.push_str(&key.class.suffix());
             }
@@ -1817,6 +2022,19 @@ impl<'a> Engine<'a> {
                     })
                 }),
                 pinned_by: state.pinned_by.clone(),
+                lazy: state
+                    .requests
+                    .iter()
+                    .filter(|r| !r.topic)
+                    .all(|r| r.entry.lazy),
+                required_by: state
+                    .requests
+                    .iter()
+                    .find(|r| !r.topic && !r.entry.lazy && !matches!(r.requester, Node::Root))
+                    .map(|r| requester_name(Some(&round), &r.requester)),
+                // This workspace's to choose, after resolution.
+                presence: None,
+                asleep: false,
             });
         }
         // Each request a checkout makes is a link inside that checkout, to
@@ -1862,7 +2080,24 @@ impl<'a> Engine<'a> {
                 .cmp(&pos(b))
                 .then_with(|| a.directory.cmp(&b.directory))
         });
-        Ok(Resolution { slots, links })
+        // One per repository, the root's own request first.
+        let mut by_url: BTreeMap<&str, Vec<&Req>> = BTreeMap::new();
+        for req in &round.asleep {
+            by_url.entry(req.url.as_str()).or_default().push(req);
+        }
+        let mut asleep: Vec<RepoEntry> = by_url
+            .into_iter()
+            .map(|(url, reqs)| RepoEntry {
+                directory: self.lazy_directory(url, &reqs),
+                ..reqs[0].entry.clone()
+            })
+            .collect();
+        asleep.sort_by(|a, b| a.directory.cmp(&b.directory));
+        Ok(Resolution {
+            slots,
+            links,
+            asleep,
+        })
     }
 }
 
@@ -1913,6 +2148,35 @@ fn fingerprint(round: &Round) -> BTreeMap<SlotKey, Fingerprint> {
 /// highest major its repository is checked out at, `<topic>@v<major>` for the
 /// others — two worktrees of one store cannot share a branch, and a name is
 /// what CI matches on.
+/// Whether `suffix` is what [`Class::suffix`] adds to a checkout of an older
+/// major: `_v<major>` or `_v0.<minor>`.
+pub fn is_major_suffix(suffix: &str) -> bool {
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    suffix
+        .strip_prefix("_v")
+        .is_some_and(|v| digits(v) || v.strip_prefix("0.").is_some_and(digits))
+}
+
+/// The name a hoisted checkout takes from the requests for it: the one they
+/// all declared it at, else the repository's own.
+fn hoisted_name<'r>(requests: impl Iterator<Item = &'r Req>) -> String {
+    let mut first_url = None;
+    let names: BTreeSet<String> = requests
+        .inspect(|r| {
+            first_url.get_or_insert_with(|| r.entry.repo_url.clone());
+        })
+        .filter_map(|r| {
+            Path::new(&r.entry.directory)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+        })
+        .collect();
+    match names.len() {
+        1 => names.into_iter().next().unwrap(),
+        _ => repo_name(&first_url.unwrap_or_default()),
+    }
+}
+
 pub fn branch_for(topic: &str, highest: bool, class: Class) -> String {
     if highest || class == Class::Any {
         topic.to_string()

@@ -83,7 +83,10 @@ merges, and `git topic finish` ends the topic.
 | `git topic finish [<name>]` | End a merged topic; `--force` abandons one |
 
 After `start` and `switch`, the checkouts are placed: every one whose store or
-remote has the branch joins it, the rest stay at their pins.
+remote has the branch joins it, the rest stay at their pins. A
+[lazy](dependencies.md#only-when-needed-lazy) one not on disk joins the same
+way, its remote asked for the branch with one ref advertisement; one whose
+branch exists nowhere stays out.
 
 `start` refuses a name that exists here or on the remote (`NAME exists: git
 topic switch NAME`), a name the root pins (`NAME is pinned, not a topic`), and
@@ -291,6 +294,11 @@ paths from the current directory; see [directory arguments](cli.md#directory-arg
 
 - An **artefact** checkout becomes a worktree of its source at the same commit,
   in place; see [artefacts → on a topic](artefacts.md#an-artefact-on-a-topic).
+- A [lazy](dependencies.md#only-when-needed-lazy) entry not on disk is
+  checked out at its pin first, then joined. From then on its store's branch
+  of the topic brings it back wherever the topic is checked out. `leave` and
+  `finish` remove the checkout again when that loses nothing; one that was
+  on disk before it joined stays.
 - An entry the root **overrides** is refused: `imports/d is held by override in
   .gitscale.toml; remove the override first`.
 - A slot [held at its pin](#inside-a-topic) is refused.

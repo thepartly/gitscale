@@ -36,10 +36,9 @@ pub fn run(root: Option<&Path>, verbose: bool, no_cache: bool, out: &mut dyn Wri
     }
     let sources = Sources::new(&config_root, no_cache)?;
     let artefacts = Artefacts::new(&config, &config_root, sources.images());
-    let resolution = crate::resolve::workspace(
+    let resolution = crate::resolve::workspace_strict(
         &config,
         &config_root,
-        true,
         &sources,
         Some(&artefacts),
         verbose,

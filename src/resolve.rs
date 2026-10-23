@@ -43,22 +43,92 @@ pub fn workspace(
     artefacts: Option<&Artefacts>,
     verbose: bool,
 ) -> Result<Resolution> {
+    workspace_naming(
+        config,
+        config_root,
+        online,
+        sources,
+        artefacts,
+        verbose,
+        &[],
+    )
+}
+
+/// [`workspace`], with the lazy repositories at `named` (their URLs) placed
+/// although nothing else asks for them: the command placing them named them.
+pub fn workspace_naming(
+    config: &GitScaleConfig,
+    config_root: &Path,
+    online: bool,
+    sources: &Sources,
+    artefacts: Option<&Artefacts>,
+    verbose: bool,
+    named: &[String],
+) -> Result<Resolution> {
+    resolve_with(
+        config,
+        config_root,
+        GitStores::new(config_root, sources, online, artefacts, verbose),
+        online,
+        named,
+    )
+}
+
+/// [`workspace`] online for the merge gate: a lazy repository whose remote
+/// cannot be asked is an error, as it is in CI, never left out.
+pub fn workspace_strict(
+    config: &GitScaleConfig,
+    config_root: &Path,
+    sources: &Sources,
+    artefacts: Option<&Artefacts>,
+    verbose: bool,
+) -> Result<Resolution> {
+    resolve_with(
+        config,
+        config_root,
+        GitStores::new(config_root, sources, true, artefacts, verbose).strict(),
+        true,
+        &[],
+    )
+}
+
+fn resolve_with(
+    config: &GitScaleConfig,
+    config_root: &Path,
+    stores: GitStores,
+    online: bool,
+    named: &[String],
+) -> Result<Resolution> {
     let root_url = crate::git::origin_url(config_root);
-    let stores = GitStores::new(config_root, sources, online, artefacts, verbose);
     let checkouts = WorkspaceCheckouts::new(config_root);
     let topic = crate::topic::root(config, config_root, online);
     let resolved = Engine::new(config, root_url.as_deref(), &stores, &checkouts)
         .with_topic(topic.topic().map(str::to_string))
+        .with_prefs(crate::prefer::Prefs::load(config_root)?)
+        .with_named(named.iter().cloned())
         .resolve()?;
     with_preferences(resolved, config_root)
 }
 
-/// Each slot with the form this workspace prefers it in: resolution decides
-/// what is checked out, the workspace how it arrives.
+/// The lazy dependency, left out of `resolution`, that the directory argument
+/// `arg` names.
+pub fn asleep<'a>(
+    here: &crate::paths::Here,
+    resolution: &'a Resolution,
+    arg: &str,
+) -> Option<&'a RepoEntry> {
+    let rel = here.relative(arg).ok()?;
+    resolution.find_asleep(&rel.to_string_lossy())
+}
+
+/// Each slot with the form this workspace prefers it in, and its presence
+/// preference: resolution decides what is checked out, the workspace how it
+/// arrives.
 pub fn with_preferences(mut resolution: Resolution, config_root: &Path) -> Result<Resolution> {
     let prefs = crate::prefer::Prefs::load(config_root)?;
     for slot in &mut resolution.slots {
         slot.preferred = prefs.get(&slot.url);
+        slot.presence = prefs.presence(&slot.url);
     }
     Ok(resolution)
 }
@@ -97,19 +167,60 @@ pub fn workspace_with(
     artefacts: Option<&Artefacts>,
     verbose: bool,
 ) -> Result<Resolution> {
+    workspace_with_naming(
+        config,
+        config_root,
+        network,
+        sources,
+        artefacts,
+        verbose,
+        &[],
+    )
+}
+
+/// [`workspace_with`], with the lazy repositories at `named` placed: see
+/// [`workspace_naming`].
+pub fn workspace_with_naming(
+    config: &GitScaleConfig,
+    config_root: &Path,
+    network: Network,
+    sources: &Sources,
+    artefacts: Option<&Artefacts>,
+    verbose: bool,
+    named: &[String],
+) -> Result<Resolution> {
     match network {
-        Network::Offline => workspace(config, config_root, false, sources, artefacts, verbose),
-        Network::Online => workspace(config, config_root, true, sources, artefacts, verbose),
+        Network::Offline => workspace_naming(
+            config,
+            config_root,
+            false,
+            sources,
+            artefacts,
+            verbose,
+            named,
+        ),
+        Network::Online => workspace_naming(
+            config,
+            config_root,
+            true,
+            sources,
+            artefacts,
+            verbose,
+            named,
+        ),
         Network::OnMiss => {
             let root_url = crate::git::origin_url(config_root);
             let checkouts = WorkspaceCheckouts::new(config_root);
             let topic = crate::topic::root(config, config_root, false);
             let on_miss = OnMiss::default();
+            let prefs = crate::prefer::Prefs::load(config_root)?;
             loop {
                 let stores = GitStores::new(config_root, sources, false, artefacts, verbose)
                     .fetching_on_miss(&on_miss);
                 let resolved = Engine::new(config, root_url.as_deref(), &stores, &checkouts)
                     .with_topic(topic.topic().map(str::to_string))
+                    .with_prefs(prefs.clone())
+                    .with_named(named.iter().cloned())
                     .resolve();
                 // A revision a store did not have fails a round: one more,
                 // with that store fetched, may resolve. What is still
