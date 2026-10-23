@@ -1080,6 +1080,154 @@ fn merged_with_work(repo: &Path, base: &str, branch: &str) -> bool {
     matches!((created, tip), (Some(created), Some(tip)) if created != tip)
 }
 
+/// What a joined checkout's pin follows, which says when its change counts
+/// as merged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Follows {
+    /// A branch, as the store names the remote's: merged once that branch
+    /// holds the change, by content.
+    Branch(String),
+    /// A release or a commit: settled by `git upgrade`, which takes the
+    /// checkout off the topic once a release holds the change.
+    Release,
+}
+
+impl Follows {
+    /// What a pin to `revision` follows in `store`; no revision follows the
+    /// remote's default branch.
+    fn of(store: &Path, revision: Option<&str>) -> Follows {
+        let name = match revision.filter(|r| !r.is_empty()) {
+            None => "HEAD",
+            Some(r) => {
+                let r = r.strip_prefix("refs/heads/").unwrap_or(r);
+                if crate::git::ref_exists(store, &format!("refs/tags/{}", r)) {
+                    return Follows::Release;
+                }
+                r
+            }
+        };
+        let reference = format!("refs/remotes/origin/{}", name);
+        if crate::git::ref_exists(store, &reference) {
+            Follows::Branch(reference)
+        } else {
+            Follows::Release
+        }
+    }
+
+    /// What holds the change once it is merged: the branch followed; for a
+    /// release, the default branch releases are cut from.
+    fn base(&self, store: &Path) -> Option<String> {
+        match self {
+            Follows::Branch(branch) => Some(branch.clone()),
+            Follows::Release => {
+                let head = "refs/remotes/origin/HEAD";
+                crate::git::ref_exists(store, head).then(|| head.to_string())
+            }
+        }
+    }
+}
+
+/// Where a joined checkout's change stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Merge {
+    /// The branch its pin follows holds its change.
+    Merged,
+    /// It has no change.
+    Unchanged,
+    /// Its change is not merged yet or, pinned to a release, not promoted.
+    Open,
+}
+
+/// The one test `list`, `status` and `finish` share for a joined checkout on
+/// `branch` in `store`. A checkout pinned to a release is never merged here:
+/// `git upgrade` takes it off the topic once a release holds its change.
+fn child_merge(store: &Path, follows: &Follows, branch: &str) -> Merge {
+    let Some(base) = follows.base(store) else {
+        return Merge::Open;
+    };
+    match follows {
+        Follows::Branch(_) if merged_with_work(store, &base, branch) => Merge::Merged,
+        _ if count(store, &["rev-list", branch, "--not", "--tags", &base]) == 0 => Merge::Unchanged,
+        _ => Merge::Open,
+    }
+}
+
+/// Whether dropping `branch` in `store` loses nothing: whatever it has that
+/// no remote branch or tag holds, the branch its pin follows holds by
+/// content.
+fn held(store: &Path, follows: &Follows, branch: &str) -> bool {
+    count(store, &["rev-list", branch, "--not", "--remotes", "--tags"]) == 0
+        || follows
+            .base(store)
+            .is_some_and(|base| merged(store, &base, branch))
+}
+
+/// A joined checkout `finish` takes back to its pin without `git upgrade`:
+/// its pin follows a branch that holds its change, by content.
+fn settled(store: &Path, follows: &Follows, branch: &str) -> bool {
+    match follows {
+        Follows::Branch(base) => merged(store, base, branch),
+        Follows::Release => false,
+    }
+}
+
+/// A root with no commits of its own — a workspace that only declares its
+/// repositories — is merged once each joined checkout is merged or has no
+/// change, and one had a change.
+fn merged_through(children: &[Merge]) -> bool {
+    children.iter().all(|m| *m != Merge::Open) && children.contains(&Merge::Merged)
+}
+
+/// What each checkout follows on topic `topic`, by store and the checkout's
+/// branch of the topic — a major's `<topic>@v<major>` is its own: from a
+/// resolution of `at`, where the topic is checked out, else from the root's
+/// config on the topic's branch. A store neither names counts as pinned to
+/// a release, so nothing calls it merged.
+fn follows_on(
+    repo_dir: &Path,
+    topic: &str,
+    at: Option<&Path>,
+    sources: &Sources,
+) -> BTreeMap<(PathBuf, String), Follows> {
+    let mut found = BTreeMap::new();
+    let Some(stores) = &sources.stores else {
+        return found;
+    };
+    let resolved = at.and_then(|at| {
+        let config = load_config(&at.join(CONFIG_FILENAME)).ok()?;
+        crate::resolve::workspace(&config, at, false, sources, None, false).ok()
+    });
+    let pins: Vec<(String, String, Option<String>)> = match resolved {
+        Some(resolution) => resolution
+            .slots
+            .iter()
+            .map(|slot| {
+                (
+                    slot.url.clone(),
+                    slot.branch.clone().unwrap_or_else(|| topic.to_string()),
+                    slot.pin().map(|pin| pin.revision),
+                )
+            })
+            .collect(),
+        None => crate::config::committed_at(repo_dir, &format!("refs/heads/{}", topic))
+            .and_then(|text| crate::config::parse_config(&text, Path::new(CONFIG_FILENAME)).ok())
+            .map(|config| {
+                config
+                    .repos
+                    .into_iter()
+                    .map(|entry| (entry.repo_url, topic.to_string(), Some(entry.revision)))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    for (url, branch, revision) in pins {
+        let store = stores.repo_path(&crate::ci::remote_url(&url));
+        let follows = Follows::of(&store, revision.as_deref());
+        found.entry((store, branch)).or_insert(follows);
+    }
+    found
+}
+
 fn status(ctx: &Ctx, fetch: bool, format: &str, out: &mut dyn Write) -> Result<()> {
     let (config, root) = crate::config::load_workspace(ctx.start)?;
     let Root::Topic(topic) = crate::topic::root(&config, &root, fetch) else {
@@ -1104,29 +1252,51 @@ fn status(ctx: &Ctx, fetch: bool, format: &str, out: &mut dyn Write) -> Result<(
         ctx.verbose,
     )?;
     let mut states: BTreeMap<String, State> = BTreeMap::new();
+    let mut merges: BTreeMap<String, Merge> = BTreeMap::new();
+    let mut settles: BTreeSet<String> = BTreeSet::new();
     let mut rows = Vec::new();
     for slot in resolution.topic_slots() {
         let Some(on) = &slot.topic else { continue };
         let store = stores.repo_path(&crate::ci::remote_url(&slot.url));
         let planted = resolution.planted_in(&slot.directory);
         let state = crate::promote::assess(&root, &store, slot, &planted, None);
+        let follows = Follows::of(&store, slot.pin().map(|pin| pin.revision).as_deref());
+        let branch = format!("refs/heads/{}", on.branch);
+        let merge = child_merge(&store, &follows, &branch);
+        if settled(&store, &follows, &branch) {
+            settles.insert(slot.directory.clone());
+        }
         let ahead = ahead(&store, slot);
-        let pushed = (ahead > 0)
-            .then(|| count(&store, &["rev-list", &on.commit, "--not", "--remotes"]) == 0);
+        let pushed = (ahead > 0).then(|| held(&store, &follows, &on.commit));
+        let (described, label) = match (&follows, merge) {
+            (Follows::Branch(base), Merge::Merged) => (
+                format!("merged into {}", followed_name(&store, base)),
+                "merged",
+            ),
+            _ => (state.describe(), state.label()),
+        };
         rows.push(Row {
             repo: slot.directory.clone(),
             branch: on.branch.clone(),
             ahead,
             pushed,
-            state: state.describe(),
-            label: state.label(),
+            state: described,
+            label,
         });
         states.insert(slot.directory.clone(), state);
+        merges.insert(slot.directory.clone(), merge);
     }
-    // A child with nothing to release holds nothing up either.
+    // A child with nothing to release holds nothing up either, nor one the
+    // branch its pin follows already holds, nor one following a branch with
+    // no change of its own.
     let promoted: BTreeSet<String> = states
         .iter()
-        .filter(|(_, s)| s.is_released() || **s == State::Unchanged)
+        .filter(|(d, s)| {
+            s.is_released()
+                || **s == State::Unchanged
+                || merges.get(*d) == Some(&Merge::Merged)
+                || settles.contains(*d)
+        })
         .map(|(d, _)| d.clone())
         .collect();
     let waiting: Vec<String> = states
@@ -1142,9 +1312,13 @@ fn status(ctx: &Ctx, fetch: bool, format: &str, out: &mut dyn Write) -> Result<(
         .unwrap_or(0);
     let root_pushed =
         (root_ahead > 0).then(|| count(&root, &["rev-list", "HEAD", "--not", "--remotes"]) == 0);
+    // Its own commits merged, or none and its checkouts merged.
     let root_merged = base
         .as_ref()
-        .is_some_and(|b| merged_with_work(&root, b, &format!("refs/heads/{}", topic)));
+        .is_some_and(|b| merged_with_work(&root, b, &format!("refs/heads/{}", topic)))
+        || (root_ahead == 0
+            && !merges.is_empty()
+            && merged_through(&merges.values().copied().collect::<Vec<_>>()));
     let (root_state, root_label) = if root_merged {
         (
             format!("merged into {}", default.as_deref().unwrap_or("main")),
@@ -1168,7 +1342,7 @@ fn status(ctx: &Ctx, fetch: bool, format: &str, out: &mut dyn Write) -> Result<(
     );
 
     let requests = crate::promote::topic_requests(&config, &root, &resolution);
-    let next = if states.is_empty() {
+    let next = if states.is_empty() || root_merged {
         Vec::new()
     } else {
         crate::promote::next_to_merge(&requests, &promoted)
@@ -1186,7 +1360,8 @@ fn status(ctx: &Ctx, fetch: bool, format: &str, out: &mut dyn Write) -> Result<(
     // or `git topic leave` takes them off it first.
     let still_on_topic = resolution.topic_slots().into_iter().any(|slot| {
         let dest = root.join(&slot.directory);
-        slot.branch.is_some()
+        !settles.contains(&slot.directory)
+            && slot.branch.is_some()
             && !dest.is_symlink()
             && crate::git::current_branch(&dest).as_deref() == slot.branch.as_deref()
     });
@@ -1398,21 +1573,39 @@ fn list(ctx: &Ctx, fetch: bool, format: &str, out: &mut dyn Write) -> Result<()>
             .find(|(_, b)| b.as_deref() == Some(topic.as_str()))
             .map(|(p, _)| p.clone());
         let branch_ref = format!("refs/heads/{}", topic);
+        let follows = follows_on(&repo.dir, topic, worktree.as_deref(), &sources);
+        let child_follows = |store: &PathBuf, branch: &String| {
+            follows
+                .get(&(store.clone(), branch.clone()))
+                .unwrap_or(&Follows::Release)
+        };
+        let merges: Vec<Merge> = children
+            .iter()
+            .map(|(_, store, branch)| {
+                child_merge(
+                    store,
+                    child_follows(store, branch),
+                    &format!("refs/heads/{}", branch),
+                )
+            })
+            .collect();
+        let root_own = base.as_ref().map_or(0, |b| {
+            count(&repo.dir, &["rev-list", &branch_ref, &format!("^{}", b)])
+        });
+        // Its own commits merged, or none and its checkouts merged.
         let is_merged = base
             .as_ref()
-            .is_some_and(|b| merged_with_work(&repo.dir, b, &branch_ref));
+            .is_some_and(|b| merged_with_work(&repo.dir, b, &branch_ref))
+            || (root_own == 0 && !children.is_empty() && merged_through(&merges));
         let mut unpushed = count(&repo.dir, &["rev-list", &branch_ref, "--not", "--remotes"]);
         for (_, store, branch) in &children {
-            unpushed += count(
-                store,
-                &[
-                    "rev-list",
-                    &format!("refs/heads/{}", branch),
-                    "--not",
-                    "--remotes",
-                    "--tags",
-                ],
-            );
+            let reference = format!("refs/heads/{}", branch);
+            if !held(store, child_follows(store, branch), &reference) {
+                unpushed += count(
+                    store,
+                    &["rev-list", &reference, "--not", "--remotes", "--tags"],
+                );
+            }
         }
         // Nothing on it yet: no commit beyond the default branch in the
         // root, nor beyond a release or the default branch in a child.
@@ -1617,21 +1810,30 @@ fn finish(
     // Uncommitted changes in whatever moves or goes are refused, --force or
     // not: nothing else holds them.
     if let Some(at) = &worktree {
-        let still = children_on_topic(at, ctx.no_cache)?;
+        let on_topic = children_on_topic(at, ctx.no_cache, err)?;
+        let still: Vec<&(String, Option<bool>)> = on_topic
+            .iter()
+            .filter(|(_, settled)| *settled != Some(true))
+            .collect();
         if !still.is_empty() && !force {
             let mut lines: Vec<String> = still
                 .iter()
-                .map(|dir| {
-                    format!(
+                .map(|(dir, settled)| match settled {
+                    Some(_) => format!(
+                        "{} is still on the topic, not merged: merge it, or git topic leave {}",
+                        dir, dir
+                    ),
+                    None => format!(
                         "{} is still on the topic: git upgrade, or git topic leave {}",
                         dir, dir
-                    )
+                    ),
                 })
                 .collect();
             lines.push("--force takes them back to their pins".to_string());
             bail!("{}", lines.join("\n"));
         }
-        let work = uncommitted_work(at, &still, remove.is_some(), ctx.no_cache);
+        let moving: Vec<String> = on_topic.iter().map(|(dir, _)| dir.clone()).collect();
+        let work = uncommitted_work(at, &moving, remove.is_some(), ctx.no_cache);
         if !work.is_empty() {
             bail!(
                 "uncommitted changes in {}: commit or stash them (git scale stash -u), or \
@@ -1644,8 +1846,15 @@ fn finish(
     // 4. The topic's branches, the root's and each store's alike, all go.
     // Commits on one that no remote branch or tag has, and whose changes
     // the default branch lacks, would go with it: refused, unless --force.
+    // A child's are held by the branch its pin follows.
     let mut branches = vec![(".".to_string(), repo.common.clone(), branch.clone())];
     branches.extend(joined(&sources, &names, &branch));
+    let follows = follows_on(&repo.dir, &branch, worktree.as_deref(), &sources);
+    let child_follows = |store: &PathBuf, branch: &String| {
+        follows
+            .get(&(store.clone(), branch.clone()))
+            .unwrap_or(&Follows::Release)
+    };
     let mut losing: Vec<(String, String, usize, String)> = Vec::new();
     for (label, repo_dir, local) in &branches {
         let reference = format!("refs/heads/{}", local);
@@ -1653,13 +1862,12 @@ fn finish(
             repo_dir,
             &["rev-list", &reference, "--not", "--remotes", "--tags"],
         );
-        let into = if label == "." {
-            Some(base.as_str())
+        let kept = if label == "." {
+            merged(repo_dir, &base, &reference)
         } else {
-            crate::git::ref_exists(repo_dir, "refs/remotes/origin/HEAD")
-                .then_some("refs/remotes/origin/HEAD")
+            held(repo_dir, child_follows(repo_dir, local), &reference)
         };
-        if unique > 0 && !into.is_some_and(|b| merged(repo_dir, b, &reference)) {
+        if unique > 0 && !kept {
             let tip = crate::git::query(repo_dir, &["rev-parse", "--short", &reference])
                 .unwrap_or_default();
             losing.push((label.clone(), local.clone(), unique, tip));
@@ -1704,7 +1912,10 @@ fn finish(
                 )?;
                 continue;
             }
-            "refs/remotes/origin/HEAD".to_string()
+            match child_follows(repo_dir, local).base(repo_dir) {
+                Some(into) => into,
+                None => "refs/remotes/origin/HEAD".to_string(),
+            }
         };
         let Some(tip) =
             crate::git::resolve_ref(repo_dir, &format!("refs/remotes/origin/{}", local))
@@ -1914,12 +2125,20 @@ fn uncommitted_work(root: &Path, moving: &[String], removing: bool, no_cache: bo
     found
 }
 
-/// The children of the worktree at `root` on their topic branch.
-fn children_on_topic(root: &Path, no_cache: bool) -> Result<Vec<String>> {
+/// The children of the worktree at `root` on their topic branch, each with
+/// whether [`settled`]: `None` for one pinned to a release, which `git
+/// upgrade` settles. The store of each that follows a branch is fetched
+/// first, so a merge since its last fetch counts; a fetch that fails is a
+/// warning, and what the store last saw decides.
+fn children_on_topic(
+    root: &Path,
+    no_cache: bool,
+    err: &mut dyn Write,
+) -> Result<Vec<(String, Option<bool>)>> {
     let config = load_config(&root.join(CONFIG_FILENAME))?;
     let sources = Sources::new(root, no_cache)?;
     let resolution = crate::resolve::workspace(&config, root, false, &sources, None, false)?;
-    Ok(resolution
+    resolution
         .slots
         .iter()
         .filter(|slot| {
@@ -1929,6 +2148,44 @@ fn children_on_topic(root: &Path, no_cache: bool) -> Result<Vec<String>> {
                 && !dest.is_symlink()
                 && crate::git::current_branch(&dest).as_deref() == slot.branch.as_deref()
         })
-        .map(|slot| slot.directory.clone())
-        .collect())
+        .map(|slot| {
+            let Some(stores) = &sources.stores else {
+                return Ok((slot.directory.clone(), None));
+            };
+            let store = stores.repo_path(&crate::ci::remote_url(&slot.url));
+            let revision = slot.pin().map(|pin| pin.revision);
+            if Follows::of(&store, revision.as_deref()) == Follows::Release {
+                return Ok((slot.directory.clone(), None));
+            }
+            if let Err(e) = crate::git::run_git(
+                &["fetch", "--quiet", "--prune", "origin"],
+                Some(&store),
+                true,
+            ) {
+                writeln!(
+                    err,
+                    "warning: cannot fetch {}: {:#}; deciding on what it last fetched",
+                    slot.directory, e
+                )?;
+            }
+            let follows = Follows::of(&store, revision.as_deref());
+            let branch = format!("refs/heads/{}", slot.branch.as_deref().unwrap_or_default());
+            Ok((
+                slot.directory.clone(),
+                Some(settled(&store, &follows, &branch)),
+            ))
+        })
+        .collect()
+}
+
+/// The branch a store's remote-tracking `reference` names, for what status
+/// says: `origin/HEAD` as the branch it points at.
+fn followed_name(store: &Path, reference: &str) -> String {
+    let name = reference.trim_start_matches("refs/remotes/origin/");
+    if name != "HEAD" {
+        return name.to_string();
+    }
+    crate::git::query(store, &["symbolic-ref", "--short", reference])
+        .map(|b| b.trim().trim_start_matches("origin/").to_string())
+        .unwrap_or_else(|| "its default branch".to_string())
 }
