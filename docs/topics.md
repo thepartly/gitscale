@@ -85,8 +85,12 @@ merges, and `git topic finish` ends the topic.
 After `start` and `switch`, the checkouts are placed: every one whose store or
 remote has the branch joins it, the rest stay at their pins. A
 [lazy](dependencies.md#only-when-needed-lazy) one not on disk joins the same
-way, its remote asked for the branch with one ref advertisement; one whose
-branch exists nowhere stays out.
+way after `switch`, its remote asked for the branch with one ref
+advertisement; one whose branch exists nowhere stays out. `start` asks no lazy
+remote: the name is new on the root's remote, so a lazy repository with the
+branch already is rare, and asking each one is a round trip on every start.
+Such a repository joins the branch it has when `git topic join` names it, or
+at the next placement that asks, such as `git scale sync`.
 
 `start` refuses a name that exists here or on the remote (`NAME exists: git
 topic switch NAME`), a name the root pins (`NAME is pinned, not a topic`), and

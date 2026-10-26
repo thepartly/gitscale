@@ -88,6 +88,8 @@ pub struct GitStores<'a> {
     /// A lazy remote that cannot be asked is an error, not a warning: in CI,
     /// and for the merge gate, where a change unseen would be shipped.
     strict: bool,
+    /// Whether a lazy repository's remote is asked for a topic's branch.
+    topic_remotes: bool,
 }
 
 impl<'a> GitStores<'a> {
@@ -118,7 +120,15 @@ impl<'a> GitStores<'a> {
                 .unwrap_or_default(),
             remote_topics: Mutex::new(HashMap::new()),
             strict: crate::git::is_ci(),
+            topic_remotes: true,
         }
+    }
+
+    /// Never ask a lazy repository's remote for a topic's branch: see
+    /// [`crate::resolve::Network::NewTopic`].
+    pub fn without_topic_remotes(mut self) -> Self {
+        self.topic_remotes = false;
+        self
     }
 
     /// Fail on a lazy remote that cannot be asked, as CI always does.
@@ -538,6 +548,10 @@ impl Repos for GitStores<'_> {
     }
 
     fn remote_topic(&self, url: &str, topic: &str) -> Result<bool> {
+        // Its store's own branches were read before this is asked.
+        if !self.topic_remotes {
+            return Ok(false);
+        }
         // Offline, what its store last saw, when it has one: a lazy
         // repository may have none, and then nothing says it has the branch.
         // So too for a placement fetching only on a miss, as the git hooks'
@@ -589,7 +603,7 @@ impl Repos for GitStores<'_> {
     }
 
     fn prepare_topic(&self, urls: &[String], topic: &str) {
-        if !self.online || urls.len() < 2 {
+        if !self.online || !self.topic_remotes || urls.len() < 2 {
             return;
         }
         std::thread::scope(|scope| {

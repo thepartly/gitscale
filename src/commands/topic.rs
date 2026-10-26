@@ -133,13 +133,23 @@ impl Ctx<'_> {
 
     /// Place the workspace at `root`, online.
     fn place(&self, root: &Path, out: &mut dyn Write, err: &mut dyn Write) -> Result<()> {
+        self.place_with(root, Network::Online, out, err)
+    }
+
+    fn place_with(
+        &self,
+        root: &Path,
+        network: Network,
+        out: &mut dyn Write,
+        err: &mut dyn Write,
+    ) -> Result<()> {
         let config = load_config(&root.join(CONFIG_FILENAME))?;
         crate::commands::sync::place(
             &config,
             root,
             &crate::commands::sync::Placement {
                 dirs: &[],
-                network: Network::Online,
+                network,
                 force: false,
                 leave: None,
                 heading: "",
@@ -986,7 +996,7 @@ fn start_topic(
         }
         writeln!(out, "created {}", relative_to(&cwd, &dest))?;
         if dest.join(CONFIG_FILENAME).is_file() {
-            ctx.place(&dest, out, err)?;
+            ctx.place_with(&dest, Network::NewTopic, out, err)?;
         }
         writeln!(out, "cd {}", relative_to(&cwd, &dest))?;
         return Ok(());
@@ -1001,7 +1011,7 @@ fn start_topic(
         carry(root, &from, &branch, ctx.no_cache);
     }
     writeln!(out, "started {} from {}", branch, base)?;
-    ctx.place(root, out, err)
+    ctx.place_with(root, Network::NewTopic, out, err)
 }
 
 /// Make the remote's `branch` the upstream of the local one in the worktree
