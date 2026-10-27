@@ -2253,3 +2253,32 @@ fn normal_062_join_dependants_climbs_one_level_from_the_topics_changes() {
     assert_eq!(branch(&ws.join("imports/c")), None);
     assert_eq!(branch(&ws).as_deref(), Some("feat/climb"));
 }
+
+/// A join and a leave are placements, so `post_sync` runs after each, as it
+/// does after a sync: whatever it sets up for the workspace's checkouts sees
+/// the one that moved. A join that fails runs nothing.
+#[test]
+fn normal_067_join_and_leave_run_post_sync() {
+    let f = fixture(
+        "topic_post_sync",
+        "[hooks]\npost_sync = \"echo ran >> .post-sync-count\"\n\n",
+    );
+    let ws = f.clone_root("ws");
+    let count = || {
+        std::fs::read_to_string(ws.join(".post-sync-count"))
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
+    let synced = count();
+    run_git_pub(&ws, &["switch", "-q", "-c", "feat/x"]);
+
+    ok(&gs(&ws, &["topic", "join", "imports/core"]));
+    assert_eq!(count(), synced + 1, "join");
+    ok(&gs(&ws, &["topic", "leave", "imports/core"]));
+    assert_eq!(count(), synced + 2, "leave");
+
+    let out = gs(&ws, &["topic", "join", "imports/nothing"]);
+    assert!(!out.success, "{}", out.stdout);
+    assert_eq!(count(), synced + 2, "a failed join");
+}
