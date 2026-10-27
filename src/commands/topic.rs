@@ -593,6 +593,7 @@ fn join_or_leave(
     };
     let color = crate::output::stderr();
     let mut failed = 0;
+    let mut placed = 0;
     for (dir, slot) in targets {
         let done = slot.and_then(|slot| {
             if leave {
@@ -609,7 +610,10 @@ fn join_or_leave(
             }
         });
         match done {
-            Ok(message) => writeln!(out, "{}", message)?,
+            Ok(message) => {
+                placed += 1;
+                writeln!(out, "{}", message)?
+            }
             Err(e) => {
                 failed += 1;
                 writeln!(
@@ -634,6 +638,11 @@ fn join_or_leave(
                 "joined to the topic"
             }
         );
+    }
+    // A join or leave is a placement, like a sync: what `post_sync` sets up
+    // for the workspace's checkouts has to see this one too.
+    if placed > 0 {
+        crate::hooks::run_post_sync(&config.hooks, &config_root, ctx.verbose, out)?;
     }
     Ok(())
 }

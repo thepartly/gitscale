@@ -43,9 +43,10 @@ on_pull_error = "warn"
 
 Runs at the end of every [placement](stores.md#placement), when every step
 of it succeeded: `git scale sync`, `git scale pull`, `require` and `unrequire`,
-any git command run across the workspace that moved a `HEAD`, and the
-[git hook](#git-hooks)'s. It is executed via `sh -c` with the workspace root as
-the working directory. A non-zero exit fails the GitScale command.
+`git topic join` and `leave`, any git command run across the workspace that
+moved a `HEAD`, and the [git hook](#git-hooks)'s. It is executed via `sh -c`
+with the workspace root as the working directory. A non-zero exit fails the
+GitScale command.
 
 It does not run after `git scale fetch`, `ls`, `explain`, `clean` or `gc`, nor
 after a git command that moved nothing.
