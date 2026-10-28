@@ -881,7 +881,33 @@ fn perf_030_join_and_leave_ask_no_other_lazy_remote() {
     assert_eq!(branch(&ws.join("imports/core")).as_deref(), Some("feat"));
     let asked = round_trips(&f, &ws, &["topic", "leave", "imports/core"], &fixtures);
     assert_eq!(asked, 0, "topic leave asked the lazy remote");
-    assert!(!ws.join("imports/fixtures").exists());
+    assert_eq!(branch(&ws.join("imports/core")), None);
+}
+
+/// A lazy repository whose store already fetched the topic's branch, for
+/// another worktree of the root, joins that branch: asking no remote, the
+/// store's refs still say it has one.
+#[test]
+fn edge_032_join_takes_a_branch_the_shared_store_already_fetched() {
+    let (f, fixtures) = lazy_fixture("lazy_join_store_branch");
+    run_git_pub(&fixtures, &["branch", "feat", "main"]);
+    let tip = f.env.push_commit(&fixtures, "feat", "data.txt", "on feat");
+    let app = f.env.repos_remote.join("app");
+    bare_clone(&f.root, &app);
+    ok(&gs(&app, &["topic", "switch", "main"]));
+    ok(&gs(&app, &["topic", "start", "other"]));
+    // The fixtures store, shared by every worktree, fetches origin/feat.
+    ok(&gs(
+        &app.join("other"),
+        &["topic", "join", "imports/fixtures"],
+    ));
+    ok(&gs(&app, &["topic", "start", "feat"]));
+    let wt = app.join("feat");
+
+    ok(&gs(&wt, &["topic", "join", "imports/fixtures"]));
+    let dest = wt.join("imports/fixtures");
+    assert_eq!(branch(&dest).as_deref(), Some("feat"));
+    assert_eq!(head(&dest), tip);
 }
 
 /// `finish` fetches a store on the topic once, though both its check of the

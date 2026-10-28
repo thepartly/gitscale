@@ -548,16 +548,13 @@ impl Repos for GitStores<'_> {
     }
 
     fn remote_topic(&self, url: &str, topic: &str) -> Result<bool> {
-        // Its store's own branches were read before this is asked.
-        if !self.topic_remotes {
-            return Ok(false);
-        }
         // Offline, what its store last saw, when it has one: a lazy
         // repository may have none, and then nothing says it has the branch.
         // So too for a placement fetching only on a miss, as the git hooks'
-        // is: asking every lazy remote would cost each `git switch` a round
-        // trip, and `git scale sync` and CI ask.
-        if !self.online {
+        // is, and for one that asks no lazy remote: asking every lazy remote
+        // would cost each `git switch` or `git topic join` a round trip, and
+        // `git scale sync` and CI ask.
+        if !self.online || !self.topic_remotes {
             let path = self.path(url);
             let stored = match self.store(url) {
                 Store::Repo => is_store(&path),

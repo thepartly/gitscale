@@ -154,12 +154,12 @@ pub enum Network {
     /// most once.
     OnMiss,
     /// Online, but no lazy repository's remote is asked for the topic's
-    /// branch: only what the command names, or what is on disk, is placed.
-    /// For the topic commands that touch a few checkouts: `start`, whose
-    /// name is new on the root's remote, so a lazy remote with the branch is
-    /// rare, and `join` and `leave`, which place only what they name. Asking
-    /// every lazy remote costs each a round trip; `switch` and `git scale
-    /// sync` still ask.
+    /// branch: whether one has it is what its store last fetched, as
+    /// offline. For the topic commands that touch few checkouts: `start`,
+    /// whose name is new on the root's remote, so a lazy remote with the
+    /// branch is rare, and `join` and `leave`, which place only what they
+    /// name. Asking every lazy remote costs each a round trip; `switch` and
+    /// `git scale sync` still ask.
     Scoped,
 }
 
