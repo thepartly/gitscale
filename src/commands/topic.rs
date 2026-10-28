@@ -563,10 +563,11 @@ fn join_or_leave(
             }
         }
     }
-    let resolution = crate::resolve::workspace_naming(
+    // Only the checkouts named are placed, so no other lazy remote is asked.
+    let resolution = crate::resolve::workspace_with_naming(
         &config,
         &config_root,
-        true,
+        Network::Scoped,
         &sources,
         Some(&artefacts),
         ctx.verbose,
@@ -996,7 +997,7 @@ fn start_topic(
         }
         writeln!(out, "created {}", relative_to(&cwd, &dest))?;
         if dest.join(CONFIG_FILENAME).is_file() {
-            ctx.place_with(&dest, Network::NewTopic, out, err)?;
+            ctx.place_with(&dest, Network::Scoped, out, err)?;
         }
         writeln!(out, "cd {}", relative_to(&cwd, &dest))?;
         return Ok(());
@@ -1011,7 +1012,7 @@ fn start_topic(
         carry(root, &from, &branch, ctx.no_cache);
     }
     writeln!(out, "started {} from {}", branch, base)?;
-    ctx.place_with(root, Network::NewTopic, out, err)
+    ctx.place_with(root, Network::Scoped, out, err)
 }
 
 /// Make the remote's `branch` the upstream of the local one in the worktree
@@ -1897,8 +1898,9 @@ fn finish(
     // `git topic leave` — or, with --force, back to their pins. 3.
     // Uncommitted changes in whatever moves or goes are refused, --force or
     // not: nothing else holds them.
+    let mut fetched = Fetched::new();
     if let Some(at) = &worktree {
-        let on_topic = children_on_topic(at, ctx.no_cache, err)?;
+        let on_topic = children_on_topic(at, ctx.no_cache, &mut fetched, err)?;
         let still: Vec<&(String, Option<bool>)> = on_topic
             .iter()
             .filter(|(_, settled)| *settled != Some(true))
@@ -1979,23 +1981,18 @@ fn finish(
 
     // 5. The topic's branches on the remotes: each one its default branch
     // already holds goes, once the local work below is done; the rest stay.
-    // A store is fetched first, so a merge since its last fetch counts; the
-    // root was fetched above.
+    // A store is fetched first, so a merge since its last fetch counts, unless
+    // step 2 fetched it already; the root was fetched above.
     let mut remote_go: Vec<RemoteBranch> = Vec::new();
     let mut remote_kept: Vec<(String, String, String)> = Vec::new();
     for (label, repo_dir, local) in &branches {
         let into = if label == "." {
             base.clone()
         } else {
-            let fetched = crate::git::run_git(
-                &["fetch", "--quiet", "--prune", "origin"],
-                Some(repo_dir),
-                true,
-            );
-            if let Err(e) = fetched {
+            if let Err(e) = fetch_once(&mut fetched, repo_dir) {
                 writeln!(
                     err,
-                    "warning: cannot fetch {}: {:#}; its remote branch is left alone",
+                    "warning: cannot fetch {}: {}; its remote branch is left alone",
                     label, e
                 )?;
                 continue;
@@ -2222,6 +2219,7 @@ fn uncommitted_work(root: &Path, moving: &[String], removing: bool, no_cache: bo
 fn children_on_topic(
     root: &Path,
     no_cache: bool,
+    fetched: &mut Fetched,
     err: &mut dyn Write,
 ) -> Result<Vec<(String, Option<bool>)>> {
     let config = load_config(&root.join(CONFIG_FILENAME))?;
@@ -2246,14 +2244,10 @@ fn children_on_topic(
             if Follows::of(&store, revision.as_deref()) == Follows::Release {
                 return Ok((slot.directory.clone(), None));
             }
-            if let Err(e) = crate::git::run_git(
-                &["fetch", "--quiet", "--prune", "origin"],
-                Some(&store),
-                true,
-            ) {
+            if let Err(e) = fetch_once(fetched, &store) {
                 writeln!(
                     err,
-                    "warning: cannot fetch {}: {:#}; deciding on what it last fetched",
+                    "warning: cannot fetch {}: {}; deciding on what it last fetched",
                     slot.directory, e
                 )?;
             }
@@ -2265,6 +2259,28 @@ fn children_on_topic(
             ))
         })
         .collect()
+}
+
+/// What each store's fetch from its remote said, during one `finish`.
+type Fetched = BTreeMap<PathBuf, std::result::Result<(), String>>;
+
+/// Fetch a store from its remote, once per `finish`: the checks of its
+/// children and of its remote branches both read it, and each fetch is a
+/// round trip. A second ask gets what the first fetch said.
+fn fetch_once(fetched: &mut Fetched, store: &Path) -> std::result::Result<(), String> {
+    let key = store.canonicalize().unwrap_or_else(|_| store.to_path_buf());
+    fetched
+        .entry(key)
+        .or_insert_with(|| {
+            crate::git::run_git(
+                &["fetch", "--quiet", "--prune", "origin"],
+                Some(store),
+                true,
+            )
+            .map(|_| ())
+            .map_err(|e| format!("{:#}", e))
+        })
+        .clone()
 }
 
 /// The branch a store's remote-tracking `reference` names, for what status

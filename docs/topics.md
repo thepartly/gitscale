@@ -87,10 +87,10 @@ remote has the branch joins it, the rest stay at their pins. A
 [lazy](dependencies.md#only-when-needed-lazy) one not on disk joins the same
 way after `switch`, its remote asked for the branch with one ref
 advertisement; one whose branch exists nowhere stays out. `start` asks no lazy
-remote: the name is new on the root's remote, so a lazy repository with the
-branch already is rare, and asking each one is a round trip on every start.
-Such a repository joins the branch it has when `git topic join` names it, or
-at the next placement that asks, such as `git scale sync`.
+remote, only its store: the name is new on the root's remote, so a lazy
+repository with the branch already is rare, and asking each one is a round
+trip on every start. Such a repository joins the branch it has when `git topic
+join` names it, or at the next placement that asks, such as `git scale sync`.
 
 `start` refuses a name that exists here or on the remote (`NAME exists: git
 topic switch NAME`), a name the root pins (`NAME is pinned, not a topic`), and
@@ -146,7 +146,9 @@ checkouts joined to it. Each one its default branch already holds — or, for
 a checkout whose pin follows a branch, that branch — by the content test, so
 a squash, a rebase or a merge commit counts — is deleted,
 only while it is still at the tip checked, so a push made since survives. A
-store is fetched first, so a merge since its last fetch counts. Each one the
+store is fetched first, so a merge since its last fetch counts, and once per
+`finish`, whichever check reads it first: a fetch that failed is not tried
+again, and that store's remote branch stays. Each one the
 default branch does not hold stays, named with the command that drops it. A
 branch already gone — deleted by `git upgrade`, or by the hosting service on
 merge — says nothing. A deletion that fails, by permissions or a protected
@@ -328,6 +330,11 @@ paths from the current directory; see [directory arguments](cli.md#directory-arg
 - Off a topic, `join` says to start one: `git topic start <name>`.
 - With no directory it fails, as `git add` does: `no checkout named`, with a
   hint to use `.` when the current directory is inside a checkout.
+
+`join` and `leave` place only the checkouts they name, and ask no lazy
+remote for the topic's branch: whether another lazy repository has it is
+what its store last fetched. The stores of the other checkouts resolution
+reads are fetched as for any placement.
 
 **`git topic join --dependants`** joins the checkouts whose configs ask for
 others — never the root:

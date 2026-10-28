@@ -154,10 +154,13 @@ pub enum Network {
     /// most once.
     OnMiss,
     /// Online, but no lazy repository's remote is asked for the topic's
-    /// branch: `topic start` refused a name its root's remote has, so a
-    /// lazy remote with the branch is rare, and asking each costs a round
-    /// trip. `git topic join` and later placements still find it.
-    NewTopic,
+    /// branch: whether one has it is what its store last fetched, as
+    /// offline. For the topic commands that touch few checkouts: `start`,
+    /// whose name is new on the root's remote, so a lazy remote with the
+    /// branch is rare, and `join` and `leave`, which place only what they
+    /// name. Asking every lazy remote costs each a round trip; `switch` and
+    /// `git scale sync` still ask.
+    Scoped,
 }
 
 impl Network {
@@ -222,7 +225,7 @@ pub fn workspace_with_naming(
             verbose,
             named,
         ),
-        Network::NewTopic => resolve_with(
+        Network::Scoped => resolve_with(
             config,
             config_root,
             GitStores::new(config_root, sources, true, artefacts, verbose).without_topic_remotes(),

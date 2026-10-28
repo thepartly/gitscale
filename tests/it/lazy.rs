@@ -834,6 +834,30 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
     found
 }
 
+/// Run `args` in `dir` and count the round trips git made to `remote`: each
+/// `git-upload-pack` started for it, a fetch's or a ref advertisement's.
+fn round_trips(f: &Fixture, dir: &Path, args: &[&str], remote: &Path) -> usize {
+    let trace = f.env.repos_remote.join(format!("trace-{}", args.join("-")));
+    std::fs::create_dir_all(&trace).unwrap();
+    let out = gs_bin(dir, args, &[("GIT_TRACE2_EVENT", trace.to_str().unwrap())]);
+    ok(&out);
+    std::fs::read_dir(&trace)
+        .unwrap()
+        .flatten()
+        .map(|file| {
+            std::fs::read_to_string(file.path())
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| {
+                    l.contains("\"event\":\"start\"")
+                        && l.contains("\"git-upload-pack\"")
+                        && l.contains(remote.to_str().unwrap())
+                })
+                .count()
+        })
+        .sum()
+}
+
 /// `topic start` asks no lazy remote for the new topic's branch: its name is
 /// new on the root's remote, so the answer is almost always no, and each
 /// question is a round trip to a remote the task may never touch.
@@ -841,31 +865,65 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
 fn perf_028_topic_start_asks_no_lazy_remote() {
     let (f, fixtures) = lazy_fixture("lazy_start_asks_nothing");
     let ws = f.clone_root("ws");
-    let trace = f.env.repos_remote.join("start-trace");
-    std::fs::create_dir_all(&trace).unwrap();
-    let out = gs_bin(
-        &ws,
-        &["topic", "start", "feat"],
-        &[("GIT_TRACE2_EVENT", trace.to_str().unwrap())],
-    );
-    ok(&out);
-    let asked = std::fs::read_dir(&trace)
-        .unwrap()
-        .flatten()
-        .flat_map(|file| {
-            std::fs::read_to_string(file.path())
-                .unwrap_or_default()
-                .lines()
-                .filter(|l| {
-                    l.contains("\"event\":\"start\"")
-                        && l.contains("\"ls-remote\"")
-                        && l.contains(fixtures.to_str().unwrap())
-                })
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .count();
+    let asked = round_trips(&f, &ws, &["topic", "start", "feat"], &fixtures);
     assert_eq!(asked, 0, "topic start asked the lazy remote");
+}
+
+/// `topic join` and `leave` place only the checkouts they name, so they ask
+/// no other lazy remote for the topic's branch.
+#[test]
+fn perf_030_join_and_leave_ask_no_other_lazy_remote() {
+    let (f, fixtures) = lazy_fixture("lazy_join_asks_nothing");
+    let ws = f.clone_root("ws");
+    ok(&gs(&ws, &["topic", "start", "feat"]));
+    let asked = round_trips(&f, &ws, &["topic", "join", "imports/core"], &fixtures);
+    assert_eq!(asked, 0, "topic join asked the lazy remote");
+    assert_eq!(branch(&ws.join("imports/core")).as_deref(), Some("feat"));
+    let asked = round_trips(&f, &ws, &["topic", "leave", "imports/core"], &fixtures);
+    assert_eq!(asked, 0, "topic leave asked the lazy remote");
+    assert_eq!(branch(&ws.join("imports/core")), None);
+}
+
+/// A lazy repository whose store already fetched the topic's branch, for
+/// another worktree of the root, joins that branch: asking no remote, the
+/// store's refs still say it has one.
+#[test]
+fn edge_032_join_takes_a_branch_the_shared_store_already_fetched() {
+    let (f, fixtures) = lazy_fixture("lazy_join_store_branch");
+    run_git_pub(&fixtures, &["branch", "feat", "main"]);
+    let tip = f.env.push_commit(&fixtures, "feat", "data.txt", "on feat");
+    let app = f.env.repos_remote.join("app");
+    bare_clone(&f.root, &app);
+    ok(&gs(&app, &["topic", "switch", "main"]));
+    ok(&gs(&app, &["topic", "start", "other"]));
+    // The fixtures store, shared by every worktree, fetches origin/feat.
+    ok(&gs(
+        &app.join("other"),
+        &["topic", "join", "imports/fixtures"],
+    ));
+    ok(&gs(&app, &["topic", "start", "feat"]));
+    let wt = app.join("feat");
+
+    ok(&gs(&wt, &["topic", "join", "imports/fixtures"]));
+    let dest = wt.join("imports/fixtures");
+    assert_eq!(branch(&dest).as_deref(), Some("feat"));
+    assert_eq!(head(&dest), tip);
+}
+
+/// `finish` fetches a store on the topic once, though both its check of the
+/// children and its check of the remote branches read it.
+#[test]
+fn perf_031_finish_fetches_each_store_once() {
+    let (f, fixtures) = lazy_fixture("lazy_finish_fetches_once");
+    let app = f.env.repos_remote.join("app");
+    bare_clone(&f.root, &app);
+    ok(&gs(&app, &["topic", "switch", "main"]));
+    ok(&gs(&app, &["topic", "start", "feat"]));
+    let wt = app.join("feat");
+    ok(&gs(&wt, &["topic", "join", "imports/fixtures"]));
+    let fetches = round_trips(&f, &wt, &["topic", "finish", "--force"], &fixtures);
+    assert!(!wt.exists());
+    assert_eq!(fetches, 1, "finish fetched the store more than once");
 }
 
 /// A lazy repository whose remote already has the topic's branch, though the
