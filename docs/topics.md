@@ -333,7 +333,7 @@ paths from the current directory; see [directory arguments](cli.md#directory-arg
 
 `join` and `leave` place only the checkouts they name, and ask no lazy
 remote for the topic's branch: whether another lazy repository has it is
-what its store last fetched. The stores of the other checkouts resolution
+what its store last fetched, read without fetching it again. The stores of the other checkouts resolution
 reads are fetched as for any placement.
 
 **`git topic join --dependants`** joins the checkouts whose configs ask for

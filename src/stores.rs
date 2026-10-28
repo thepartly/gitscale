@@ -255,6 +255,14 @@ impl<'a> GitStores<'a> {
                 );
             }
         }
+        self.stored_refs(url, path)
+    }
+
+    /// The refs of `url`'s store at `path` as it last fetched them, or as its
+    /// registry last said: no remote is asked.
+    fn stored_refs(&self, url: &str, path: &Path) -> Result<Refs> {
+        let store = self.store(url);
+        let released = self.light_path(url).join(RELEASED_FILE);
         if released.is_file() {
             self.sourceless
                 .lock()
@@ -560,13 +568,27 @@ impl Repos for GitStores<'_> {
                 Store::Repo => is_store(&path),
                 Store::Light => path.join(REFS_FILE).is_file(),
             };
+            if !stored {
+                return Ok(false);
+            }
+            // Online, reading its refs fetches the store: a round trip, as
+            // asking would be. What this command fetched, or else what the
+            // store last fetched, is read instead.
+            let refs = if self.online {
+                let known = self.refs.lock().unwrap().get(&path).cloned();
+                match known {
+                    Some(known) => known.map_err(|e| anyhow!(e)),
+                    None => self.stored_refs(url, &path),
+                }
+            } else {
+                self.refs(url)
+            };
             let versioned = format!("{}@v", topic);
-            return Ok(stored
-                && self.refs(url).is_ok_and(|refs| {
-                    refs.branches
-                        .keys()
-                        .any(|b| b == topic || b.starts_with(&versioned))
-                }));
+            return Ok(refs.is_ok_and(|refs| {
+                refs.branches
+                    .keys()
+                    .any(|b| b == topic || b.starts_with(&versioned))
+            }));
         }
         let key = (crate::urls::normalize(url), topic.to_string());
         let known = self.remote_topics.lock().unwrap().get(&key).cloned();
