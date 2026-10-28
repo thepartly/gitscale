@@ -656,16 +656,15 @@ fn edge_021_an_unreachable_lazy_remote_is_a_warning_locally() {
     let (f, fixtures) = lazy_fixture("lazy_unreachable_local");
     let ws = f.clone_root("ws");
     std::fs::rename(&fixtures, fixtures.with_extension("moved")).unwrap();
+    ok(&gs(&ws, &["topic", "start", "feat"]));
     // The binary itself: the warning is on its stderr.
-    let out = gs_bin(&ws, &["topic", "start", "feat"], &[]);
+    let out = gs_bin(&ws, &["sync"], &[]);
     ok(&out);
     assert!(
         out.stderr.contains("cannot ask for branch feat"),
         "{}",
         out.stderr
     );
-    let out = gs(&ws, &["sync"]);
-    ok(&out);
     assert!(!ws.join("imports/fixtures").exists());
     ok(&gs(&ws, &["topic", "join", "imports/core"]));
     let out = gs(&ws, &["check"]);
@@ -833,4 +832,56 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
         }
     }
     found
+}
+
+/// `topic start` asks no lazy remote for the new topic's branch: its name is
+/// new on the root's remote, so the answer is almost always no, and each
+/// question is a round trip to a remote the task may never touch.
+#[test]
+fn perf_028_topic_start_asks_no_lazy_remote() {
+    let (f, fixtures) = lazy_fixture("lazy_start_asks_nothing");
+    let ws = f.clone_root("ws");
+    let trace = f.env.repos_remote.join("start-trace");
+    std::fs::create_dir_all(&trace).unwrap();
+    let out = gs_bin(
+        &ws,
+        &["topic", "start", "feat"],
+        &[("GIT_TRACE2_EVENT", trace.to_str().unwrap())],
+    );
+    ok(&out);
+    let asked = std::fs::read_dir(&trace)
+        .unwrap()
+        .flatten()
+        .flat_map(|file| {
+            std::fs::read_to_string(file.path())
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| {
+                    l.contains("\"event\":\"start\"")
+                        && l.contains("\"ls-remote\"")
+                        && l.contains(fixtures.to_str().unwrap())
+                })
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .count();
+    assert_eq!(asked, 0, "topic start asked the lazy remote");
+}
+
+/// A lazy repository whose remote already has the topic's branch, though the
+/// root's remote does not, stays out at `topic start`; joining it checks out
+/// that branch, not a new one from its pin.
+#[test]
+fn edge_029_join_takes_the_branch_a_lazy_remote_already_has() {
+    let (f, fixtures) = lazy_fixture("lazy_join_remote_branch");
+    run_git_pub(&fixtures, &["branch", "feat", "main"]);
+    let tip = f.env.push_commit(&fixtures, "feat", "data.txt", "on feat");
+    let ws = f.clone_root("ws");
+    ok(&gs(&ws, &["topic", "start", "feat"]));
+    assert!(!ws.join("imports/fixtures").exists());
+
+    ok(&gs(&ws, &["topic", "join", "imports/fixtures"]));
+    let dest = ws.join("imports/fixtures");
+    assert_eq!(branch(&dest).as_deref(), Some("feat"));
+    assert_eq!(head(&dest), tip);
 }

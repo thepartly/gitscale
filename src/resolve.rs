@@ -153,6 +153,11 @@ pub enum Network {
     /// for, and resolve again, while new gaps appear. Each store is fetched at
     /// most once.
     OnMiss,
+    /// Online, but no lazy repository's remote is asked for the topic's
+    /// branch: `topic start` refused a name its root's remote has, so a
+    /// lazy remote with the branch is rare, and asking each costs a round
+    /// trip. `git topic join` and later placements still find it.
+    NewTopic,
 }
 
 impl Network {
@@ -215,6 +220,13 @@ pub fn workspace_with_naming(
             sources,
             artefacts,
             verbose,
+            named,
+        ),
+        Network::NewTopic => resolve_with(
+            config,
+            config_root,
+            GitStores::new(config_root, sources, true, artefacts, verbose).without_topic_remotes(),
+            true,
             named,
         ),
         Network::OnMiss => {
