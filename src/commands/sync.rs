@@ -151,7 +151,7 @@ pub fn place(
         sources: &sources,
         artefacts: &artefacts,
         verbose,
-        fetch: matches!(opts.network.in_ci(), Network::Online | Network::NewTopic),
+        fetch: matches!(opts.network.in_ci(), Network::Online | Network::Scoped),
     };
 
     if !config.repos.is_empty() || !resolution.slots.is_empty() {

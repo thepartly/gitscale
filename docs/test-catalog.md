@@ -2,7 +2,7 @@
 
 Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Regenerate with `GITSCALE_UPDATE_CATALOG=1 cargo test --test it catalog::`. The naming rules are in [testing.md](testing.md).
 
-698 integration tests (309 normal, 225 edge, 145 error, 19 perf), 41 of them ignored; 172 unit tests.
+700 integration tests (309 normal, 225 edge, 145 error, 21 perf), 41 of them ignored; 172 unit tests.
 
 | Feature | normal | edge | error | perf | total |
 |---|---:|---:|---:|---:|---:|
@@ -19,7 +19,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | [forward](#forward) | 22 | 1 | 3 | 1 | 27 |
 | [hash](#hash) | 5 | 2 | 1 | 0 | 8 |
 | [hook](#hook) | 26 | 26 | 11 | 1 | 64 |
-| [lazy](#lazy) | 13 | 12 | 0 | 1 | 26 |
+| [lazy](#lazy) | 13 | 12 | 0 | 3 | 28 |
 | [links](#links) | 10 | 14 | 0 | 0 | 24 |
 | [ls](#ls) | 22 | 9 | 3 | 1 | 35 |
 | [man](#man) | 1 | 0 | 0 | 0 | 1 |
@@ -439,6 +439,8 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | lazy-027 | normal | `normal_027_upgrade_raises_a_lazy_dependency_left_out` | `git upgrade <dir>` raises a lazy dependency that is not placed: the raise needs its requests and its releases, not a checkout. |
 | lazy-028 | perf | `perf_028_topic_start_asks_no_lazy_remote` | `topic start` asks no lazy remote for the new topic's branch: its name is new on the root's remote, so the answer is almost always no, and each question is a round trip to a remote the task may never touch. |
 | lazy-029 | edge | `edge_029_join_takes_the_branch_a_lazy_remote_already_has` | A lazy repository whose remote already has the topic's branch, though the root's remote does not, stays out at `topic start`; joining it checks out that branch, not a new one from its pin. |
+| lazy-030 | perf | `perf_030_join_and_leave_ask_no_other_lazy_remote` | `topic join` and `leave` place only the checkouts they name, so they ask no other lazy remote for the topic's branch. |
+| lazy-031 | perf | `perf_031_finish_fetches_each_store_once` | `finish` fetches a store on the topic once, though both its check of the children and its check of the remote branches read it. |
 
 ### links
 

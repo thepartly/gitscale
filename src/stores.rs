@@ -125,7 +125,7 @@ impl<'a> GitStores<'a> {
     }
 
     /// Never ask a lazy repository's remote for a topic's branch: see
-    /// [`crate::resolve::Network::NewTopic`].
+    /// [`crate::resolve::Network::Scoped`].
     pub fn without_topic_remotes(mut self) -> Self {
         self.topic_remotes = false;
         self

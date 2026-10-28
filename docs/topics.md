@@ -146,7 +146,8 @@ checkouts joined to it. Each one its default branch already holds — or, for
 a checkout whose pin follows a branch, that branch — by the content test, so
 a squash, a rebase or a merge commit counts — is deleted,
 only while it is still at the tip checked, so a push made since survives. A
-store is fetched first, so a merge since its last fetch counts. Each one the
+store is fetched first, so a merge since its last fetch counts, and once per
+`finish`, whichever check reads it first. Each one the
 default branch does not hold stays, named with the command that drops it. A
 branch already gone — deleted by `git upgrade`, or by the hosting service on
 merge — says nothing. A deletion that fails, by permissions or a protected
@@ -328,6 +329,9 @@ paths from the current directory; see [directory arguments](cli.md#directory-arg
 - Off a topic, `join` says to start one: `git topic start <name>`.
 - With no directory it fails, as `git add` does: `no checkout named`, with a
   hint to use `.` when the current directory is inside a checkout.
+
+`join` and `leave` place only the checkouts they name: they fetch those
+checkouts' stores and ask no other lazy remote for the topic's branch.
 
 **`git topic join --dependants`** joins the checkouts whose configs ask for
 others — never the root:
