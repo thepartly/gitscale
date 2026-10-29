@@ -2,7 +2,7 @@
 
 Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Regenerate with `GITSCALE_UPDATE_CATALOG=1 cargo test --test it catalog::`. The naming rules are in [testing.md](testing.md).
 
-701 integration tests (309 normal, 226 edge, 145 error, 21 perf), 41 of them ignored; 172 unit tests.
+702 integration tests (309 normal, 226 edge, 145 error, 22 perf), 41 of them ignored; 172 unit tests.
 
 | Feature | normal | edge | error | perf | total |
 |---|---:|---:|---:|---:|---:|
@@ -19,7 +19,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | [forward](#forward) | 22 | 1 | 3 | 1 | 27 |
 | [hash](#hash) | 5 | 2 | 1 | 0 | 8 |
 | [hook](#hook) | 26 | 26 | 11 | 1 | 64 |
-| [lazy](#lazy) | 13 | 13 | 0 | 3 | 29 |
+| [lazy](#lazy) | 13 | 13 | 0 | 4 | 30 |
 | [links](#links) | 10 | 14 | 0 | 0 | 24 |
 | [ls](#ls) | 22 | 9 | 3 | 1 | 35 |
 | [man](#man) | 1 | 0 | 0 | 0 | 1 |
@@ -442,6 +442,7 @@ Generated from the sources by `tests/it/catalog.rs` — do not edit by hand. Reg
 | lazy-030 | perf | `perf_030_join_and_leave_ask_no_other_lazy_remote` | `topic join` and `leave` place only the checkouts they name, so they ask no other lazy remote for the topic's branch. |
 | lazy-031 | perf | `perf_031_finish_fetches_each_store_once` | `finish` fetches a store on the topic once, though both its check of the children and its check of the remote branches read it. |
 | lazy-032 | edge | `edge_032_join_takes_a_branch_the_shared_store_already_fetched` | A lazy repository whose store already fetched the topic's branch, for another worktree of the root, joins that branch: asking no remote, the store's refs still say it has one. |
+| lazy-033 | perf | `perf_033_scoped_placement_fetches_no_lazy_store` | A lazy repository's store that is already there is read, not fetched, by the placements that ask no lazy remote: `start`, and `join` and `leave` of another checkout. Fetching it would be a round trip to that remote each. |
 
 ### links
 

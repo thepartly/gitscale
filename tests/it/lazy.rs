@@ -884,6 +884,27 @@ fn perf_030_join_and_leave_ask_no_other_lazy_remote() {
     assert_eq!(branch(&ws.join("imports/core")), None);
 }
 
+/// A lazy repository's store that is already there is read, not fetched, by
+/// the placements that ask no lazy remote: `start`, and `join` and `leave` of
+/// another checkout. Fetching it would be a round trip to that remote each.
+#[test]
+fn perf_033_scoped_placement_fetches_no_lazy_store() {
+    let (f, fixtures) = lazy_fixture("lazy_scoped_store_unfetched");
+    let ws = f.clone_root("ws");
+    // Joined once, so its store is there; then left.
+    ok(&gs(&ws, &["topic", "start", "first"]));
+    ok(&gs(&ws, &["topic", "join", "imports/fixtures"]));
+    ok(&gs(&ws, &["topic", "leave", "imports/fixtures"]));
+    ok(&gs(&ws, &["topic", "switch", "main"]));
+
+    let asked = round_trips(&f, &ws, &["topic", "start", "feat"], &fixtures);
+    assert_eq!(asked, 0, "topic start fetched the lazy store");
+    let asked = round_trips(&f, &ws, &["topic", "join", "imports/core"], &fixtures);
+    assert_eq!(asked, 0, "topic join fetched the lazy store");
+    let asked = round_trips(&f, &ws, &["topic", "leave", "imports/core"], &fixtures);
+    assert_eq!(asked, 0, "topic leave fetched the lazy store");
+}
+
 /// A lazy repository whose store already fetched the topic's branch, for
 /// another worktree of the root, joins that branch: asking no remote, the
 /// store's refs still say it has one.
